@@ -1,0 +1,28 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "useDefineForClassFields": true,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedSideEffectImports": true,
+
+    // The CAS, the jet layer and the mesh builder index arrays constantly; an
+    // out-of-bounds read there is a silent wrong-geometry bug, not a crash.
+    "noUncheckedIndexedAccess": true,
+
+    "types": ["vitest/globals", "vite/client"]
+  },
+  "include": ["src", "tests"]
+}
