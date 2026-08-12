@@ -1,13 +1,18 @@
 import "./style.css";
-import { torus } from "./core/catalog/torus.ts";
-import { boundingSphere, buildSurfaceMesh } from "./core/mesh/grid.ts";
+import { buildSurface, CATALOG, defaultParams, type SurfaceSpec } from "./core/catalog/surfaces.ts";
+import { legendGradient } from "./core/geom/curvatureColor.ts";
+import { boundingSphere } from "./core/mesh/grid.ts";
+import { tessellate } from "./core/mesh/tessellate.ts";
 import { createDevice } from "./gl/device.ts";
 import { createRenderer } from "./gl/renderer.ts";
+import { mountPanel } from "./ui/panel.ts";
 
 /**
- * M0 entry point: prove the pipeline end to end — tessellate a hand-written
- * parametric surface in `core`, upload it, orbit it — before any of the CAS exists.
- * From M1, the surface comes from a parsed and differentiated user formula instead.
+ * M1 vertical slice: a formula becomes a surface with its curvature painted on it.
+ *
+ * Every layer is exercised — the text is parsed, differentiated symbolically, compiled
+ * to a jet evaluator, reduced to the fundamental forms, tessellated with exact normals
+ * and per-vertex Gaussian curvature, and drawn by the hand-written WebGL2 pass.
  */
 
 function fail(message: string) {
@@ -32,25 +37,34 @@ function main() {
   }
 
   const renderer = createRenderer(device);
-
-  const source = torus();
-  const mesh = buildSurfaceMesh(source, { resU: 160, resV: 220 });
-  renderer.setSurfaceMesh(mesh);
-
-  const { center, radius } = boundingSphere(mesh);
-  renderer.camera.frame(center, radius);
   renderer.start();
 
-  const readout = document.querySelector<HTMLElement>("#readout");
-  if (readout) {
-    readout.textContent = [
-      `${source.name}`,
-      `vertices    ${mesh.vertexCount.toLocaleString()}`,
-      `triangles   ${mesh.triangleCount.toLocaleString()}`,
-      `dropped     ${mesh.droppedVertices} vertices, ${mesh.droppedTriangles} triangles`,
-      `radius      ${radius.toFixed(3)}`,
-    ].join("\n");
-  }
+  let framed = false;
+
+  /** Compile, tessellate, upload. The whole pipeline, on every edit. */
+  const show = (spec: SurfaceSpec, params: Float64Array, refit: boolean) => {
+    const built = buildSurface(spec);
+    const mesh = tessellate(built.surface, params, { resU: 140, resV: 180 });
+    renderer.setSurfaceMesh(mesh);
+
+    if (refit || !framed) {
+      const { center, radius } = boundingSphere(mesh);
+      renderer.camera.frame(center, radius);
+      framed = true;
+    }
+    return { built, mesh };
+  };
+
+  mountPanel({
+    catalog: CATALOG,
+    legendGradient: legendGradient(),
+    show,
+    defaultParams,
+    onCurvatureToggle: (on) => {
+      renderer.setCurvatureMix(on ? 1 : 0);
+      renderer.invalidate();
+    },
+  });
 }
 
 main();

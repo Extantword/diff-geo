@@ -1,4 +1,4 @@
-import type { SurfaceMesh } from "../core/mesh/grid.ts";
+import type { TessellatedSurface } from "../core/mesh/tessellate.ts";
 import { createCamera, type Camera } from "./camera.ts";
 import type { Device } from "./device.ts";
 import { createSurfacePass, type SurfacePass } from "./passes/surface.ts";
@@ -14,7 +14,9 @@ import { createSurfacePass, type SurfacePass } from "./passes/surface.ts";
  */
 export interface Renderer {
   camera: Camera;
-  setSurfaceMesh(mesh: SurfaceMesh): void;
+  setSurfaceMesh(mesh: TessellatedSurface): void;
+  /** 0 shows a flat colour, 1 shows Gaussian curvature. */
+  setCurvatureMix(amount: number): void;
   /** Request one redraw on the next frame. */
   invalidate(): void;
   start(): void;
@@ -70,6 +72,11 @@ export function createRenderer(device: Device): Renderer {
 
     setSurfaceMesh(mesh) {
       surfacePass.setMesh(mesh);
+      invalidate();
+    },
+
+    setCurvatureMix(amount) {
+      surfacePass.setCurvatureMix(amount);
       invalidate();
     },
 

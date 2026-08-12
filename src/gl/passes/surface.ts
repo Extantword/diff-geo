@@ -1,4 +1,4 @@
-import type { SurfaceMesh } from "../../core/mesh/grid.ts";
+import type { TessellatedSurface } from "../../core/mesh/tessellate.ts";
 import { createProgram, type Program } from "../program.ts";
 import { surfaceFragment, surfaceVertex } from "../shaders/surface.ts";
 import type { Mat4, V3 } from "../mat4.ts";
@@ -11,8 +11,10 @@ import type { Mat4, V3 } from "../mat4.ts";
  * expensive operation and must be driven by state changes, never by the render loop.
  */
 export interface SurfacePass {
-  setMesh(mesh: SurfaceMesh): void;
+  setMesh(mesh: TessellatedSurface): void;
   draw(view: Mat4, projection: Mat4, eye: V3): void;
+  /** 0 shows the flat base colour, 1 shows Gaussian curvature */
+  setCurvatureMix(amount: number): void;
   dispose(): void;
 }
 
@@ -21,14 +23,19 @@ export interface SurfacePassOpts {
   /** chart-grid line spacing in (u, v) units; 0 disables that axis */
   gridSpacing?: [number, number];
   gridOpacity?: number;
+  curvatureMix?: number;
 }
 
 export function createSurfacePass(
   gl: WebGL2RenderingContext,
   opts: SurfacePassOpts = {},
 ): SurfacePass {
-  const { baseColor = [0.42, 0.55, 0.68], gridSpacing = [Math.PI / 4, Math.PI / 4], gridOpacity = 1 } =
-    opts;
+  const {
+    baseColor = [0.42, 0.55, 0.68],
+    gridSpacing = [Math.PI / 4, Math.PI / 4],
+    gridOpacity = 1,
+    curvatureMix = 1,
+  } = opts;
 
   const program: Program = createProgram(gl, surfaceVertex, surfaceFragment, "surface");
 
@@ -36,14 +43,16 @@ export function createSurfacePass(
   const positionBuffer = gl.createBuffer();
   const normalBuffer = gl.createBuffer();
   const chartBuffer = gl.createBuffer();
+  const colorBuffer = gl.createBuffer();
   const indexBuffer = gl.createBuffer();
-  if (!vao || !positionBuffer || !normalBuffer || !chartBuffer || !indexBuffer) {
+  if (!vao || !positionBuffer || !normalBuffer || !chartBuffer || !colorBuffer || !indexBuffer) {
     throw new Error("surface pass: could not allocate GPU buffers");
   }
 
   const aPosition = program.attribute("aPosition");
   const aNormal = program.attribute("aNormal");
   const aChart = program.attribute("aChart");
+  const aColor = program.attribute("aColor");
 
   gl.bindVertexArray(vao);
   const bindFloatAttrib = (buffer: WebGLBuffer, location: number, size: number) => {
@@ -56,10 +65,12 @@ export function createSurfacePass(
   bindFloatAttrib(positionBuffer, aPosition, 3);
   bindFloatAttrib(normalBuffer, aNormal, 3);
   bindFloatAttrib(chartBuffer, aChart, 2);
+  bindFloatAttrib(colorBuffer, aColor, 3);
   gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
   gl.bindVertexArray(null);
 
   let indexCount = 0;
+  let mix = curvatureMix;
 
   return {
     setMesh(mesh) {
@@ -70,10 +81,16 @@ export function createSurfacePass(
       gl.bufferData(gl.ARRAY_BUFFER, mesh.normals, gl.DYNAMIC_DRAW);
       gl.bindBuffer(gl.ARRAY_BUFFER, chartBuffer);
       gl.bufferData(gl.ARRAY_BUFFER, mesh.chart, gl.DYNAMIC_DRAW);
+      gl.bindBuffer(gl.ARRAY_BUFFER, colorBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, mesh.colors, gl.DYNAMIC_DRAW);
       gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
       gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, mesh.indices, gl.DYNAMIC_DRAW);
       gl.bindVertexArray(null);
       indexCount = mesh.indices.length;
+    },
+
+    setCurvatureMix(amount) {
+      mix = amount;
     },
 
     draw(view, projection, eye) {
@@ -90,6 +107,7 @@ export function createSurfacePass(
       );
       gl.uniform2f(program.uniform("uGridSpacing"), gridSpacing[0], gridSpacing[1]);
       gl.uniform1f(program.uniform("uGridOpacity"), gridOpacity);
+      gl.uniform1f(program.uniform("uCurvatureMix"), mix);
 
       // Open surfaces are visible from both sides, so no back-face culling.
       gl.disable(gl.CULL_FACE);
@@ -106,6 +124,7 @@ export function createSurfacePass(
       gl.deleteBuffer(positionBuffer);
       gl.deleteBuffer(normalBuffer);
       gl.deleteBuffer(chartBuffer);
+      gl.deleteBuffer(colorBuffer);
       gl.deleteBuffer(indexBuffer);
     },
   };

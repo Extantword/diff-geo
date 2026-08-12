@@ -13,6 +13,7 @@ precision highp float;
 in vec3 aPosition;
 in vec3 aNormal;
 in vec2 aChart;
+in vec3 aColor;
 
 uniform mat4 uView;
 uniform mat4 uProjection;
@@ -20,11 +21,13 @@ uniform mat4 uProjection;
 out vec3 vWorldPosition;
 out vec3 vNormal;
 out vec2 vChart;
+out vec3 vColor;
 
 void main() {
   vWorldPosition = aPosition;
   vNormal = aNormal;
   vChart = aChart;
+  vColor = aColor;
   gl_Position = uProjection * uView * vec4(aPosition, 1.0);
 }
 `;
@@ -35,11 +38,14 @@ precision highp float;
 in vec3 vWorldPosition;
 in vec3 vNormal;
 in vec2 vChart;
+in vec3 vColor;
 
 uniform vec3 uEye;
 uniform vec3 uBaseColor;
 uniform float uGridOpacity;
 uniform vec2 uGridSpacing;
+/** 0 = flat base colour, 1 = per-vertex curvature colour */
+uniform float uCurvatureMix;
 
 out vec4 fragColor;
 
@@ -60,11 +66,12 @@ float chartGrid(vec2 uv, vec2 spacing) {
 
 void main() {
   vec3 n = normalize(vNormal);
+  vec3 albedo = mix(uBaseColor, vColor, uCurvatureMix);
 
   /* A zero normal means the mesh builder found a degenerate vertex (a cone tip, a
      chart pole). Shade it flat rather than letting normalize() produce NaN. */
   if (dot(vNormal, vNormal) < 1e-12) {
-    fragColor = vec4(uBaseColor * AMBIENT, 1.0);
+    fragColor = vec4(albedo * AMBIENT, 1.0);
     return;
   }
 
@@ -78,7 +85,7 @@ void main() {
      what makes the shape legible when curvature colours flatten the diffuse term. */
   float rim = pow(1.0 - max(dot(n, viewDir), 0.0), 3.0) * 0.25;
 
-  vec3 color = uBaseColor * (AMBIENT + KEY * key + FILL * fill) + vec3(rim);
+  vec3 color = albedo * (AMBIENT + KEY * key + FILL * fill) + vec3(rim);
 
   float grid = chartGrid(vChart, uGridSpacing) * uGridOpacity;
   color = mix(color, vec3(0.85, 0.92, 0.98), grid * 0.35);

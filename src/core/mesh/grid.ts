@@ -32,11 +32,45 @@ export interface GridOpts {
 }
 
 /**
+ * Maps each grid vertex to the canonical vertex it shares a surface point with.
+ *
+ * A periodic chart duplicates its seam: X(0,v) and X(2π,v) are the same point of the
+ * surface, but the two vertices need *distinct* chart coordinates, or the (u,v) attribute
+ * runs backwards across the seam strip and smears both the chart grid and the pick result
+ * over the whole domain.
+ *
+ * So positions stay duplicated while **normals must not be** — a normal taken from only
+ * one side of the seam leaves a visibly lit stripe down the torus, which is exactly the
+ * artifact the precedent has. Shading data is read through this table; per-vertex
+ * attributes that must stay distinct are not.
+ */
+export function periodicCanonical(
+  resU: number,
+  resV: number,
+  periodicU: boolean,
+  periodicV: boolean,
+): Int32Array {
+  const stride = resV + 1;
+  const canon = new Int32Array((resU + 1) * stride);
+  for (let i = 0; i <= resU; i++) {
+    for (let j = 0; j <= resV; j++) {
+      const ci = periodicU && i === resU ? 0 : i;
+      const cj = periodicV && j === resV ? 0 : j;
+      canon[i * stride + j] = ci * stride + cj;
+    }
+  }
+  return canon;
+}
+
+/**
  * Centre and radius of a sphere enclosing the finite part of a mesh — enough to
  * frame the camera. Uses the midpoint of the AABB rather than the centroid so that
  * a dense pole does not drag the framing off centre.
  */
-export function boundingSphere(mesh: SurfaceMesh): { center: Vec3; radius: number } {
+export function boundingSphere(mesh: {
+  positions: Float32Array;
+  vertexCount: number;
+}): { center: Vec3; radius: number } {
   let minX = Infinity;
   let minY = Infinity;
   let minZ = Infinity;
@@ -134,27 +168,7 @@ export function buildSurfaceMesh(src: ParametricSource, opts: GridOpts = {}): Su
   // than sprinkling `!` through the loops below.
   const vertexAt = (k: number): Vec3 => [pos[k * 3]!, pos[k * 3 + 1]!, pos[k * 3 + 2]!];
 
-  /**
-   * Seam welding for periodic charts.
-   *
-   * A periodic chart duplicates its seam: X(0,v) and X(2π,v) are the same point of
-   * the surface, but the two vertices need *distinct* chart coordinates, or the
-   * (u,v) attribute would run backwards across the seam strip and smear both the
-   * chart grid and the pick result over the whole domain.
-   *
-   * So positions stay duplicated while normals must not be — a normal averaged from
-   * only one side of the seam leaves a visibly lit stripe down the torus (the
-   * precedent has exactly this artifact). Face normals therefore accumulate at a
-   * canonical index, and every duplicate reads that same accumulated value.
-   */
-  const canon = new Int32Array(vertexCount);
-  for (let i = 0; i < nU; i++) {
-    for (let j = 0; j < nV; j++) {
-      const ci = src.periodicU && i === resU ? 0 : i;
-      const cj = src.periodicV && j === resV ? 0 : j;
-      canon[i * stride + j] = ci * stride + cj;
-    }
-  }
+  const canon = periodicCanonical(resU, resV, src.periodicU, src.periodicV);
 
   const indices: number[] = [];
   const nrm = new Float64Array(vertexCount * 3);
