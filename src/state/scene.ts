@@ -8,7 +8,14 @@ import { compileScalar } from "../core/expr/eval.ts";
 import { tessellate, type TessellatedSurface } from "../core/mesh/tessellate.ts";
 import type { LineGroup, Polyline } from "../gl/passes/lines.ts";
 import type { Item, RowId } from "./graph.ts";
-import { chartGrid, chartLift, pushForward, type ChartBounds } from "./chart.ts";
+import {
+  chartGrid,
+  chartLift,
+  pushForward,
+  sampleChartGraph,
+  sampleChartRelation,
+  type ChartBounds,
+} from "./chart.ts";
 
 /**
  * Turning a resolved document into things on screen.
@@ -367,6 +374,76 @@ export function buildScene(request: SceneRequest): Scene {
     // The lift needs the scene's size, which is only known once the meshes exist.
     const provisional = meshes.length > 0 ? extentOfMeshes(meshes) : 1;
     const lift = chartLift(provisional, resolution, curvatureScale);
+
+    // Graphs v = f(u) and relations F(u,v) = 0 are chart objects by construction — no toggle
+    // needed, because there is nothing else they could mean.
+    for (const item of items) {
+      if (item.kind !== "chartGraph") continue;
+      try {
+        const paramNames = [...item.params];
+        const result = sampleChartGraph(
+          {
+            rowId: item.rowId,
+            body: item.comps[0]!,
+            params: paramNames,
+            variable: (item.vars[0] === "v" ? "v" : "u") as "u" | "v",
+            colorIndex: chartColorIndex++,
+          },
+          chartBounds,
+          primary.surface,
+          packParameters(paramNames, parameters, declared),
+          lift,
+        );
+        chartCurves.push(result.chart);
+        if (result.surface) lines.push({ polylines: [result.surface], style: { widthPx: 4 } });
+        reports.push({
+          rowId: item.rowId,
+          info:
+            item.vars[0] === "v"
+              ? `u = ${item.name ?? "f"}(v) in the chart`
+              : `v = ${item.name ?? "f"}(u) in the chart`,
+          warning:
+            result.outsideFraction > 0.02
+              ? `${Math.round(result.outsideFraction * 100)}% of the graph leaves the domain`
+              : undefined,
+        });
+      } catch (thrown) {
+        reports.push({ rowId: item.rowId, error: messageOf(thrown) });
+      }
+    }
+
+    for (const item of items) {
+      if (item.kind !== "chartRelation") continue;
+      try {
+        const paramNames = [...item.params];
+        const result = sampleChartRelation(
+          {
+            rowId: item.rowId,
+            comps: item.comps,
+            params: paramNames,
+            colorIndex: chartColorIndex++,
+          },
+          chartBounds,
+          primary.surface,
+          packParameters(paramNames, parameters, declared),
+          lift,
+          Math.max(resolution, 120),
+        );
+        chartCurves.push(...result.chart);
+        if (result.surface.length > 0) {
+          lines.push({ polylines: result.surface, style: { widthPx: 4 } });
+        }
+        reports.push({
+          rowId: item.rowId,
+          info:
+            result.segmentCount === 0
+              ? "no solutions in this domain"
+              : `${result.segmentCount} contour segments`,
+        });
+      } catch (thrown) {
+        reports.push({ rowId: item.rowId, error: messageOf(thrown) });
+      }
+    }
 
     for (const item of items) {
       if (item.kind !== "planeCurve" || !inChart.has(item.rowId)) continue;

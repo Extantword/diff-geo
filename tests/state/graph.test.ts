@@ -41,10 +41,44 @@ describe("classification", () => {
     expect(kindsOf("(u, v, u^2)")).toEqual(["parametricSurface"]);
   });
 
-  it("publishes a single-variable function as a definition, not a drawable", () => {
-    // r(u) = 2 + cos u is a building block for a surface of revolution, not a thing to
-    // draw on its own.
-    expect(kindsOf("r(u) = 2 + cos u")).toEqual(["functionDefinition"]);
+  it("reads a function of u or v as a graph in the chart", () => {
+    // `f(u) = …` is the graph v = f(u) on the domain. It is ALSO still published as a
+    // definition, so `r(u) = 2 + cos u` keeps working as a building block for a surface of
+    // revolution while being drawn — which is what Desmos does with `f(x) = …`.
+    expect(kindsOf("f(u) = sin u")).toEqual(["chartGraph"]);
+    expect(kindsOf("g(v) = v^2")).toEqual(["chartGraph"]);
+    // A function of anything else is a plain definition with nothing to draw.
+    expect(kindsOf("h(s) = 2 + cos s")).toEqual(["functionDefinition"]);
+  });
+
+  it("still inlines a chart graph where another row uses it", () => {
+    const { document, resolution } = documentOf(
+      "r(u) = 2 + cos u",
+      "X(u,v) = (r(u) cos v, r(u) sin v, sin u)",
+    );
+    expect(resolution.items.get(document.rows()[0]!.id)?.kind).toBe("chartGraph");
+    const surface = resolution.items.get(document.rows()[1]!.id)!;
+    expect(toSource(surface.comps[0]!)).toBe("(2 + cos(u)) * cos(v)");
+  });
+
+  it("reads an equation in u and v as a relation on the chart", () => {
+    // u² + v² = 1 is a circle in the DOMAIN, whose image on the surface is generally not a
+    // circle at all — which is the thing worth looking at.
+    expect(kindsOf("u^2 + v^2 = 1")).toEqual(["chartRelation"]);
+    expect(kindsOf("sin u = cos v")).toEqual(["chartRelation"]);
+    // Ambient equations are still implicit surfaces in R³.
+    expect(kindsOf("x^2 + y^2 + z^2 = 1")).toEqual(["implicitSurface"]);
+  });
+
+  it("refuses a single-argument function whose body mentions the other chart variable", () => {
+    // `f(u) = v + v` cannot be a graph, and treating v as a slider would be silently wrong.
+    const codes = codesFor(["f(u) = v + v"], 0);
+    expect(codes).toContain("E_CLASSIFY");
+    const { document, resolution } = documentOf("f(u) = v + v");
+    const messages = (resolution.diagnostics.get(document.rows()[0]!.id) ?? [])
+      .map((d) => d.message)
+      .join(" ");
+    expect(messages).toContain("write it as an equation");
   });
 
   it("ignores a declared parameter that never appears", () => {

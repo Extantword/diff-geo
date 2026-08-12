@@ -48,6 +48,10 @@ export type ItemKind =
   | "point"
   | "vectorField"
   | "functionDefinition"
+  /** `f(u) = …`: the graph v = f(u) drawn in the chart and on the surface */
+  | "chartGraph"
+  /** an equation in u and v: its level set in the chart, and on the surface */
+  | "chartRelation"
   /** a row declaring a plain number: becomes a compiled slot, not an inlined literal */
   | "parameter"
   | "unknown";
@@ -347,7 +351,10 @@ export function resolve(rows: readonly Row[]): Resolution {
       freeParameters.add(item.name);
     } else if (item.kind === "scalar" && item.name && item.comps[0]) {
       values.set(item.name, item.comps[0]);
-    } else if (item.kind === "functionDefinition" && item.name) {
+    } else if (
+      (item.kind === "functionDefinition" || item.kind === "chartGraph") &&
+      item.name
+    ) {
       functions.set(item.name, {
         name: item.name,
         args: item.vars,
@@ -504,6 +511,43 @@ function classify(
     if (isGraph) {
       return graphItem(rowId, parsed.name, parsed.args, inlined.expr, keep);
     }
+
+    /**
+     * `f(u) = …` is the graph v = f(u) **in the chart**, and `f(v) = …` is u = f(v).
+     *
+     * Such a row is still published as a function, so `r(u) = 2 + cos u` remains usable as a
+     * building block for a surface of revolution. It is drawn as well, which is what Desmos
+     * does with `f(x) = …` and what makes the chart view worth having: writing a function of u
+     * and immediately seeing its image on the surface is the point.
+     */
+    const argument = parsed.args[0]!;
+    if (parsed.args.length === 1 && (argument === "u" || argument === "v")) {
+      const free = freeVars(inlined.expr);
+      const other = argument === "u" ? "v" : "u";
+      if (free.includes(other)) {
+        // Both chart variables on the right of a single-argument function is really a
+        // relation, and saying so beats silently treating the other one as a slider.
+        push(
+          rowId,
+          error(
+            "E_CLASSIFY",
+            `${parsed.name} takes ${argument} but its body also mentions ${other}. For a ` +
+              `relation between u and v, write it as an equation, e.g. ` +
+              `${parsed.body === inlined.expr ? "u^2 + v^2 = 1" : "… = …"}`,
+          ),
+        );
+        return null;
+      }
+      return {
+        rowId,
+        kind: "chartGraph",
+        name: parsed.name,
+        vars: [argument],
+        comps: [inlined.expr],
+        params: remainingParams(inlined.expr, keep, values, functions),
+      };
+    }
+
     return {
       rowId,
       kind: "functionDefinition",
@@ -662,6 +706,28 @@ function classify(
       const comps = inlineAll([parsed.lhs, parsed.rhs]);
       if (!comps) return null;
       const free = new Set([...freeVars(comps[0]!), ...freeVars(comps[1]!)]);
+
+      /**
+       * An equation in the *chart* variables is a relation on the domain: `u² + v² = 1` is a
+       * circle in (u, v), whose image on the surface is generally not a circle at all. That is
+       * exactly the thing worth looking at, so it is drawn in the inset and pushed forward.
+       *
+       * Checked before the ambient reading, because u and v are unambiguous here — a row using
+       * them is talking about the chart, not about R³.
+       */
+      const chartVars = [...free].filter((n) => n === "u" || n === "v");
+      if (chartVars.length > 0) {
+        const keep = new Set(chartVars);
+        return {
+          rowId,
+          kind: "chartRelation",
+          name: null,
+          vars: chartVars.sort(),
+          comps,
+          params: paramsOf(comps, keep, values, functions),
+        };
+      }
+
       const ambient = [...free].filter((n) =>
         (AMBIENT_VARS as readonly string[]).includes(n),
       );

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createDocument, type RowId } from "../../src/state/graph.ts";
 import { buildScene, type DomainRange } from "../../src/state/scene.ts";
 import { chartGrid, chartLift } from "../../src/state/chart.ts";
+import { marchingSquares } from "../../src/core/mesh/contour.ts";
 
 const closeRel = (a: number, b: number, rel = 1e-6) =>
   expect(Math.abs(a - b)).toBeLessThan(rel * Math.max(1, Math.abs(a), Math.abs(b)));
@@ -172,5 +173,167 @@ describe("chartLift", () => {
   it("shrinks as the mesh gets finer", () => {
     // The sagitta goes as h², so a denser mesh needs less clearance.
     expect(chartLift(1, 256, 100)).toBeLessThan(chartLift(1, 32, 100));
+  });
+});
+
+describe("marching squares", () => {
+  it("finds a circle of the right radius", () => {
+    const contour = marchingSquares(
+      (u, v) => u * u + v * v - 1,
+      { u: [-2, 2], v: [-2, 2] },
+      { resU: 200, resV: 200 },
+    );
+    expect(contour.segmentCount).toBeGreaterThan(200);
+    // Every point of the contour must sit on the unit circle, to within a cell.
+    for (let i = 0; i < contour.segmentCount; i++) {
+      for (const offset of [0, 2]) {
+        const u = contour.segments[i * 4 + offset]!;
+        const v = contour.segments[i * 4 + offset + 1]!;
+        expect(Math.abs(Math.hypot(u, v) - 1)).toBeLessThan(0.02);
+      }
+    }
+  });
+
+  it("has total length close to the true circumference", () => {
+    // A stronger check than pointwise membership: it also catches missing or duplicated cells.
+    const contour = marchingSquares(
+      (u, v) => u * u + v * v - 1,
+      { u: [-2, 2], v: [-2, 2] },
+      { resU: 400, resV: 400 },
+    );
+    let total = 0;
+    for (let i = 0; i < contour.segmentCount; i++) {
+      total += Math.hypot(
+        contour.segments[i * 4 + 2]! - contour.segments[i * 4]!,
+        contour.segments[i * 4 + 3]! - contour.segments[i * 4 + 1]!,
+      );
+    }
+    closeRel(total, 2 * Math.PI, 0.01);
+  });
+
+  it("finds nothing where the relation has no solution", () => {
+    const contour = marchingSquares(
+      (u, v) => u * u + v * v + 1,
+      { u: [-2, 2], v: [-2, 2] },
+      { resU: 40, resV: 40 },
+    );
+    expect(contour.segmentCount).toBe(0);
+  });
+
+  it("finds both branches of a hyperbola", () => {
+    const contour = marchingSquares(
+      (u, v) => u * u - v * v - 1,
+      { u: [-3, 3], v: [-3, 3] },
+      { resU: 200, resV: 200 },
+    );
+    let left = 0;
+    let right = 0;
+    for (let i = 0; i < contour.segmentCount; i++) {
+      if (contour.segments[i * 4]! < 0) left++;
+      else right++;
+    }
+    expect(left).toBeGreaterThan(50);
+    expect(right).toBeGreaterThan(50);
+  });
+
+  it("skips cells touching a non-finite sample rather than drawing through them", () => {
+    // `1/u` blows up on the v axis; the contour must simply not exist there.
+    const contour = marchingSquares(
+      (u, v) => 1 / u - v,
+      { u: [-1, 1], v: [-1, 1] },
+      { resU: 60, resV: 60 },
+    );
+    for (let i = 0; i < contour.segmentCount * 4; i++) {
+      expect(Number.isFinite(contour.segments[i]!)).toBe(true);
+    }
+  });
+});
+
+describe("chart graphs and relations", () => {
+  it("draws v = f(u) at the right height", () => {
+    const { scene } = sceneWithChart(["X(u,v) = (u, v, 0)", "f(u) = 1 + sin u"]);
+    const graph = scene.chartLines.at(-1)!.polylines[0]!;
+    for (let i = 0; i < graph.count; i += 31) {
+      if (!graph.valid?.[i]) continue;
+      const u = graph.points[i * 3]!;
+      const v = graph.points[i * 3 + 1]!;
+      closeRel(v, 1 + Math.sin(u), 1e-6);
+    }
+  });
+
+  it("pushes a chart graph onto the surface", () => {
+    // Over the plane (u,v,0) the image is the graph itself, so this is directly checkable.
+    const { scene } = sceneWithChart(["X(u,v) = (u, v, 0)", "f(u) = 1 + sin u"]);
+    const onSurface = scene.lines.at(-1)!.polylines[0]!;
+    let checked = 0;
+    for (let i = 0; i < onSurface.count; i += 31) {
+      if (!onSurface.valid?.[i]) continue;
+      const x = onSurface.points[i * 3]!;
+      const y = onSurface.points[i * 3 + 1]!;
+      closeRel(y, 1 + Math.sin(x), 1e-6);
+      checked++;
+    }
+    expect(checked).toBeGreaterThan(5);
+  });
+
+  it("marks the part of a graph that leaves the domain", () => {
+    // v = 10 is far above v ∈ [0, 2π], so the whole graph is off the chart.
+    const { document, scene } = sceneWithChart(["X(u,v) = (u, v, 0)", "f(u) = 10"]);
+    const report = scene.reports.find((r) => r.rowId === document.rows()[1]!.id);
+    expect(report?.warning).toContain("leaves the domain");
+  });
+
+  it("draws a relation's level set in the chart and on the surface", () => {
+    const { document, scene } = sceneWithChart([
+      "X(u,v) = (u, v, 0)",
+      "(u - 3)^2 + (v - 3)^2 = 1",
+    ]);
+    const report = scene.reports.find((r) => r.rowId === document.rows()[1]!.id);
+    expect(report?.info).toContain("contour segments");
+
+    // The contour lies on the circle of radius 1 about (3, 3), in both views.
+    const chartSegments = scene.chartLines.at(-1)!.polylines;
+    expect(chartSegments.length).toBeGreaterThan(50);
+    for (const segment of chartSegments.slice(0, 40)) {
+      const u = segment.points[0]!;
+      const v = segment.points[1]!;
+      expect(Math.abs(Math.hypot(u - 3, v - 3) - 1)).toBeLessThan(0.05);
+    }
+
+    const onSurface = scene.lines.at(-1)!.polylines;
+    expect(onSurface.length).toBeGreaterThan(50);
+    for (const segment of onSurface.slice(0, 40)) {
+      const x = segment.points[0]!;
+      const y = segment.points[1]!;
+      expect(Math.abs(Math.hypot(x - 3, y - 3) - 1)).toBeLessThan(0.05);
+    }
+  });
+
+  it("says so when a relation has no solutions in the domain", () => {
+    const { document, scene } = sceneWithChart([
+      "X(u,v) = (u, v, 0)",
+      "u^2 + v^2 = -1",
+    ]);
+    const report = scene.reports.find((r) => r.rowId === document.rows()[1]!.id);
+    expect(report?.info).toContain("no solutions");
+  });
+
+  it("follows sliders in a relation", () => {
+    const document = createDocument(["X(u,v) = (u, v, 0)", "(u-3)^2 + (v-3)^2 = R^2"]);
+    const resolved = document.resolution();
+    const items = [...resolved.items.values()];
+    const radiusOf = (R: number) => {
+      const scene = buildScene({
+        items,
+        parameters: new Map([["R", R]]),
+        declaredParameters: resolved.declaredParameters,
+        domains: new Map(),
+        resolution: 120,
+      });
+      const segment = scene.chartLines.at(-1)!.polylines[0]!;
+      return Math.hypot(segment.points[0]! - 3, segment.points[1]! - 3);
+    };
+    closeRel(radiusOf(1), 1, 0.05);
+    closeRel(radiusOf(2), 2, 0.05);
   });
 });

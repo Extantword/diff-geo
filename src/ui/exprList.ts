@@ -43,6 +43,8 @@ const KIND_LABEL: Readonly<Record<string, string>> = {
   point: "point",
   vectorField: "vector field",
   functionDefinition: "definition",
+  chartGraph: "chart graph",
+  chartRelation: "chart relation",
   unknown: "?",
 };
 

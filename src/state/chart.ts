@@ -2,6 +2,7 @@ import { compileMany } from "../core/expr/eval.ts";
 import type { Expr } from "../core/expr/ast.ts";
 import type { ParametricSurface } from "../core/geom/parametric.ts";
 import { makeSurfacePoint, type Vec3 } from "../core/geom/types.ts";
+import { marchingSquares } from "../core/mesh/contour.ts";
 import type { LineGroup, Polyline } from "../gl/passes/lines.ts";
 
 /**
@@ -223,4 +224,198 @@ export function chartLift(
   const gridStep = (2 * sceneExtent) / Math.max(resolution, 1);
   const curvature = Math.sqrt(Math.max(curvatureScale, 0));
   return Math.max(0.25 * gridStep * gridStep * curvature, 2e-3 * sceneExtent);
+}
+
+
+/** A chart graph `v = f(u)` (or `u = f(v)`), sampled and pushed forward. */
+export interface ChartGraphRequest {
+  readonly rowId: number;
+  readonly body: Expr;
+  readonly params: readonly string[];
+  /** which chart variable is the input: "u" gives v = f(u), "v" gives u = f(v) */
+  readonly variable: "u" | "v";
+  readonly colorIndex: number;
+}
+
+/**
+ * Sample `v = f(u)` across the chart's own u-range.
+ *
+ * The input runs over the domain the surface actually has, so the graph is drawn exactly where
+ * it means something — and samples whose output falls outside the *other* range are marked
+ * invalid rather than clamped, so the curve visibly leaves the chart.
+ */
+export function sampleChartGraph(
+  request: ChartGraphRequest,
+  bounds: ChartBounds,
+  surface: ParametricSurface | null,
+  parameters: ArrayLike<number>,
+  lift: number,
+): ChartCurveResult {
+  const compiled = compileMany([request.body], {
+    vars: [request.variable],
+    params: [...request.params],
+  });
+
+  const alongU = request.variable === "u";
+  const [inLo, inHi] = alongU ? bounds.u : bounds.v;
+  const [outLo, outHi] = alongU ? bounds.v : bounds.u;
+
+  const count = SAMPLES + 1;
+  const chartPoints = new Float64Array(count * 3);
+  const surfacePoints = new Float64Array(count * 3);
+  const chartValid = new Uint8Array(count);
+  const surfaceValid = new Uint8Array(count);
+  const arcLength = new Float64Array(count);
+
+  const out = new Float64Array(1);
+  const argument = new Float64Array(1);
+  const point = makeSurfacePoint();
+  let outside = 0;
+
+  for (let i = 0; i < count; i++) {
+    const input = inLo + ((inHi - inLo) * i) / SAMPLES;
+    argument[0] = input;
+    compiled.evaluate(argument, parameters, out);
+    const value = out[0]!;
+
+    const u = alongU ? input : value;
+    const v = alongU ? value : input;
+    chartPoints[i * 3] = u;
+    chartPoints[i * 3 + 1] = v;
+
+    const finite = Number.isFinite(value);
+    // Outside the opposite range the point is off the chart entirely — not clamped to its edge,
+    // which would draw a line along the boundary that is not part of the graph.
+    const inside = finite && value >= outLo && value <= outHi;
+    chartValid[i] = inside ? 1 : 0;
+    if (finite && !inside) outside++;
+
+    if (i > 0) {
+      const du = u - chartPoints[(i - 1) * 3]!;
+      const dv = v - chartPoints[(i - 1) * 3 + 1]!;
+      const step = Math.hypot(du, dv);
+      arcLength[i] = arcLength[i - 1]! + (Number.isFinite(step) ? step : 0);
+    }
+
+    if (!surface || !inside) continue;
+    surface.at(u, v, parameters, point);
+    if (point.degenerate) continue;
+    surfacePoints[i * 3] = point.p[0] + point.N[0] * lift;
+    surfacePoints[i * 3 + 1] = point.p[1] + point.N[1] * lift;
+    surfacePoints[i * 3 + 2] = point.p[2] + point.N[2] * lift;
+    surfaceValid[i] = 1;
+  }
+
+  const color = CHART_CURVE_PALETTE[request.colorIndex % CHART_CURVE_PALETTE.length]!;
+  let anyOnSurface = false;
+  for (let i = 0; i < count; i++) {
+    if (surfaceValid[i]) {
+      anyOnSurface = true;
+      break;
+    }
+  }
+
+  return {
+    rowId: request.rowId,
+    chart: { points: chartPoints, count, valid: chartValid, arcLength, color },
+    surface: anyOnSurface
+      ? { points: surfacePoints, count, valid: surfaceValid, arcLength, color }
+      : null,
+    outsideFraction: outside / count,
+  };
+}
+
+export interface ChartRelationRequest {
+  readonly rowId: number;
+  /** lhs and rhs; the level set of lhs − rhs is the curve */
+  readonly comps: readonly Expr[];
+  readonly params: readonly string[];
+  readonly colorIndex: number;
+}
+
+export interface ChartRelationResult {
+  readonly rowId: number;
+  /** one two-point polyline per contour segment, in (u, v) */
+  readonly chart: Polyline[];
+  /** the same segments pushed onto the surface */
+  readonly surface: Polyline[];
+  readonly segmentCount: number;
+}
+
+/**
+ * The level set of a relation in the chart, by marching squares, pushed forward.
+ *
+ * Segments are independent rather than linked into contours — the line pass draws per-segment
+ * instances anyway and its round caps make them abut cleanly, so tracing would buy nothing.
+ */
+export function sampleChartRelation(
+  request: ChartRelationRequest,
+  bounds: ChartBounds,
+  surface: ParametricSurface | null,
+  parameters: ArrayLike<number>,
+  lift: number,
+  resolution: number,
+): ChartRelationResult {
+  const compiled = compileMany([...request.comps], {
+    vars: ["u", "v"],
+    params: [...request.params],
+  });
+
+  const out = new Float64Array(request.comps.length);
+  const argument = new Float64Array(2);
+
+  // F = lhs − rhs, so the relation holds exactly where F vanishes.
+  const field = (u: number, v: number): number => {
+    argument[0] = u;
+    argument[1] = v;
+    compiled.evaluate(argument, parameters, out);
+    return (out[0] ?? Number.NaN) - (out[1] ?? 0);
+  };
+
+  const contour = marchingSquares(field, bounds, {
+    resU: resolution,
+    resV: resolution,
+  });
+
+  const color = CHART_CURVE_PALETTE[request.colorIndex % CHART_CURVE_PALETTE.length]!;
+  const chart: Polyline[] = [];
+  const onSurface: Polyline[] = [];
+  const point = makeSurfacePoint();
+
+  for (let i = 0; i < contour.segmentCount; i++) {
+    const au = contour.segments[i * 4]!;
+    const av = contour.segments[i * 4 + 1]!;
+    const bu = contour.segments[i * 4 + 2]!;
+    const bv = contour.segments[i * 4 + 3]!;
+
+    chart.push({
+      points: new Float64Array([au, av, 0, bu, bv, 0]),
+      count: 2,
+      color,
+    });
+
+    if (!surface) continue;
+    const ends: number[] = [];
+    let usable = true;
+    for (const [u, v] of [
+      [au, av],
+      [bu, bv],
+    ] as const) {
+      surface.at(u, v, parameters, point);
+      if (point.degenerate) {
+        usable = false;
+        break;
+      }
+      ends.push(
+        point.p[0] + point.N[0] * lift,
+        point.p[1] + point.N[1] * lift,
+        point.p[2] + point.N[2] * lift,
+      );
+    }
+    if (usable && ends.length === 6) {
+      onSurface.push({ points: Float64Array.from(ends), count: 2, color });
+    }
+  }
+
+  return { rowId: request.rowId, chart, surface: onSurface, segmentCount: contour.segmentCount };
 }
