@@ -5,8 +5,9 @@ Concepts and conventions follow Manfredo do Carmo, _Differential Geometry of Cur
 
 **→ [extantword.github.io/diff-geo](https://extantword.github.io/diff-geo/)**
 
-> Status: **M0** — hand-written WebGL2 renderer with an orbitable tessellated surface.
-> The symbolic engine (parse → differentiate → curvature) lands in M1. See [the milestones](#milestones).
+> Status: **M1** — type a parametrization and see the surface with its Gaussian curvature
+> painted on, alongside its exact first and second fundamental forms. Next: an expression
+> list, space curves, and the thick-line pass. See [the milestones](#milestones).
 
 ## Develop
 
@@ -36,7 +37,7 @@ npm test           # analytic ground-truth geometry tests (Vitest)
 | | | |
 |---|---|---|
 | **M0** | scaffold + WebGL2 renderer skeleton | ✅ |
-| **M1** | CAS + jets + vertical slice: type a formula, see curvature painted on it | |
+| **M1** | CAS + jets + vertical slice: type a formula, see curvature painted on it | ✅ |
 | **M2** | expression list, signal store, curves with the Frenet trihedron | |
 | **M3** | Gauss map, principal directions, lines of curvature, geodesics | |
 | **M4** | implicit surfaces `F(x,y,z) = 0`, raymarched | |

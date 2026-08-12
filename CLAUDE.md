@@ -50,8 +50,35 @@ the shape operator and H all flip with the choice of unit normal. If a computed 
 *sign*, the convention is wrong at the source — fix it there, do not patch downstream. Verify
 against the analytic ground-truth table.
 
-**`src/core/geom/types.ts` is frozen at the end of M1.** Until then it grows freely; after that,
-changes to it ripple through everything.
+**`src/core/geom/types.ts` is frozen as of the end of M1.** Changes to it now ripple through
+everything, so extend it only deliberately.
+
+**Constructors preserve order; only `simplify` sorts.** `ast.ts`'s smart constructors flatten, fold
+constants and drop identities, but never reorder terms — the live typeset echo renders from that
+tree and must not rearrange a formula while the user is still typing it. So
+`parse("u+v") !== parse("v+u")` while `simplify` makes them identical. Canonical ordering and
+like-term collection belong to `simplify.ts`, which is what the math pipeline runs.
+
+**The shape operator needs an orthonormal tangent basis.** `I⁻¹·II` in the chart basis {X_u, X_v}
+is **not symmetric** whenever F ≠ 0, so eigendecomposing it directly is wrong. Gram–Schmidt to
+(t₁, t₂) and eigendecompose `II₂ = Qᵀ·II·Q`. `resolveShape` in `geom/shape.ts` is the only place
+curvature is computed, for every representation; do Carmo's closed forms for K and H are *tests*
+of it, not the implementation.
+
+**Colour and extent scales use a robust quantile, never `max`.** One sample near a chart
+singularity returns K ≈ 10¹²; scaling by the maximum then paints the whole surface uniform grey —
+a silent failure that looks like a rendering bug. `robustScale` takes the 98th percentile so
+outliers saturate the colormap instead of flattening everything. ManifoldSandbox has the `max`
+version; do not copy it back.
+
+**Never replace a DOM element the user might be typing in.** Rebuilding an `<input>` destroys its
+focus and caret, which reads as the UI refusing input. Build fields once; update only their
+siblings. Feature code goes through `ui/dom.ts` and never touches `appendChild` directly.
+
+**Separate the cheap path from the expensive one in the UI.** Parsing and typesetting are
+microseconds and run on every keystroke. Compiling a jet and tessellating ~32k vertices is ~29 ms
+and must be debounced (draft resolution first, full resolution on idle). A transiently broken
+formula leaves the last good surface on screen rather than blanking the canvas.
 
 ## Style
 
