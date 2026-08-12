@@ -58,8 +58,18 @@ export interface SliderSpec {
 
 export interface ExprListOptions {
   readonly document: DocumentStore;
-  /** Recompute and redraw. Called after any edit; the caller debounces. */
-  readonly requestRender: (refit: boolean) => void;
+  /**
+   * A row's text changed. Debounced by the caller: a half-typed formula should not render.
+   */
+  readonly onEdit: (refit: boolean) => void;
+  /**
+   * Only a parameter value changed — no text, no structure.
+   *
+   * Kept separate because it wants *throttling*, not debouncing. A slider must give
+   * continuous feedback while it moves, whereas a debounce would show nothing until the drag
+   * stopped and then jump.
+   */
+  readonly onParameterChange: () => void;
   /** Per-row domain ranges, mutated in place by the domain inputs. */
   readonly domains: Map<RowId, DomainRange[]>;
   /** Slider state, mutated in place. */
@@ -72,8 +82,16 @@ export interface ExprListOptions {
 
 export interface ExprList {
   readonly root: HTMLElement;
-  /** Refresh echoes, badges and diagnostics from the current resolution. */
+  /** Full refresh: echoes, badges, controls, diagnostics. For structural changes. */
   refresh(reports: readonly RowReport[]): void;
+  /**
+   * Update only the per-row readouts.
+   *
+   * Used on the throttled parameter path. Nothing structural can have changed there, so this
+   * skips reparsing and re-typesetting every row — which is what a slider drag was paying for
+   * on each frame.
+   */
+  refreshReports(reports: readonly RowReport[]): void;
   /**
    * Force the sliders to be rebuilt on the next refresh.
    *
@@ -122,6 +140,7 @@ export function createExprList(options: ExprListOptions): ExprList {
     onClick: () => {
       store.addRow("");
       syncRows();
+      options.onEdit(false);
       const last = [...views.values()].at(-1);
       last?.input.focus();
     },
@@ -177,7 +196,11 @@ export function createExprList(options: ExprListOptions): ExprList {
       placeholder: "X(u,v) = (…, …, …)",
       onInput: () => {
         row.source.set(input.value);
-        options.requestRender(false);
+        // Only this row's echo can have changed, so only this row's echo is re-typeset.
+        // Re-rendering every row's KaTeX on each keystroke was a measurable cost for text
+        // that did not move.
+        refreshEcho(views.get(id));
+        options.onEdit(false);
       },
     }) as HTMLInputElement;
 
@@ -196,7 +219,7 @@ export function createExprList(options: ExprListOptions): ExprList {
         store.removeRow(id);
         views.get(id)?.root.remove();
         views.delete(id);
-        options.requestRender(false);
+        options.onEdit(false);
       },
     });
 
@@ -273,7 +296,7 @@ export function createExprList(options: ExprListOptions): ExprList {
         readout.textContent = spec.value.toFixed(2);
         store.setParameter(name, spec.value);
         // Parameters are compiled as slots, so this recompiles nothing.
-        options.requestRender(false);
+        options.onParameterChange();
       },
     }) as HTMLInputElement;
 
@@ -350,7 +373,7 @@ export function createExprList(options: ExprListOptions): ExprList {
               const next = Number((event.target as HTMLInputElement).value);
               if (!Number.isFinite(next)) return;
               entry[which] = next;
-              options.requestRender(false);
+              options.onEdit(false);
             },
           });
         return el("div", { class: "domain" }, [
@@ -399,7 +422,7 @@ export function createExprList(options: ExprListOptions): ExprList {
         at = Number(position.value);
         readout.textContent = at.toFixed(2);
         commit();
-        options.requestRender(false);
+        options.onParameterChange();
       },
     }) as HTMLInputElement;
 
@@ -410,7 +433,7 @@ export function createExprList(options: ExprListOptions): ExprList {
         show = toggle.checked;
         commit();
         position.disabled = !show;
-        options.requestRender(false);
+        options.onParameterChange();
       },
     }) as HTMLInputElement;
     position.disabled = !show;
@@ -497,7 +520,7 @@ export function createExprList(options: ExprListOptions): ExprList {
         spec!.value = next;
         readout.textContent = format(next);
         store.setParameter(name, next);
-        options.requestRender(false);
+        options.onParameterChange();
       },
       /**
        * On release, reconcile the row's text with where the slider ended up, so the document
@@ -510,7 +533,8 @@ export function createExprList(options: ExprListOptions): ExprList {
         const text = `${name} = ${format(next)}`;
         view.input.value = text;
         row.source.set(text);
-        options.requestRender(false);
+        refreshEcho(view);
+        options.onEdit(false);
       },
     }) as HTMLInputElement;
 
@@ -546,6 +570,47 @@ export function createExprList(options: ExprListOptions): ExprList {
     ]);
   };
 
+  /** Re-typeset one row's echo. KaTeX is the expensive part, so this is called sparingly. */
+  const refreshEcho = (view: RowView | undefined) => {
+    if (!view) return;
+    const row = store.rows().find((candidate) => candidate.id === view.id);
+    if (!row) return;
+    replace(view.echo, [echoFor(row.source())]);
+  };
+
+  /** The per-row notes: diagnostics, compile errors, readouts. Cheap; no typesetting. */
+  const renderNotes = (view: RowView, report: RowReport | undefined) => {
+    const resolution = store.resolution();
+    const diagnostics = resolution.diagnostics.get(view.id) ?? [];
+    const item = resolution.items.get(view.id) ?? null;
+    const notes: HTMLElement[] = [];
+
+    for (const diagnostic of diagnostics) notes.push(diagnosticNode(diagnostic));
+    if (report?.error) {
+      notes.push(el("div", { class: "diag diag--error", text: report.error }));
+    }
+    if (report?.warning) {
+      notes.push(el("div", { class: "diag diag--warning", text: report.warning }));
+    }
+    if (report?.info) {
+      notes.push(el("div", { class: "row__info", text: report.info }));
+    }
+    if (item && NOT_YET_DRAWN.has(item.kind)) {
+      notes.push(
+        el("div", {
+          class: "diag diag--hint",
+          text: `recognized as a ${KIND_LABEL[item.kind] ?? item.kind}, but drawing these is not implemented yet`,
+        }),
+      );
+    }
+    replace(view.notes, notes);
+  };
+
+  const refreshReports = (reports: readonly RowReport[]) => {
+    const reportById = new Map(reports.map((report) => [report.rowId, report]));
+    for (const [id, view] of views) renderNotes(view, reportById.get(id));
+  };
+
   const refresh = (reports: readonly RowReport[]) => {
     syncRows();
     const resolution = store.resolution();
@@ -572,28 +637,7 @@ export function createExprList(options: ExprListOptions): ExprList {
       syncDomain(view, item);
       syncFrameControl(view, item);
 
-      const diagnostics = resolution.diagnostics.get(id) ?? [];
-      const report = reportById.get(id);
-      const notes: HTMLElement[] = [];
-      for (const diagnostic of diagnostics) notes.push(diagnosticNode(diagnostic));
-      if (report?.error) {
-        notes.push(el("div", { class: "diag diag--error", text: report.error }));
-      }
-      if (report?.warning) {
-        notes.push(el("div", { class: "diag diag--warning", text: report.warning }));
-      }
-      if (report?.info) {
-        notes.push(el("div", { class: "row__info", text: report.info }));
-      }
-      if (item && NOT_YET_DRAWN.has(item.kind)) {
-        notes.push(
-          el("div", {
-            class: "diag diag--hint",
-            text: `recognized as a ${label}, but drawing these is not implemented yet`,
-          }),
-        );
-      }
-      replace(view.notes, notes);
+      renderNotes(view, reportById.get(id));
     }
 
     syncSliders(
@@ -618,6 +662,7 @@ export function createExprList(options: ExprListOptions): ExprList {
   return {
     root,
     refresh,
+    refreshReports,
     invalidateSliders: () => {
       renderedSliders = "\u0000";
     },

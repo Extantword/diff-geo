@@ -15,6 +15,31 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Kept separate from the build so a sympy packaging problem cannot block a deploy, and
+  # deliberately outside `npm test`, which stays node-only and dependency-free.
+  oracle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: npm ci
+      - run: pip install sympy mpmath
+
+      # Cross-checks every derivative the TypeScript CAS produces against sympy's own
+      # differentiation. ~9 seconds for ~800 derivatives.
+      - name: CAS oracle
+        run: npm run oracle
+
   build:
     runs-on: ubuntu-latest
     steps:
