@@ -15,7 +15,7 @@ import {
 } from "../core/geom/curve.ts";
 import { sampleBounds, type Vec3 } from "../core/geom/types.ts";
 import type { LineGroup, Polyline } from "../gl/passes/lines.ts";
-import { el, replace } from "./dom.ts";
+import { el, formatValue, replace } from "./dom.ts";
 import { tex } from "./tex.ts";
 
 /**
@@ -42,8 +42,12 @@ export interface CurveSectionOptions {
 
 export interface CurveSection {
   readonly root: HTMLElement;
-  /** Draw the current selection; call when the section becomes visible. */
-  refresh: (refit: boolean) => void;
+  /**
+   * Show or hide this view. The section draws nothing at all while inactive — building
+   * the controls must not put geometry on screen, or the curve and the surface both
+   * render at once and fight over the camera framing.
+   */
+  setActive: (active: boolean, refit?: boolean) => void;
 }
 
 /** A two-point polyline, for one frame vector. */
@@ -67,6 +71,8 @@ export function createCurveSection(options: CurveSectionOptions): CurveSection {
 
   let curve: SpaceCurve | null = null;
   let compiledKey = "";
+  /** Nothing is drawn until the view is selected. */
+  let active = false;
 
   const picker = el("select", { class: "field" });
   for (const entry of CURVE_CATALOG) {
@@ -125,7 +131,7 @@ export function createCurveSection(options: CurveSectionOptions): CurveSection {
   };
 
   const draw = (refit: boolean) => {
-    if (!curve) return;
+    if (!curve || !active) return;
     const frames = bishopFrames(curve, params, SAMPLES);
 
     // Extent drives both the camera and the glyph length, so the trihedron stays legible
@@ -191,11 +197,10 @@ export function createCurveSection(options: CurveSectionOptions): CurveSection {
 
     if (refit) options.frame(center, radius);
 
-    const fmt = (x: number) => (Number.isFinite(x) ? x.toFixed(4) : "—");
     replace(frenetOut, [
       el("div", { class: "forms__at", text: `at t = ${t.toFixed(3)}` }),
-      tex(`\\kappa = ${fmt(frame.kappa)}`, true),
-      tex(frame.tauValid ? `\\tau = ${fmt(frame.tau)}` : `\\tau = \\text{—}`, true),
+      tex(`\\kappa = ${formatValue(frame.kappa)}`, true),
+      tex(frame.tauValid ? `\\tau = ${formatValue(frame.tau)}` : `\\tau = \\text{—}`, true),
       el("div", { class: "note", text: statusNote(frame.status, frame.tauValid) }),
       el("div", { class: "legend-labels" }, [
         el("span", { text: "T" }),
@@ -330,11 +335,14 @@ export function createCurveSection(options: CurveSectionOptions): CurveSection {
     ]),
   ]);
 
+  // Build the controls and the typeset echo, but draw nothing yet.
   selectSpec(spec.id);
 
   return {
     root,
-    refresh: (refit) => {
+    setActive: (next, refit = true) => {
+      active = next;
+      if (!next) return;
       if (compileIfNeeded()) draw(refit);
     },
   };

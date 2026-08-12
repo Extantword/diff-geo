@@ -218,7 +218,20 @@ export function createLinesPass(gl: WebGL2RenderingContext): LinesPass {
       gl.uniform2f(program.uniform("uViewport"), viewportWidth, viewportHeight);
 
       gl.enable(gl.DEPTH_TEST);
-      gl.depthMask(true);
+      /**
+       * Depth **test** on, depth **write** off.
+       *
+       * This is load-bearing, not a tweak. Consecutive segments deliberately overlap by
+       * half a width — that is what fills the join — and each extrapolates its own
+       * segment's depth across that overlap. With writes enabled the second segment loses
+       * the depth comparison over part of the shared region and its fragments are
+       * dropped, leaving a small gap at *every* join. On a densely sampled curve that
+       * reads as a dashed line rather than as the artifact it is.
+       *
+       * Writes off means overlaps blend twice instead, which is invisible, while the test
+       * still hides the parts of a line that pass behind the surface.
+       */
+      gl.depthMask(false);
       gl.disable(gl.CULL_FACE);
       gl.enable(gl.BLEND);
       // Premultiplied alpha, matching the fragment shader's output.
@@ -242,6 +255,8 @@ export function createLinesPass(gl: WebGL2RenderingContext): LinesPass {
       }
       gl.bindVertexArray(null);
       gl.disable(gl.BLEND);
+      // Restore for whatever draws next.
+      gl.depthMask(true);
     },
 
     dispose() {

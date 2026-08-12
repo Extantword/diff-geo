@@ -8,7 +8,7 @@ import type { TessellatedSurface } from "../core/mesh/tessellate.ts";
 import { createCurveSection } from "./curvePanel.ts";
 import type { LineGroup } from "../gl/passes/lines.ts";
 import type { Vec3 } from "../core/geom/types.ts";
-import { el, replace } from "./dom.ts";
+import { el, formatValue, replace } from "./dom.ts";
 import { tex } from "./tex.ts";
 
 /**
@@ -176,7 +176,6 @@ export function mountPanel(options: PanelOptions): void {
 
   // ---- rendering the derived panels ----
 
-  const fmt = (x: number) => (Number.isFinite(x) ? x.toFixed(4) : "—");
 
   const updateForms = (surface: ParametricSurface) => {
     const point = makeSurfacePoint();
@@ -191,17 +190,17 @@ export function mountPanel(options: PanelOptions): void {
         text: `at u = ${uMid.toFixed(3)}, v = ${vMid.toFixed(3)}`,
       }),
       tex(
-        `\\mathrm{I} = \\begin{pmatrix} ${fmt(chart.I[0][0])} & ${fmt(chart.I[0][1])} \\\\ ` +
-          `${fmt(chart.I[1][0])} & ${fmt(chart.I[1][1])} \\end{pmatrix}`,
+        `\\mathrm{I} = \\begin{pmatrix} ${formatValue(chart.I[0][0])} & ${formatValue(chart.I[0][1])} \\\\ ` +
+          `${formatValue(chart.I[1][0])} & ${formatValue(chart.I[1][1])} \\end{pmatrix}`,
         true,
       ),
       tex(
-        `\\mathrm{II} = \\begin{pmatrix} ${fmt(chart.II[0][0])} & ${fmt(chart.II[0][1])} \\\\ ` +
-          `${fmt(chart.II[1][0])} & ${fmt(chart.II[1][1])} \\end{pmatrix}`,
+        `\\mathrm{II} = \\begin{pmatrix} ${formatValue(chart.II[0][0])} & ${formatValue(chart.II[0][1])} \\\\ ` +
+          `${formatValue(chart.II[1][0])} & ${formatValue(chart.II[1][1])} \\end{pmatrix}`,
         true,
       ),
-      tex(`K = ${fmt(point.K)} \\qquad H = ${fmt(point.H)}`, true),
-      tex(`k_1 = ${fmt(point.k1)} \\qquad k_2 = ${fmt(point.k2)}`, true),
+      tex(`K = ${formatValue(point.K)} \\qquad H = ${formatValue(point.H)}`, true),
+      tex(`k_1 = ${formatValue(point.k1)} \\qquad k_2 = ${formatValue(point.k2)}`, true),
       point.umbilic
         ? el("div", {
             class: "note",
@@ -227,7 +226,7 @@ export function mountPanel(options: PanelOptions): void {
         : `${mesh.droppedVertices} vertices, ${mesh.droppedTriangles} triangles`;
 
     replace(readout, [
-      el("div", { text: `K range     ${fmt(mesh.range.minK)} … ${fmt(mesh.range.maxK)}` }),
+      el("div", { text: `K range     ${formatValue(mesh.range.minK)} … ${formatValue(mesh.range.maxK)}` }),
       el("div", { text: `scale       ±${mesh.range.scale.toPrecision(3)}` }),
       el("div", { text: `triangles   ${mesh.triangleCount.toLocaleString()}` }),
       el("div", { text: `dropped     ${dropped}` }),
@@ -366,11 +365,11 @@ export function mountPanel(options: PanelOptions): void {
     surfaceSections.hidden = !surfaceMode;
     curveSection.root.hidden = surfaceMode;
     options.setSurfaceVisible(surfaceMode);
+    curveSection.setActive(!surfaceMode);
     if (surfaceMode) {
+      // Clear the lines explicitly: the surface view owns the whole scene.
       options.setLines([]);
       if (compileIfNeeded()) renderAt(FULL_RESOLUTION, true);
-    } else {
-      curveSection.refresh(true);
     }
   };
 

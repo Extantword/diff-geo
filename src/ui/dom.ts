@@ -51,3 +51,18 @@ export function replace(
     container.append(typeof child === "string" ? document.createTextNode(child) : child);
   }
 }
+
+/**
+ * Four decimals, with the sign dropped when it cannot be supported.
+ *
+ * A quantity that vanishes analytically — F for an orthogonal parametrization, H for a
+ * minimal surface — lands on a tiny negative like −1e-17 numerically, which `toFixed(4)`
+ * renders as "-0.0000". That reads as a meaningful negative and it is not one: at this
+ * resolution the value is zero, so only the sign character is being reported, and it is
+ * noise.
+ */
+export function formatValue(x: number): string {
+  if (!Number.isFinite(x)) return "—";
+  const text = x.toFixed(4);
+  return text === "-0.0000" ? "0.0000" : text;
+}
