@@ -71,6 +71,12 @@ function main() {
     },
 
     onCurvatureToggle: (on) => renderer.setCurvatureMix(on ? 1 : 0),
+    setLines: (groups) => renderer.setLines(groups),
+    setSurfaceVisible: (visible) => renderer.setSurfaceVisible(visible),
+    frameCamera: (center, radius) => {
+      renderer.camera.frame(center, radius);
+      renderer.invalidate();
+    },
   });
 }
 

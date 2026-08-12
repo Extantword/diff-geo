@@ -15,6 +15,7 @@ export interface SurfacePass {
   draw(view: Mat4, projection: Mat4, eye: V3): void;
   /** 0 shows the flat base colour, 1 shows Gaussian curvature */
   setCurvatureMix(amount: number): void;
+  setVisible(visible: boolean): void;
   dispose(): void;
 }
 
@@ -71,6 +72,7 @@ export function createSurfacePass(
 
   let indexCount = 0;
   let mix = curvatureMix;
+  let visible = true;
 
   return {
     setMesh(mesh) {
@@ -93,8 +95,12 @@ export function createSurfacePass(
       mix = amount;
     },
 
+    setVisible(next) {
+      visible = next;
+    },
+
     draw(view, projection, eye) {
-      if (indexCount === 0) return;
+      if (indexCount === 0 || !visible) return;
       program.use();
       gl.uniformMatrix4fv(program.uniform("uView"), false, view);
       gl.uniformMatrix4fv(program.uniform("uProjection"), false, projection);

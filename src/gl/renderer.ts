@@ -1,7 +1,9 @@
 import type { TessellatedSurface } from "../core/mesh/tessellate.ts";
 import { createCamera, type Camera } from "./camera.ts";
 import type { Device } from "./device.ts";
+import { createLinesPass, type LineGroup, type LinesPass } from "./passes/lines.ts";
 import { createSurfacePass, type SurfacePass } from "./passes/surface.ts";
+import { multiply } from "./mat4.ts";
 
 /**
  * Pass orchestration and the frame loop.
@@ -17,6 +19,9 @@ export interface Renderer {
   setSurfaceMesh(mesh: TessellatedSurface): void;
   /** 0 shows a flat colour, 1 shows Gaussian curvature. */
   setCurvatureMix(amount: number): void;
+  /** Replace every drawn polyline. Grouped by style, one draw call per group. */
+  setLines(groups: readonly LineGroup[]): void;
+  setSurfaceVisible(visible: boolean): void;
   /** Request one redraw on the next frame. */
   invalidate(): void;
   start(): void;
@@ -30,6 +35,7 @@ export function createRenderer(device: Device): Renderer {
   const { gl } = device;
   const camera = createCamera();
   const surfacePass: SurfacePass = createSurfacePass(gl);
+  const linesPass: LinesPass = createLinesPass(gl);
 
   let dirty = true;
   let running = false;
@@ -57,6 +63,8 @@ export function createRenderer(device: Device): Renderer {
     const eye = camera.eye();
 
     surfacePass.draw(view, projection, eye);
+    // Lines after the surface: they blend, and they depth-test against it.
+    linesPass.draw(multiply(projection, view), device.width, device.height);
   };
 
   const tick = () => {
@@ -77,6 +85,16 @@ export function createRenderer(device: Device): Renderer {
 
     setCurvatureMix(amount) {
       surfacePass.setCurvatureMix(amount);
+      invalidate();
+    },
+
+    setLines(groups) {
+      linesPass.setGroups(groups);
+      invalidate();
+    },
+
+    setSurfaceVisible(visible) {
+      surfacePass.setVisible(visible);
       invalidate();
     },
 
@@ -101,6 +119,7 @@ export function createRenderer(device: Device): Renderer {
     dispose() {
       this.stop();
       surfacePass.dispose();
+      linesPass.dispose();
     },
   };
 }

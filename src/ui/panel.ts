@@ -5,6 +5,9 @@ import type { Diagnostic } from "../core/expr/diagnostics.ts";
 import { makeChartData, makeSurfacePoint } from "../core/geom/types.ts";
 import type { ParametricSurface } from "../core/geom/parametric.ts";
 import type { TessellatedSurface } from "../core/mesh/tessellate.ts";
+import { createCurveSection } from "./curvePanel.ts";
+import type { LineGroup } from "../gl/passes/lines.ts";
+import type { Vec3 } from "../core/geom/types.ts";
 import { el, replace } from "./dom.ts";
 import { tex } from "./tex.ts";
 
@@ -40,6 +43,9 @@ export interface PanelOptions {
     refit: boolean,
   ) => TessellatedSurface;
   readonly onCurvatureToggle: (on: boolean) => void;
+  readonly setLines: (groups: readonly LineGroup[]) => void;
+  readonly setSurfaceVisible: (visible: boolean) => void;
+  readonly frameCamera: (center: Vec3, radius: number) => void;
 }
 
 const COMPONENT_LABELS = ["x", "y", "z"] as const;
@@ -320,11 +326,13 @@ export function mountPanel(options: PanelOptions): void {
       options.onCurvatureToggle((event.target as HTMLInputElement).checked),
   });
 
-  replace(panel, [
-    el("header", { class: "panel-header" }, [
-      el("h1", { text: "DiffGeo" }),
-      el("p", { text: "Curves and surfaces in R³, after do Carmo." }),
-    ]),
+
+  const curveSection = createCurveSection({
+    setLines: options.setLines,
+    frame: options.frameCamera,
+  });
+
+  const surfaceSections = el("div", {}, [
     el("section", { class: "panel-section" }, [
       el("h2", { class: "section-title", text: "Surface" }),
       picker,
@@ -353,5 +361,54 @@ export function mountPanel(options: PanelOptions): void {
     ]),
   ]);
 
+  const setMode = (mode: "surface" | "curve") => {
+    const surfaceMode = mode === "surface";
+    surfaceSections.hidden = !surfaceMode;
+    curveSection.root.hidden = surfaceMode;
+    options.setSurfaceVisible(surfaceMode);
+    if (surfaceMode) {
+      options.setLines([]);
+      if (compileIfNeeded()) renderAt(FULL_RESOLUTION, true);
+    } else {
+      curveSection.refresh(true);
+    }
+  };
+
+  const modeSwitch = el("div", { class: "modes" }, [
+    el("button", {
+      class: "mode mode--active",
+      text: "Surfaces",
+      onClick: (event: Event) => {
+        setActive(event.target as HTMLElement);
+        setMode("surface");
+      },
+    }),
+    el("button", {
+      class: "mode",
+      text: "Curves",
+      onClick: (event: Event) => {
+        setActive(event.target as HTMLElement);
+        setMode("curve");
+      },
+    }),
+  ]);
+
+  function setActive(button: HTMLElement) {
+    for (const child of Array.from(modeSwitch.children)) {
+      child.classList.toggle("mode--active", child === button);
+    }
+  }
+
+  replace(panel, [
+    el("header", { class: "panel-header" }, [
+      el("h1", { text: "DiffGeo" }),
+      el("p", { text: "Curves and surfaces in R\u00b3, after do Carmo." }),
+    ]),
+    modeSwitch,
+    surfaceSections,
+    curveSection.root,
+  ]);
+
+  curveSection.root.hidden = true;
   selectSpec(spec.id);
 }
