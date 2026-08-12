@@ -53,7 +53,14 @@ export interface LineGroup {
 
 export interface LinesPass {
   setGroups(groups: readonly LineGroup[]): void;
-  draw(viewProjection: Mat4, viewportWidth: number, viewportHeight: number): void;
+  draw(
+    viewProjection: Mat4,
+    viewportWidth: number,
+    viewportHeight: number,
+    /** viewport origin, needed because gl_FragCoord is framebuffer-absolute */
+    originX?: number,
+    originY?: number,
+  ): void;
   dispose(): void;
 }
 
@@ -210,12 +217,13 @@ export function createLinesPass(gl: WebGL2RenderingContext): LinesPass {
       batches = nextBatches;
     },
 
-    draw(viewProjection, viewportWidth, viewportHeight) {
+    draw(viewProjection, viewportWidth, viewportHeight, originX = 0, originY = 0) {
       if (batches.length === 0) return;
 
       program.use();
       gl.uniformMatrix4fv(program.uniform("uViewProj"), false, viewProjection);
       gl.uniform2f(program.uniform("uViewport"), viewportWidth, viewportHeight);
+      gl.uniform2f(program.uniform("uViewportOrigin"), originX, originY);
 
       gl.enable(gl.DEPTH_TEST);
       /**

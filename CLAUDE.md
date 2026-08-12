@@ -80,6 +80,17 @@ microseconds and run on every keystroke. Compiling a jet and tessellating ~32k v
 and must be debounced (draft resolution first, full resolution on idle). A transiently broken
 formula leaves the last good surface on screen rather than blanking the canvas.
 
+## Two traps that have each cost time twice
+
+**Shader source lives in TypeScript template literals, so a backtick inside a GLSL comment
+terminates the string.** Write `gl_FragCoord` without backticks inside `src/gl/shaders/*`.
+`tsc` catches it immediately, but the error points at the GLSL line rather than the cause.
+
+**`gl_FragCoord` is framebuffer-absolute, not viewport-relative.** Any pass whose fragment
+shader compares against screen-space positions computed in the vertex shader must be told the
+viewport origin (`uViewportOrigin` in the lines pass). Omitting it works perfectly while
+everything draws at (0,0) and fails totally the moment something renders into an inset.
+
 ## Style
 
 Matching the sibling project `../grupos`, deliberately with **no linter or formatter** — the style

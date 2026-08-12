@@ -112,7 +112,7 @@ export function createRenderer(device: Device): Renderer {
     const padV = (v1 - v0) * 0.08 || 0.1;
     const projection = orthographic(u0 - padU, u1 + padU, v0 - padV, v1 + padV);
 
-    chartLinesPass.draw(projection, size, size);
+    chartLinesPass.draw(projection, size, size, x, y);
 
     gl.disable(gl.SCISSOR_TEST);
     gl.viewport(0, 0, device.width, device.height);

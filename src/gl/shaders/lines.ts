@@ -52,8 +52,17 @@ in vec3 aColorB;
 in vec2 aArc;
 
 uniform mat4 uViewProj;
-/** drawing-buffer size in device pixels */
+/** viewport size in device pixels */
 uniform vec2 uViewport;
+/**
+ * Viewport origin in device pixels.
+ *
+ * gl_FragCoord is in whole-framebuffer coordinates, not viewport-relative ones, so the
+ * endpoints handed to the fragment shader must be in the same frame. Leaving this out works
+ * only while the viewport starts at (0,0): anything drawn in an inset had every fragment
+ * measured against endpoints offset by the inset position, so the entire line was discarded.
+ */
+uniform vec2 uViewportOrigin;
 uniform float uWidthPx;
 uniform float uFeatherPx;
 uniform float uDepthBias;
@@ -90,8 +99,9 @@ void main() {
     clipB = mix(clipB, clipA, (W_MIN - clipB.w) / (clipA.w - clipB.w));
   }
 
-  vec2 pixelA = (clipA.xy / clipA.w * 0.5 + 0.5) * uViewport;
-  vec2 pixelB = (clipB.xy / clipB.w * 0.5 + 0.5) * uViewport;
+  // Framebuffer coordinates, to match gl_FragCoord in the fragment shader.
+  vec2 pixelA = uViewportOrigin + (clipA.xy / clipA.w * 0.5 + 0.5) * uViewport;
+  vec2 pixelB = uViewportOrigin + (clipB.xy / clipB.w * 0.5 + 0.5) * uViewport;
 
   vec4 clip = mix(clipA, clipB, aQuad.x);
 
