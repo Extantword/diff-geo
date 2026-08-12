@@ -3,8 +3,10 @@
 An interactive engine for **curves and surfaces in R³** — type a formula, see the geometry.
 Concepts and conventions follow Manfredo do Carmo, _Differential Geometry of Curves and Surfaces_.
 
+**→ [extantword.github.io/diff-geo](https://extantword.github.io/diff-geo/)**
+
 > Status: **M0** — hand-written WebGL2 renderer with an orbitable tessellated surface.
-> The symbolic engine (parse → differentiate → curvature) lands in M1. See [the plan](#milestones).
+> The symbolic engine (parse → differentiate → curvature) lands in M1. See [the milestones](#milestones).
 
 ## Develop
 
