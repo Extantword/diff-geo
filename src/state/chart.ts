@@ -116,6 +116,15 @@ export function pushForward(
   request: ChartCurveRequest,
   surface: ParametricSurface | null,
   parameters: ArrayLike<number>,
+  /**
+   * The **surface's** parameter slots, which are a different list from the curve's.
+   *
+   * Passing the curve's array here is a silent disaster rather than a type error: both are
+   * `Float64Array`, so a relation with no parameters hands an empty array to a sphere that
+   * needs R, every point evaluates to NaN, every point reads as degenerate, and the whole
+   * push-forward vanishes with no diagnostic.
+   */
+  surfaceParameters: ArrayLike<number>,
   lift: number,
 ): ChartCurveResult {
   const compiled = compileMany([...request.comps], {
@@ -167,7 +176,7 @@ export function pushForward(
       continue;
     }
 
-    surface.at(u, v, parameters, point);
+    surface.at(u, v, surfaceParameters, point);
     if (point.degenerate) continue;
 
     // Lifted along the normal, so the curve sits on the surface rather than inside it.
@@ -249,6 +258,8 @@ export function sampleChartGraph(
   bounds: ChartBounds,
   surface: ParametricSurface | null,
   parameters: ArrayLike<number>,
+  /** the surface's own parameter slots — see `pushForward` on why these are separate */
+  surfaceParameters: ArrayLike<number>,
   lift: number,
 ): ChartCurveResult {
   const compiled = compileMany([request.body], {
@@ -298,7 +309,7 @@ export function sampleChartGraph(
     }
 
     if (!surface || !inside) continue;
-    surface.at(u, v, parameters, point);
+    surface.at(u, v, surfaceParameters, point);
     if (point.degenerate) continue;
     surfacePoints[i * 3] = point.p[0] + point.N[0] * lift;
     surfacePoints[i * 3 + 1] = point.p[1] + point.N[1] * lift;
@@ -353,6 +364,8 @@ export function sampleChartRelation(
   bounds: ChartBounds,
   surface: ParametricSurface | null,
   parameters: ArrayLike<number>,
+  /** the surface's own parameter slots — see `pushForward` on why these are separate */
+  surfaceParameters: ArrayLike<number>,
   lift: number,
   resolution: number,
 ): ChartRelationResult {
@@ -401,7 +414,7 @@ export function sampleChartRelation(
       [au, av],
       [bu, bv],
     ] as const) {
-      surface.at(u, v, parameters, point);
+      surface.at(u, v, surfaceParameters, point);
       if (point.degenerate) {
         usable = false;
         break;

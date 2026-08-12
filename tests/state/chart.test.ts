@@ -337,3 +337,97 @@ describe("chart graphs and relations", () => {
     closeRel(radiusOf(2), 2, 0.05);
   });
 });
+
+describe("the surface's own parameters reach the push-forward", () => {
+  /**
+   * Every other test here uses `X(u,v) = (u, v, 0)`, which has NO parameters — and that is
+   * exactly what let this bug through. The chart samplers were handing the *curve's* packed
+   * parameter array to `surface.at`, so a relation with no parameters gave a sphere that needs
+   * R an empty array: every point evaluated to NaN, every point read as degenerate, and the
+   * entire push-forward vanished with no diagnostic at all.
+   *
+   * Both arrays are `Float64Array`, so nothing about it was a type error. These cases exist
+   * specifically because a surface with a parameter is the only thing that catches it.
+   */
+  function sphereScene(extra: readonly string[]) {
+    const document = createDocument([
+      "X(u,v) = (R sin u cos v, R sin u sin v, R cos u)",
+      ...extra,
+    ]);
+    const resolved = document.resolution();
+    const rows = document.rows();
+    const domains = new Map<RowId, DomainRange[]>([
+      [rows[0]!.id, [{ min: 0.01, max: 3.13 }, { min: 0, max: 6.28 }]],
+    ]);
+    return buildScene({
+      items: [...resolved.items.values()],
+      parameters: new Map([["R", 2]]),
+      declaredParameters: resolved.declaredParameters,
+      domains,
+      resolution: 120,
+    });
+  }
+
+  /** Largest deviation of any pushed point from the sphere of radius R. */
+  function radialError(scene: ReturnType<typeof sphereScene>, radius: number) {
+    let worst = 0;
+    let checked = 0;
+    for (const group of scene.lines) {
+      for (const line of group.polylines) {
+        for (let i = 0; i < line.count; i++) {
+          if (line.valid && !line.valid[i]) continue;
+          const r = Math.hypot(
+            line.points[i * 3]!,
+            line.points[i * 3 + 1]!,
+            line.points[i * 3 + 2]!,
+          );
+          worst = Math.max(worst, Math.abs(r - radius));
+          checked++;
+        }
+      }
+    }
+    return { worst, checked };
+  }
+
+  it("pushes a relation onto a parametrized sphere", () => {
+    const scene = sphereScene(["u^2 + v^2 = 1"]);
+    const { worst, checked } = radialError(scene, 2);
+    expect(checked).toBeGreaterThan(50);
+    // On the sphere of radius R = 2, plus only the lift.
+    expect(worst).toBeLessThan(0.02);
+  });
+
+  it("pushes a chart graph onto a parametrized sphere", () => {
+    const scene = sphereScene(["f(u) = 1 + sin u"]);
+    const { worst, checked } = radialError(scene, 2);
+    expect(checked).toBeGreaterThan(50);
+    expect(worst).toBeLessThan(0.02);
+  });
+
+  it("follows the surface's slider, not the curve's", () => {
+    // Doubling R must move the pushed curve, which it cannot do if the surface is being
+    // evaluated with the wrong parameter array.
+    const one = radialError(sphereScene(["u^2 + v^2 = 1"]), 2);
+    expect(one.worst).toBeLessThan(0.02);
+
+    const document = createDocument([
+      "X(u,v) = (R sin u cos v, R sin u sin v, R cos u)",
+      "u^2 + v^2 = 1",
+    ]);
+    const resolved = document.resolution();
+    const rows = document.rows();
+    const domains = new Map<RowId, DomainRange[]>([
+      [rows[0]!.id, [{ min: 0.01, max: 3.13 }, { min: 0, max: 6.28 }]],
+    ]);
+    const scene = buildScene({
+      items: [...resolved.items.values()],
+      parameters: new Map([["R", 5]]),
+      declaredParameters: resolved.declaredParameters,
+      domains,
+      resolution: 120,
+    });
+    const five = radialError(scene, 5);
+    expect(five.checked).toBeGreaterThan(50);
+    expect(five.worst).toBeLessThan(0.05);
+  });
+});

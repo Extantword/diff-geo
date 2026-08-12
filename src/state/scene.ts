@@ -392,6 +392,7 @@ export function buildScene(request: SceneRequest): Scene {
           chartBounds,
           primary.surface,
           packParameters(paramNames, parameters, declared),
+          primary.params,
           lift,
         );
         chartCurves.push(result.chart);
@@ -426,6 +427,7 @@ export function buildScene(request: SceneRequest): Scene {
           chartBounds,
           primary.surface,
           packParameters(paramNames, parameters, declared),
+          primary.params,
           lift,
           Math.max(resolution, 120),
         );
@@ -464,6 +466,7 @@ export function buildScene(request: SceneRequest): Scene {
           },
           primary.surface,
           packParameters(paramNames, parameters, declared),
+          primary.params,
           lift,
         );
 
