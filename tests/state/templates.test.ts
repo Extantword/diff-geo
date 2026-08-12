@@ -91,9 +91,9 @@ describe("surface templates", () => {
         const { document, scene } = loadSurface(entry.id);
         const rowId = document.rows()[0]!.id;
         const report = scene.reports.find((r) => r.rowId === rowId);
-        expect(report?.error).toBeUndefined();
-        expect(report?.info, `${entry.id} had no readout`).toBeDefined();
-        expect(report!.info).not.toContain("NaN");
+        expect(report?.errors ?? []).toEqual([]);
+        expect((report?.info ?? []).length, `${entry.id} had no readout`).toBeGreaterThan(0);
+        expect(report!.info.join(" ")).not.toContain("NaN");
       });
     });
   }
@@ -154,8 +154,8 @@ describe("curve templates", () => {
         const { document, scene } = loadCurve(entry.id);
         const rowId = document.rows()[0]!.id;
         const report = scene.reports.find((r) => r.rowId === rowId);
-        expect(report?.error).toBeUndefined();
-        expect(report?.info).toBeDefined();
+        expect(report?.errors ?? []).toEqual([]);
+        expect((report?.info ?? []).length).toBeGreaterThan(0);
       });
     });
   }
@@ -165,7 +165,7 @@ describe("curve templates", () => {
     // implementation gets wrong, so their readouts must say so rather than showing numbers.
     const line = loadCurve("line");
     const lineReport = line.scene.reports[0]!;
-    expect(lineReport.info).toContain("N and B undefined");
+    expect(lineReport.info.join(" ")).toContain("N and B undefined");
 
     const cusp = loadCurve("cusp");
     const cuspLine = cusp.scene.lines[0]!.polylines[0]!;

@@ -2,8 +2,13 @@ import { ctx, type Expr } from "../core/expr/ast.ts";
 import { buildDiffMap, type DiffMap } from "../core/jets/compile.ts";
 import { bishopFrames, createSpaceCurve, makeFrenetFrame } from "../core/geom/curve.ts";
 import { createParametricSurface } from "../core/geom/parametric.ts";
+import {
+  integrateCurvatureLine,
+  integrateGeodesic,
+  sprayDirections,
+} from "../core/geom/geodesic.ts";
 import { robustScale, sampleCurvatureRange } from "../core/geom/curvatureColor.ts";
-import { interval, makeSurfacePoint, type Vec3 } from "../core/geom/types.ts";
+import { interval, makeChartData, makeSurfacePoint, type Vec3 } from "../core/geom/types.ts";
 import { compileScalar } from "../core/expr/eval.ts";
 import { tessellate, type TessellatedSurface } from "../core/mesh/tessellate.ts";
 import type { LineGroup, Polyline } from "../gl/passes/lines.ts";
@@ -65,6 +70,8 @@ export interface SceneRequest {
   readonly resolution: number;
   /** which curve rows should show their Frenet trihedron, and where */
   readonly frames?: ReadonlyMap<RowId, FrameRequest>;
+  /** per-surface overlays: geodesic sprays and lines of curvature */
+  readonly overlays?: ReadonlyMap<RowId, SurfaceOverlay>;
   /**
    * Plane-curve rows to read as curves in the chart rather than in the z = 0 plane.
    *
@@ -75,14 +82,43 @@ export interface SceneRequest {
   readonly inChart?: ReadonlySet<RowId>;
 }
 
+/**
+ * Intrinsic and extrinsic curves drawn on a surface.
+ *
+ * Both start from the centre of the domain rather than from a click, because picking needs the
+ * id-buffer pass that does not exist yet. The centre is at least a defined, reproducible place
+ * to shoot from, and moving to click-to-shoot later changes only where `start` comes from.
+ */
+export interface SurfaceOverlay {
+  /** fan this many geodesics from the domain centre; 0 for none */
+  readonly geodesics: number;
+  /** arc length of each geodesic, as a fraction of the surface's extent */
+  readonly geodesicLength: number;
+  /** draw the two lines of curvature through the domain centre */
+  readonly curvatureLines: boolean;
+}
+
+/** One note about a row, before notes are merged per row. */
+interface RawReport {
+  readonly rowId: RowId;
+  readonly error?: string;
+  readonly info?: string;
+  readonly warning?: string;
+}
+
+/**
+ * Everything to say about one row, as lists.
+ *
+ * Lists rather than single strings because a row genuinely can have several things to report at
+ * once — a surface has its K and H, and separately how its geodesic spray ended. An earlier
+ * version returned one entry per note and the UI keyed them by row into a Map, so the last note
+ * silently erased the others: turning on geodesics made the curvature readout disappear.
+ */
 export interface RowReport {
   readonly rowId: RowId;
-  /** something went wrong compiling or sampling this row */
-  readonly error?: string;
-  /** e.g. "K ∈ [−1.00, 1.00]" or "κ = 0.92, τ = 0.31" */
-  readonly info?: string;
-  /** dropped geometry, worth surfacing when it is most of the row */
-  readonly warning?: string;
+  readonly errors: readonly string[];
+  readonly warnings: readonly string[];
+  readonly info: readonly string[];
 }
 
 export interface Scene {
@@ -157,6 +193,10 @@ function cachedDiffMap(request: {
 }
 
 /** Colours for the moving frame, shared with the row legend. */
+const GEODESIC_COLOR: Vec3 = [1.0, 0.88, 0.4];
+/** k1 and k2 get distinct colours; they are different curves through the same point. */
+const CURVATURE_LINE_1: Vec3 = [1.0, 0.42, 0.42];
+const CURVATURE_LINE_2: Vec3 = [0.45, 0.78, 1.0];
 const T_COLOR: Vec3 = [0.42, 1.0, 0.58];
 const N_COLOR: Vec3 = [1.0, 0.88, 0.4];
 const B_COLOR: Vec3 = [1.0, 0.42, 0.42];
@@ -184,8 +224,9 @@ export function buildScene(request: SceneRequest): Scene {
   const frameRequests = request.frames ?? new Map<RowId, FrameRequest>();
   const declared = request.declaredParameters ?? new Map<string, number>();
   const inChart = request.inChart ?? new Set<RowId>();
+  const overlays = request.overlays ?? new Map<RowId, SurfaceOverlay>();
 
-  const reports: RowReport[] = [];
+  const reports: RawReport[] = [];
   const meshes: TessellatedSurface[] = [];
   const lines: LineGroup[] = [];
   const curvatureSamples: number[] = [];
@@ -263,6 +304,101 @@ export function buildScene(request: SceneRequest): Scene {
             ? `${mesh.droppedTriangles} triangles dropped — check the domain`
             : undefined,
       });
+    } catch (thrown) {
+      reports.push({ rowId: item.rowId, error: messageOf(thrown) });
+    }
+  }
+
+  // ---- geodesics and lines of curvature ----
+  //
+  // Placed after tessellation because the lift and the arc length both scale with the surface's
+  // own size, which is only known once its mesh exists.
+  const sceneExtent = meshes.length > 0 ? extentOfMeshes(meshes) : 1;
+  const overlayLift = chartLift(sceneExtent, resolution, curvatureScale);
+
+  for (const { item, surface, params } of compiledSurfaces) {
+    const overlay = overlays.get(item.rowId);
+    if (!overlay) continue;
+    const uMid = (surface.u.min + surface.u.max) / 2;
+    const vMid = (surface.v.min + surface.v.max) / 2;
+
+    try {
+      if (overlay.geodesics > 0) {
+        const point = makeSurfacePoint();
+        const chart = makeChartData();
+        surface.at(uMid, vMid, params, point, chart);
+
+        if (point.degenerate) {
+          reports.push({
+            rowId: item.rowId,
+            warning: "no tangent plane at the domain centre, so no geodesics were shot",
+          });
+        } else {
+          const length = sceneExtent * overlay.geodesicLength;
+          const polylines: Polyline[] = [];
+          const stops = new Map<string, number>();
+
+          for (const direction of sprayDirections(chart.I, overlay.geodesics)) {
+            const geodesic = integrateGeodesic(surface, params, [uMid, vMid], direction, length);
+            stops.set(geodesic.stop, (stops.get(geodesic.stop) ?? 0) + 1);
+            if (geodesic.chart.length < 2) continue;
+            polylines.push(
+              liftedPolyline(surface, params, geodesic.chart, overlayLift, GEODESIC_COLOR),
+            );
+          }
+          if (polylines.length > 0) {
+            lines.push({ polylines, style: { widthPx: 2.6 } });
+          }
+          // Reporting WHY each ray ended is the difference between a picture and a diagnosis.
+          reports.push({
+            rowId: item.rowId,
+            info: `${polylines.length} geodesics · ${[...stops]
+              .map(([reason, count]) => `${count} ${reason}`)
+              .join(", ")}`,
+          });
+        }
+      }
+
+      if (overlay.curvatureLines) {
+        const point = makeSurfacePoint();
+        surface.at(uMid, vMid, params, point);
+        if (point.degenerate) {
+          // Checked before `umbilic`, because a degenerate point is not umbilic — the flags are
+          // cleared there — so testing only for umbilic left this case drawing nothing at all
+          // and saying nothing either.
+          reports.push({
+            rowId: item.rowId,
+            warning: "no tangent plane at the domain centre, so no lines of curvature",
+          });
+        } else if (point.umbilic) {
+          reports.push({
+            rowId: item.rowId,
+            warning: point.planar
+              ? "planar point at the centre: every direction is principal"
+              : "umbilic point at the centre: the principal directions are arbitrary here",
+          });
+        } else {
+          const polylines: Polyline[] = [];
+          for (const which of [1, 2] as const) {
+            const colour = which === 1 ? CURVATURE_LINE_1 : CURVATURE_LINE_2;
+            // Both ways from the centre, so the curve is not a one-sided half.
+            for (const sign of [1, -1] as const) {
+              const run = integrateCurvatureLine(
+                surface,
+                params,
+                [uMid, vMid],
+                which,
+                sign * sceneExtent * 1.2,
+              );
+              if (run.chart.length < 2) continue;
+              polylines.push(
+                liftedPolyline(surface, params, run.chart, overlayLift, colour),
+              );
+            }
+          }
+          if (polylines.length > 0) lines.push({ polylines, style: { widthPx: 3 } });
+        }
+      }
     } catch (thrown) {
       reports.push({ rowId: item.rowId, error: messageOf(thrown) });
     }
@@ -529,7 +665,7 @@ export function buildScene(request: SceneRequest): Scene {
     lines,
     chartLines,
     chartBounds,
-    reports,
+    reports: mergeReports(reports),
     bounds,
     curvatureScale,
   };
@@ -580,6 +716,63 @@ function extentOf(frames: {
     if (Number.isFinite(width)) span = Math.max(span, width);
   }
   return span;
+}
+
+/**
+ * A chart polyline as a 3D one, lifted clear of the mesh.
+ *
+ * Degenerate samples are marked invalid rather than dropped, so the line pass breaks the stroke
+ * there instead of connecting across a pole.
+ */
+function liftedPolyline(
+  surface: ReturnType<typeof createParametricSurface>,
+  params: ArrayLike<number>,
+  chart: readonly (readonly [number, number])[],
+  lift: number,
+  color: Vec3,
+): Polyline {
+  const count = chart.length;
+  const points = new Float64Array(count * 3);
+  const valid = new Uint8Array(count);
+  const arcLength = new Float64Array(count);
+  const point = makeSurfacePoint();
+
+  for (let i = 0; i < count; i++) {
+    const [u, v] = chart[i]!;
+    surface.at(u, v, params, point);
+    if (point.degenerate) continue;
+    points[i * 3] = point.p[0] + point.N[0] * lift;
+    points[i * 3 + 1] = point.p[1] + point.N[1] * lift;
+    points[i * 3 + 2] = point.p[2] + point.N[2] * lift;
+    valid[i] = 1;
+    if (i > 0) {
+      arcLength[i] =
+        arcLength[i - 1]! +
+        Math.hypot(
+          points[i * 3]! - points[(i - 1) * 3]!,
+          points[i * 3 + 1]! - points[(i - 1) * 3 + 1]!,
+          points[i * 3 + 2]! - points[(i - 1) * 3 + 2]!,
+        );
+    }
+  }
+
+  return { points, count, valid, arcLength, color };
+}
+
+/** Collapse the raw notes into one entry per row, preserving every line. */
+function mergeReports(raw: readonly RawReport[]): RowReport[] {
+  const byRow = new Map<RowId, { errors: string[]; warnings: string[]; info: string[] }>();
+  for (const note of raw) {
+    let entry = byRow.get(note.rowId);
+    if (!entry) {
+      entry = { errors: [], warnings: [], info: [] };
+      byRow.set(note.rowId, entry);
+    }
+    if (note.error) entry.errors.push(note.error);
+    if (note.warning) entry.warnings.push(note.warning);
+    if (note.info) entry.info.push(note.info);
+  }
+  return [...byRow].map(([rowId, entry]) => ({ rowId, ...entry }));
 }
 
 function messageOf(thrown: unknown): string {

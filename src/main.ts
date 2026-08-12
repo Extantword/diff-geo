@@ -1,7 +1,12 @@
 import "./style.css";
 import { legendGradient } from "./core/geom/curvatureColor.ts";
 import { createDocument, type RowId } from "./state/graph.ts";
-import { buildScene, type DomainRange, type FrameRequest } from "./state/scene.ts";
+import {
+  buildScene,
+  type DomainRange,
+  type FrameRequest,
+  type SurfaceOverlay,
+} from "./state/scene.ts";
 import { createDevice } from "./gl/device.ts";
 import { createRenderer } from "./gl/renderer.ts";
 import { createAnimator } from "./ui/animate.ts";
@@ -76,6 +81,7 @@ function main() {
   const frames = new Map<RowId, FrameRequest>();
   const rowSliders = new Map<RowId, SliderSpec>();
   const inChart = new Set<RowId>();
+  const overlays = new Map<RowId, SurfaceOverlay>();
   const animator = createAnimator();
 
   const legendLabels = el("div", { class: "legend-labels" });
@@ -103,6 +109,7 @@ function main() {
       resolution,
       frames,
       inChart,
+      overlays,
     });
 
     renderer.setSurfaceMesh(scene.mesh ?? EMPTY_MESH);
@@ -201,6 +208,7 @@ function main() {
     rowSliders,
     inChart,
     animator,
+    overlays,
   });
   const templates = createTemplatePicker({
     document: store,

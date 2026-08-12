@@ -112,7 +112,7 @@ describe("pushing a chart curve onto the surface", () => {
       [1],
     );
     const report = scene.reports.find((r) => r.rowId === document.rows()[1]!.id);
-    expect(report?.warning).toContain("outside the domain");
+    expect(report?.warnings.join(" ")).toContain("outside the domain");
     // Nothing was clamped onto the boundary: the curve simply has no image.
     const surfaceGroups = scene.lines.filter((group) =>
       group.polylines.some((line) => line.count > 100),
@@ -280,7 +280,7 @@ describe("chart graphs and relations", () => {
     // v = 10 is far above v ∈ [0, 2π], so the whole graph is off the chart.
     const { document, scene } = sceneWithChart(["X(u,v) = (u, v, 0)", "f(u) = 10"]);
     const report = scene.reports.find((r) => r.rowId === document.rows()[1]!.id);
-    expect(report?.warning).toContain("leaves the domain");
+    expect(report?.warnings.join(" ")).toContain("leaves the domain");
   });
 
   it("draws a relation's level set in the chart and on the surface", () => {
@@ -289,7 +289,7 @@ describe("chart graphs and relations", () => {
       "(u - 3)^2 + (v - 3)^2 = 1",
     ]);
     const report = scene.reports.find((r) => r.rowId === document.rows()[1]!.id);
-    expect(report?.info).toContain("contour segments");
+    expect(report?.info.join(" ")).toContain("contour segments");
 
     // The contour lies on the circle of radius 1 about (3, 3), in both views.
     const chartSegments = scene.chartLines.at(-1)!.polylines;
@@ -315,7 +315,7 @@ describe("chart graphs and relations", () => {
       "u^2 + v^2 = -1",
     ]);
     const report = scene.reports.find((r) => r.rowId === document.rows()[1]!.id);
-    expect(report?.info).toContain("no solutions");
+    expect(report?.info.join(" ")).toContain("no solutions");
   });
 
   it("follows sliders in a relation", () => {

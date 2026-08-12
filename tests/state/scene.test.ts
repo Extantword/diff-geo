@@ -156,8 +156,8 @@ describe("buildScene", () => {
     const rowId = document.rows()[0]!.id;
     const report = scene.reports.find((r) => r.rowId === rowId);
     // A plane: K = H = 0.
-    expect(report?.info).toContain("K = 0.000");
-    expect(report?.error).toBeUndefined();
+    expect(report?.info.join(" ")).toContain("K = 0.000");
+    expect(report?.errors ?? []).toEqual([]);
   });
 
   it("survives a row that cannot be compiled", () => {
@@ -224,8 +224,8 @@ describe("the moving frame", () => {
     expect(scene.lines).toHaveLength(2);
     expect(scene.lines[1]!.polylines).toHaveLength(3);
     const report = scene.reports.find((r) => r.rowId === items[0]!.rowId);
-    expect(report?.info).toMatch(/κ = /);
-    expect(report?.info).toMatch(/τ = /);
+    expect(report?.info.join(" ")).toMatch(/κ = /);
+    expect(report?.info.join(" ")).toMatch(/τ = /);
   });
 
   it("draws only T on a straight line, refusing to invent N and B", () => {
@@ -242,7 +242,7 @@ describe("the moving frame", () => {
     });
     expect(scene.lines[1]!.polylines).toHaveLength(1);
     const report = scene.reports.find((r) => r.rowId === items[0]!.rowId);
-    expect(report?.info).toContain("N and B undefined here");
+    expect(report?.info.join(" ")).toContain("N and B undefined here");
   });
 
   it("follows the requested position along the curve", () => {
@@ -295,7 +295,138 @@ describe("points", () => {
   it("reports a non-finite point rather than emitting it", () => {
     const { document, scene } = sceneOf(["(1/0, 0, 0)"]);
     const report = scene.reports.find((r) => r.rowId === document.rows()[0]!.id);
-    expect(report?.error).toContain("not finite");
+    expect((report?.errors ?? []).join(" ")).toContain("not finite");
     expect(scene.lines).toHaveLength(0);
   });
   });
+
+describe("surface overlays", () => {
+  function overlayScene(sources: readonly string[], overlay: Record<string, unknown>) {
+    const document = createDocument(sources);
+    const resolved = document.resolution();
+    const items = [...resolved.items.values()];
+    const surfaceRow = items.find(
+      (item) => item.kind === "parametricSurface" || item.kind === "graphSurface",
+    )!;
+    return {
+      document,
+      surfaceRow,
+      scene: buildScene({
+        items,
+        parameters: new Map(),
+        declaredParameters: resolved.declaredParameters,
+        domains: new Map(),
+        resolution: 40,
+        overlays: new Map([[surfaceRow.rowId, overlay as never]]),
+      }),
+    };
+  }
+
+  it("draws nothing unless a row asks", () => {
+    const { scene } = sceneOf(["X(u,v) = (u, v, u v)"]);
+    expect(scene.lines).toHaveLength(0);
+  });
+
+  it("shoots a geodesic spray from the domain centre", () => {
+    const { scene } = overlayScene(["X(u,v) = (u, v, 0.3 u v)"], {
+      geodesics: 8,
+      geodesicLength: 1,
+      curvatureLines: false,
+    });
+    const group = scene.lines.at(-1)!;
+    expect(group.polylines).toHaveLength(8);
+    // Each ray is densely sampled, not a five-point polyline.
+    for (const line of group.polylines) {
+      expect(line.count).toBeGreaterThan(100);
+      for (const value of line.points) expect(Number.isFinite(value)).toBe(true);
+    }
+  });
+
+  it("reports why each ray stopped", () => {
+    // A picture of a truncated geodesic is ambiguous; the reason is the diagnosis.
+    const { document, scene } = overlayScene(["X(u,v) = (u, v, 0)"], {
+      geodesics: 4,
+      geodesicLength: 4,
+      curvatureLines: false,
+    });
+    const report = scene.reports.find((r) => r.rowId === document.rows()[0]!.id);
+    expect(report?.info.join(" ")).toContain("geodesics");
+    // On a bounded plane patch a long geodesic must leave the chart.
+    expect(report?.info.join(" ")).toContain("outOfDomain");
+  });
+
+  it("puts every geodesic on the surface it came from", () => {
+    // The strongest check available without a picture: on a sphere every point of every ray must
+    // lie at radius R, plus only the lift.
+    const document = createDocument([
+      "X(u,v) = (2 sin u cos v, 2 sin u sin v, 2 cos u)",
+    ]);
+    const resolved = document.resolution();
+    const items = [...resolved.items.values()];
+    const scene = buildScene({
+      items,
+      parameters: new Map(),
+      declaredParameters: resolved.declaredParameters,
+      domains: new Map([[items[0]!.rowId, [{ min: 0.2, max: 2.9 }, { min: 0, max: 6.28 }]]]),
+      resolution: 40,
+      overlays: new Map([
+        [items[0]!.rowId, { geodesics: 6, geodesicLength: 0.5, curvatureLines: false }],
+      ]),
+    });
+
+    let checked = 0;
+    for (const line of scene.lines.at(-1)!.polylines) {
+      for (let i = 0; i < line.count; i++) {
+        if (!line.valid?.[i]) continue;
+        const r = Math.hypot(line.points[i * 3]!, line.points[i * 3 + 1]!, line.points[i * 3 + 2]!);
+        expect(Math.abs(r - 2)).toBeLessThan(0.05);
+        checked++;
+      }
+    }
+    expect(checked).toBeGreaterThan(200);
+  });
+
+  it("draws both lines of curvature, in both directions", () => {
+    const { scene } = overlayScene(["X(u,v) = (u, v, 0.4 (u^2 - v^2))"], {
+      geodesics: 0,
+      geodesicLength: 1,
+      curvatureLines: true,
+    });
+    // k1 and k2, each run forward and backward from the centre.
+    expect(scene.lines.at(-1)!.polylines).toHaveLength(4);
+  });
+
+  it("refuses lines of curvature at an umbilic and says why", () => {
+    // Every point of a sphere is umbilic, so the principal directions are genuinely arbitrary
+    // there and drawing one would present a choice as though it meant something.
+    const document = createDocument(["X(u,v) = (sin u cos v, sin u sin v, cos u)"]);
+    const resolved = document.resolution();
+    const items = [...resolved.items.values()];
+    const scene = buildScene({
+      items,
+      parameters: new Map(),
+      declaredParameters: resolved.declaredParameters,
+      // An explicit domain, so the centre is an ordinary point rather than a pole — the pole
+      // case is covered separately below.
+      domains: new Map([[items[0]!.rowId, [{ min: 0.4, max: 2.2 }, { min: 0, max: 6.28 }]]]),
+      resolution: 40,
+      overlays: new Map([
+        [items[0]!.rowId, { geodesics: 0, geodesicLength: 1, curvatureLines: true }],
+      ]),
+    });
+    const report = scene.reports.find((r) => r.rowId === document.rows()[0]!.id);
+    expect(report?.warnings.join(" ")).toContain("umbilic");
+    expect(scene.lines).toHaveLength(0);
+  });
+
+  it("says so when the domain centre has no tangent plane", () => {
+    // The sphere's default domain centres on u = π, which is the south pole. Checking only for
+    // umbilic left this drawing nothing and reporting nothing.
+    const { scene, document } = overlayScene(
+      ["X(u,v) = (sin u cos v, sin u sin v, cos u)"],
+      { geodesics: 4, geodesicLength: 1, curvatureLines: true },
+    );
+    const report = scene.reports.find((r) => r.rowId === document.rows()[0]!.id);
+    expect(report?.warnings.join(" ")).toContain("no tangent plane");
+  });
+});

@@ -538,3 +538,19 @@ option {
   color: #06231f;
   border-color: var(--accent);
 }
+
+.row__overlay:empty {
+  display: none;
+}
+
+.row__overlay {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--panel-border);
+}
+
+.row__overlay .slider {
+  margin-bottom: 8px;
+}
+
+.curvature-key__2 { color: #6b9bff; }

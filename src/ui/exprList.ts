@@ -7,6 +7,7 @@ import {
   type DomainRange,
   type FrameRequest,
   type RowReport,
+  type SurfaceOverlay,
 } from "../state/scene.ts";
 import type { Animator } from "./animate.ts";
 import { el, formatValue, replace } from "./dom.ts";
@@ -85,6 +86,8 @@ export interface ExprListOptions {
   readonly inChart: Set<RowId>;
   /** Drives play / pause / rewind on any slider. */
   readonly animator: Animator;
+  /** Per-surface overlays: geodesic sprays and lines of curvature. */
+  readonly overlays: Map<RowId, SurfaceOverlay>;
 }
 
 export interface ExprList {
@@ -125,6 +128,9 @@ interface RowView {
   readonly valueHost: HTMLElement;
   /** host for the chart toggle a plane-curve row gets */
   readonly chartHost: HTMLElement;
+  /** host for the geodesic and curvature-line controls a surface row gets */
+  readonly overlayHost: HTMLElement;
+  overlayBuilt: boolean;
   /** the name the inline slider was built for, or "" if there is none */
   valueName: string;
 }
@@ -222,6 +228,7 @@ export function createExprList(options: ExprListOptions): ExprList {
     const frameHost = el("div", { class: "row__frame" });
     const valueHost = el("div", { class: "row__value" });
     const chartHost = el("div", { class: "row__chart" });
+    const overlayHost = el("div", { class: "row__overlay" });
 
     const remove = el("button", {
       class: "row__remove",
@@ -242,6 +249,7 @@ export function createExprList(options: ExprListOptions): ExprList {
       valueHost,
       chartHost,
       domainHost,
+      overlayHost,
       frameHost,
       notes,
     ]);
@@ -257,6 +265,8 @@ export function createExprList(options: ExprListOptions): ExprList {
       frameHost,
       valueHost,
       chartHost,
+      overlayHost,
+      overlayBuilt: false,
       domainVars: "",
       valueName: "",
     };
@@ -500,6 +510,109 @@ export function createExprList(options: ExprListOptions): ExprList {
     ]);
   };
 
+  /**
+   * Geodesics and lines of curvature, on surface rows.
+   *
+   * Both shoot from the centre of the domain, because picking a point needs the id-buffer pass
+   * that does not exist yet. The centre is a defined, reproducible place to start from, and
+   * moving to click-to-shoot later changes only where the start comes from.
+   */
+  const syncOverlayControl = (view: RowView, item: Item | null) => {
+    const isSurface = item?.kind === "parametricSurface" || item?.kind === "graphSurface";
+    if (!isSurface) {
+      if (view.overlayBuilt) {
+        replace(view.overlayHost, []);
+        view.overlayBuilt = false;
+      }
+      options.overlays.delete(view.id);
+      return;
+    }
+    if (view.overlayBuilt) return;
+    view.overlayBuilt = true;
+
+    const state: SurfaceOverlay = options.overlays.get(view.id) ?? {
+      geodesics: 0,
+      geodesicLength: 1.5,
+      curvatureLines: false,
+    };
+    let geodesics = state.geodesics;
+    let geodesicLength = state.geodesicLength;
+    let curvatureLines = state.curvatureLines;
+
+    const commit = () => {
+      if (geodesics === 0 && !curvatureLines) options.overlays.delete(view.id);
+      else options.overlays.set(view.id, { geodesics, geodesicLength, curvatureLines });
+      options.onEdit(false);
+    };
+
+    const count = el("input", {
+      type: "range",
+      class: "slider__input",
+      min: 0,
+      max: 24,
+      step: 1,
+      value: geodesics,
+    }) as HTMLInputElement;
+    const countReadout = el("span", { class: "slider__value", text: String(geodesics) });
+    count.addEventListener("input", () => {
+      geodesics = Number(count.value);
+      countReadout.textContent = String(geodesics);
+      commit();
+    });
+
+    const length = el("input", {
+      type: "range",
+      class: "slider__input",
+      min: 0.2,
+      max: 6,
+      step: 0.1,
+      value: geodesicLength,
+    }) as HTMLInputElement;
+    const lengthReadout = el("span", {
+      class: "slider__value",
+      text: geodesicLength.toFixed(1),
+    });
+    length.addEventListener("input", () => {
+      geodesicLength = Number(length.value);
+      lengthReadout.textContent = geodesicLength.toFixed(1);
+      commit();
+    });
+
+    const curvature = el("input", {
+      type: "checkbox",
+      checked: curvatureLines,
+    }) as HTMLInputElement;
+    curvature.addEventListener("change", () => {
+      curvatureLines = curvature.checked;
+      commit();
+    });
+
+    replace(view.overlayHost, [
+      el("div", { class: "slider" }, [
+        el("label", { class: "slider__label" }, [
+          el("span", { text: "geodesic spray" }),
+          countReadout,
+        ]),
+        count,
+      ]),
+      el("div", { class: "slider" }, [
+        el("label", { class: "slider__label" }, [
+          el("span", { text: "arc length" }),
+          lengthReadout,
+        ]),
+        length,
+      ]),
+      el("label", { class: "toggle toggle--tight" }, [
+        curvature,
+        el("span", { text: "lines of curvature" }),
+        el("span", { class: "frame-key" }, [
+          el("span", { class: "frame-key__b", text: "k\u2081" }),
+          el("span", { class: "curvature-key__2", text: "k\u2082" }),
+        ]),
+      ]),
+    ]);
+  };
+
   const syncFrameControl = (view: RowView, item: Item | null) => {
     const isCurve = item?.kind === "spaceCurve" || item?.kind === "planeCurve";
     if (!isCurve) {
@@ -717,14 +830,16 @@ export function createExprList(options: ExprListOptions): ExprList {
     const notes: HTMLElement[] = [];
 
     for (const diagnostic of diagnostics) notes.push(diagnosticNode(diagnostic));
-    if (report?.error) {
-      notes.push(el("div", { class: "diag diag--error", text: report.error }));
+    // Every line, not just the last: a surface reports its curvature and, separately, how its
+    // geodesic spray ended.
+    for (const message of report?.errors ?? []) {
+      notes.push(el("div", { class: "diag diag--error", text: message }));
     }
-    if (report?.warning) {
-      notes.push(el("div", { class: "diag diag--warning", text: report.warning }));
+    for (const message of report?.warnings ?? []) {
+      notes.push(el("div", { class: "diag diag--warning", text: message }));
     }
-    if (report?.info) {
-      notes.push(el("div", { class: "row__info", text: report.info }));
+    for (const message of report?.info ?? []) {
+      notes.push(el("div", { class: "row__info", text: message }));
     }
     if (item && NOT_YET_DRAWN.has(item.kind)) {
       notes.push(
@@ -766,6 +881,7 @@ export function createExprList(options: ExprListOptions): ExprList {
 
       syncValueSlider(view, item);
       syncChartToggle(view, item);
+      syncOverlayControl(view, item);
       syncDomain(view, item);
       syncFrameControl(view, item);
 
