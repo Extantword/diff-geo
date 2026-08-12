@@ -63,6 +63,13 @@ export interface Item {
   readonly comps: readonly Expr[];
   /** free names that are neither vars nor defined elsewhere — candidate sliders */
   readonly params: readonly string[];
+  /**
+   * True when this two-component curve was written in the chart variables, so it should be
+   * read as a curve in the (u, v) plane rather than in the z = 0 plane of R³.
+   *
+   * A guess at intent, taken from the variable names, and overridable in the UI.
+   */
+  readonly chartByDefault?: boolean;
 }
 
 export interface Resolution {
@@ -557,35 +564,94 @@ function classify(
     case "vectorFunction": {
       const comps = inlineAll(parsed.comps);
       if (!comps) return null;
-      const vars = parsed.args;
-      const keep = new Set(vars);
-      const params = paramsOf(comps, keep, values, functions);
 
-      if (vars.length === 1 && comps.length === 3) {
-        return { rowId, kind: "spaceCurve", name: parsed.name, vars, comps, params };
+      const shaped = (vars: readonly string[]): Item | null => {
+        const keep = new Set(vars);
+        const params = paramsOf(comps, keep, values, functions);
+        if (vars.length === 1 && comps.length === 3) {
+          return { rowId, kind: "spaceCurve", name: parsed.name, vars, comps, params };
+        }
+        if (vars.length === 1 && comps.length === 2) {
+          // Written in u or v rather than t? Then it was meant for the chart.
+          return {
+            rowId,
+            kind: "planeCurve",
+            name: parsed.name,
+            vars,
+            comps,
+            params,
+            chartByDefault: vars[0] === "u" || vars[0] === "v",
+          };
+        }
+        if (vars.length === 2 && comps.length === 3) {
+          return {
+            rowId,
+            kind: "parametricSurface",
+            name: parsed.name,
+            vars,
+            comps,
+            params,
+          };
+        }
+        if (vars.length === 3 && comps.length === 3) {
+          return { rowId, kind: "vectorField", name: parsed.name, vars, comps, params };
+        }
+        return null;
+      };
+
+      // First reading: exactly what was declared.
+      const declaredShape = shaped(parsed.args);
+      if (declaredShape) return declaredShape;
+
+      /**
+       * Second reading: drop parameters that never appear in the body.
+       *
+       * `Y(u,v) = (u, u)` is a function of u alone, so it is a curve — rejecting it as
+       * "2 parameters, 2 components" was the bug. Applied only as a *fallback*, because doing
+       * it first is wrong: `V(x,y,z) = (y, -x, 0)` does not mention z either, and it is still
+       * an ordinary vector field on R³ rather than a surface.
+       */
+      const used = new Set(comps.flatMap((comp) => freeVars(comp)));
+      const effective = parsed.args.filter((name) => used.has(name));
+      if (effective.length > 0 && effective.length < parsed.args.length) {
+        const reduced = shaped(effective);
+        if (reduced) {
+          const vacuous = parsed.args.filter((name) => !used.has(name));
+          push(
+            rowId,
+            hint(
+              "H_ADD_SLIDER",
+              `${vacuous.join(", ")} ${vacuous.length === 1 ? "does" : "do"} not appear in ` +
+                `${parsed.name}, so it was read as a function of ${effective.join(", ")}`,
+            ),
+          );
+          return reduced;
+        }
       }
-      if (vars.length === 1 && comps.length === 2) {
-        return { rowId, kind: "planeCurve", name: parsed.name, vars, comps, params };
-      }
-      if (vars.length === 2 && comps.length === 3) {
-        return {
+
+      if (parsed.args.length === 2 && comps.length === 2) {
+        // Two parameters into two dimensions is a map of the chart onto itself — a
+        // reparametrization. Named so the message can say so, but nothing draws it.
+        push(
           rowId,
-          kind: "parametricSurface",
-          name: parsed.name,
-          vars,
-          comps,
-          params,
-        };
+          error(
+            "E_CLASSIFY",
+            `${parsed.name} maps two parameters to two components, which is a ` +
+              `reparametrization of the chart rather than a curve or a surface. For a curve ` +
+              `in the (u, v) plane use one parameter, e.g. ${parsed.name}(t) = (…, …)`,
+          ),
+        );
+        return null;
       }
-      if (vars.length === 3 && comps.length === 3) {
-        return { rowId, kind: "vectorField", name: parsed.name, vars, comps, params };
-      }
+
       push(
         rowId,
         error(
           "E_CLASSIFY",
-          `${parsed.name} has ${vars.length} parameter(s) and ${comps.length} ` +
-            `component(s), which is not a curve, surface or field`,
+          `${parsed.name} has ${parsed.args.length} parameter(s) and ${comps.length} ` +
+            `component(s). Recognized shapes are: one parameter with two or three components ` +
+            `(a curve), two parameters with three (a surface), three with three (a vector ` +
+            `field)`,
         ),
       );
       return null;

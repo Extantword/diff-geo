@@ -137,6 +137,8 @@ export function createExprList(options: ExprListOptions): ExprList {
   const views = new Map<RowId, RowView>();
   /** the parameter list the sliders were built for */
   let renderedSliders = "\u0000";
+  /** Rows whose chart default has already been applied, so a later edit does not re-apply it. */
+  const seenChartRows = new Set<RowId>();
 
   const addButton = el("button", {
     class: "add-row",
@@ -414,9 +416,17 @@ export function createExprList(options: ExprListOptions): ExprList {
     if (!eligible) {
       if (view.chartHost.childElementCount > 0) replace(view.chartHost, []);
       options.inChart.delete(view.id);
+      seenChartRows.delete(view.id);
       return;
     }
     if (view.chartHost.childElementCount > 0) return;
+
+    // Honour the classifier's reading of intent the first time this row is seen. A curve
+    // written in u or v was meant for the chart; one written in t was not.
+    if (!seenChartRows.has(view.id)) {
+      seenChartRows.add(view.id);
+      if (item.chartByDefault) options.inChart.add(view.id);
+    }
 
     const toggle = el("input", {
       type: "checkbox",

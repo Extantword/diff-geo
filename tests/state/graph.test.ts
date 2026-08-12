@@ -47,10 +47,49 @@ describe("classification", () => {
     expect(kindsOf("r(u) = 2 + cos u")).toEqual(["functionDefinition"]);
   });
 
+  it("ignores a declared parameter that never appears", () => {
+    // `Y(u,v) = (u, u)` is a function of u alone, so it is a curve. Counting declared
+    // parameters instead rejected it as "2 parameters, 2 components", which was the bug.
+    expect(kindsOf("Y(u,v) = (u, u)")).toEqual(["planeCurve"]);
+    // Applied only as a fallback, so a declared signature that already classifies is left
+    // alone: an extruded curve stays the surface it was written as (a degenerate one, which
+    // the tessellator then reports honestly), and a vector field independent of z stays a
+    // vector field.
+    expect(kindsOf("X(u,v) = (cos u, sin u, 0)")).toEqual(["parametricSurface"]);
+    expect(kindsOf("V(x,y,z) = (y, -x, 0)")).toEqual(["vectorField"]);
+  });
+
+  it("says so when a parameter was dropped", () => {
+    const codes = codesFor(["Y(u,v) = (u, u)"], 0);
+    expect(codes).not.toContain("E_CLASSIFY");
+    const { document, resolution } = documentOf("Y(u,v) = (u, u)");
+    const diagnostics = resolution.diagnostics.get(document.rows()[0]!.id) ?? [];
+    expect(diagnostics.map((d) => d.message).join(" ")).toContain("does not appear");
+  });
+
+  it("marks a curve written in chart variables as belonging to the chart", () => {
+    const { document, resolution } = documentOf("Y(u,v) = (u, u)");
+    const item = resolution.items.get(document.rows()[0]!.id)!;
+    expect(item.chartByDefault).toBe(true);
+
+    // One written in t is an ordinary plane curve.
+    const other = documentOf("c(t) = (cos t, sin t)");
+    const plane = other.resolution.items.get(other.document.rows()[0]!.id)!;
+    expect(plane.chartByDefault).toBe(false);
+  });
+
+  it("explains a two-parameter, two-component row instead of just refusing it", () => {
+    // A genuine reparametrization of the chart: recognized, named, and not drawn.
+    const { document, resolution } = documentOf("Y(u,v) = (v, u)");
+    const diagnostics = resolution.diagnostics.get(document.rows()[0]!.id) ?? [];
+    expect(diagnostics.map((d) => d.code)).toContain("E_CLASSIFY");
+    expect(diagnostics.map((d) => d.message).join(" ")).toContain("reparametrization");
+  });
+
   it("reports a shape it cannot classify", () => {
     // Four parameters and two components parses fine; it just is not any object in the
     // book, so the failure belongs to classification rather than to the parser.
-    expect(codesFor(["W(u,v,w,q) = (1, 2)"], 0)).toContain("E_CLASSIFY");
+    expect(codesFor(["W(u,v,w,q) = (u, w)"], 0)).toContain("E_CLASSIFY");
     expect(codesFor(["X(u,v) = (1, 2, 3, 4)"], 0)).toContain("E_CLASSIFY");
   });
 });
