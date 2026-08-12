@@ -122,9 +122,27 @@ function main() {
 
     const surfaces = scene.mesh ? scene.mesh.triangleCount.toLocaleString() : "0";
     const curveCount = scene.lines.reduce((n, group) => n + group.polylines.length, 0);
+    const gl = renderer.lineStats();
+    const missing = Object.entries(gl.main.attributeLocations)
+      .filter(([, location]) => location < 0)
+      .map(([name]) => name);
     replace(stats, [
       el("div", { text: `triangles  ${surfaces}` }),
       el("div", { text: `curves     ${curveCount}` }),
+      el("div", { text: `3D lines   ${gl.main.batches} groups, ${gl.main.instances} segments` }),
+      el("div", { text: `chart      ${gl.chart.batches} groups, ${gl.chart.instances} segments` }),
+      gl.main.glError !== 0 || gl.chart.glError !== 0
+        ? el("div", {
+            class: "diag diag--error",
+            text: `GL error ${gl.main.glError || gl.chart.glError}`,
+          })
+        : null,
+      missing.length > 0
+        ? el("div", {
+            class: "diag diag--error",
+            text: `shader attributes not found: ${missing.join(", ")}`,
+          })
+        : null,
     ]);
 
     // A parameter change cannot alter any row's text or structure, so it only needs the

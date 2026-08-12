@@ -51,8 +51,19 @@ export interface LineGroup {
   readonly style?: LineStyle;
 }
 
+/** What the pass actually did last frame, for the on-screen diagnostics. */
+export interface LineStats {
+  readonly batches: number;
+  readonly instances: number;
+  /** most recent GL error code seen after a draw, or 0 */
+  readonly glError: number;
+  /** locations the program reported for each attribute; -1 means "not found" */
+  readonly attributeLocations: Readonly<Record<string, number>>;
+}
+
 export interface LinesPass {
   setGroups(groups: readonly LineGroup[]): void;
+  stats(): LineStats;
   draw(
     viewProjection: Mat4,
     viewportWidth: number,
@@ -141,6 +152,8 @@ export function createLinesPass(gl: WebGL2RenderingContext): LinesPass {
 
   let batches: Batch[] = [];
   let capacity = 0;
+  let instances = 0;
+  let glError = 0;
 
   return {
     setGroups(groups) {
@@ -215,6 +228,15 @@ export function createLinesPass(gl: WebGL2RenderingContext): LinesPass {
         gl.bufferSubData(gl.ARRAY_BUFFER, 0, data);
       }
       batches = nextBatches;
+      instances = total;
+    },
+
+    stats() {
+      const attributeLocations: Record<string, number> = { aQuad: program.attribute("aQuad") };
+      for (const field of INSTANCE_FIELDS) {
+        attributeLocations[field.name] = program.attribute(field.name);
+      }
+      return { batches: batches.length, instances, glError, attributeLocations };
     },
 
     draw(viewProjection, viewportWidth, viewportHeight, originX = 0, originY = 0) {
@@ -265,6 +287,11 @@ export function createLinesPass(gl: WebGL2RenderingContext): LinesPass {
       gl.disable(gl.BLEND);
       // Restore for whatever draws next.
       gl.depthMask(true);
+
+      // Cheap and only meaningful when something is wrong: one call per frame, and it is the
+      // difference between diagnosing a blank viewport and guessing at it.
+      const error = gl.getError();
+      if (error !== 0) glError = error;
     },
 
     dispose() {

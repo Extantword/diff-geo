@@ -1,7 +1,12 @@
 import type { TessellatedSurface } from "../core/mesh/tessellate.ts";
 import { createCamera, type Camera } from "./camera.ts";
 import type { Device } from "./device.ts";
-import { createLinesPass, type LineGroup, type LinesPass } from "./passes/lines.ts";
+import {
+  createLinesPass,
+  type LineGroup,
+  type LineStats,
+  type LinesPass,
+} from "./passes/lines.ts";
 import { createSurfacePass, type SurfacePass } from "./passes/surface.ts";
 import { multiply, orthographic } from "./mat4.ts";
 
@@ -33,6 +38,8 @@ export interface Renderer {
   setSurfaceVisible(visible: boolean): void;
   /** Request one redraw on the next frame. */
   invalidate(): void;
+  /** What each line pass did last frame, for the on-screen diagnostics. */
+  lineStats(): { main: LineStats; chart: LineStats };
   start(): void;
   stop(): void;
   dispose(): void;
@@ -160,6 +167,8 @@ export function createRenderer(device: Device): Renderer {
     },
 
     invalidate,
+
+    lineStats: () => ({ main: linesPass.stats(), chart: chartLinesPass.stats() }),
 
     start() {
       if (running) return;
