@@ -1,6 +1,12 @@
 import "./style.css";
-import { buildSurface, CATALOG, defaultParams, type SurfaceSpec } from "./core/catalog/surfaces.ts";
+import {
+  buildSurface,
+  CATALOG,
+  defaultParams,
+  type SurfaceSpec,
+} from "./core/catalog/surfaces.ts";
 import { legendGradient } from "./core/geom/curvatureColor.ts";
+import type { ParametricSurface } from "./core/geom/parametric.ts";
 import { boundingSphere } from "./core/mesh/grid.ts";
 import { tessellate } from "./core/mesh/tessellate.ts";
 import { createDevice } from "./gl/device.ts";
@@ -13,6 +19,9 @@ import { mountPanel } from "./ui/panel.ts";
  * Every layer is exercised — the text is parsed, differentiated symbolically, compiled
  * to a jet evaluator, reduced to the fundamental forms, tessellated with exact normals
  * and per-vertex Gaussian curvature, and drawn by the hand-written WebGL2 pass.
+ *
+ * Compiling and tessellating are exposed as *separate* steps so the panel can move a
+ * slider without recompiling, and can retessellate at draft resolution while typing.
  */
 
 function fail(message: string) {
@@ -39,31 +48,29 @@ function main() {
   const renderer = createRenderer(device);
   renderer.start();
 
-  let framed = false;
-
-  /** Compile, tessellate, upload. The whole pipeline, on every edit. */
-  const show = (spec: SurfaceSpec, params: Float64Array, refit: boolean) => {
-    const built = buildSurface(spec);
-    const mesh = tessellate(built.surface, params, { resU: 140, resV: 180 });
-    renderer.setSurfaceMesh(mesh);
-
-    if (refit || !framed) {
-      const { center, radius } = boundingSphere(mesh);
-      renderer.camera.frame(center, radius);
-      framed = true;
-    }
-    return { built, mesh };
-  };
-
   mountPanel({
     catalog: CATALOG,
     legendGradient: legendGradient(),
-    show,
     defaultParams,
-    onCurvatureToggle: (on) => {
-      renderer.setCurvatureMix(on ? 1 : 0);
-      renderer.invalidate();
+
+    compile: (spec: SurfaceSpec): ParametricSurface => buildSurface(spec).surface,
+
+    render: (surface, params, resolution, refit) => {
+      // Slightly more samples around v, which is the longer way round on most surfaces
+      // of revolution.
+      const mesh = tessellate(surface, params, {
+        resU: resolution,
+        resV: Math.round(resolution * 1.25),
+      });
+      renderer.setSurfaceMesh(mesh);
+      if (refit) {
+        const { center, radius } = boundingSphere(mesh);
+        renderer.camera.frame(center, radius);
+      }
+      return mesh;
     },
+
+    onCurvatureToggle: (on) => renderer.setCurvatureMix(on ? 1 : 0),
   });
 }
 

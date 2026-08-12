@@ -3,66 +3,110 @@ import { toLatex } from "../core/expr/latex.ts";
 import { parse } from "../core/expr/parse.ts";
 import type { Diagnostic } from "../core/expr/diagnostics.ts";
 import { makeChartData, makeSurfacePoint } from "../core/geom/types.ts";
-import type { TessellatedSurface } from "../core/mesh/tessellate.ts";
 import type { ParametricSurface } from "../core/geom/parametric.ts";
+import type { TessellatedSurface } from "../core/mesh/tessellate.ts";
 import { el, replace } from "./dom.ts";
 import { tex } from "./tex.ts";
 
 /**
  * The side panel: pick a surface, edit its formula, watch the geometry follow.
  *
- * The live typeset echo under each field is the load-bearing affordance here. A
- * plain-text formula box is a worse interface than a menu *unless* the user can see how
- * their text was parsed — it is what makes implicit multiplication and `1/2u` legible
- * rather than mysterious. Everything else in this panel is secondary to that.
+ * ## Two rules, both learned the hard way
+ *
+ * **1. An element the user might be typing in is created once and never replaced.**
+ * Rebuilding the inputs on each keystroke destroys the focused element and the caret
+ * goes with it, which reads as the UI refusing input. So the fields are built once per
+ * surface selection, and editing only ever *updates* their echo and diagnostics.
+ *
+ * **2. The cheap path and the expensive path are separated.** Parsing and typesetting a
+ * formula takes microseconds and runs on every keystroke, so the echo is always live.
+ * Recompiling the jet and retessellating ~25k vertices takes long enough to stutter, so
+ * it is debounced — first at draft resolution for responsiveness, then at full
+ * resolution once typing stops. A transiently broken formula leaves the last good
+ * surface on screen rather than blanking it.
  */
 
 export interface PanelOptions {
   readonly catalog: readonly SurfaceSpec[];
   readonly legendGradient: string;
   readonly defaultParams: (spec: SurfaceSpec) => Float64Array;
-  readonly show: (
-    spec: SurfaceSpec,
+  /** Parse, differentiate and compile. Throws with a readable message on failure. */
+  readonly compile: (spec: SurfaceSpec) => ParametricSurface;
+  /** Tessellate an already-compiled surface and upload it. */
+  readonly render: (
+    surface: ParametricSurface,
     params: Float64Array,
+    resolution: number,
     refit: boolean,
-  ) => { built: { surface: ParametricSurface }; mesh: TessellatedSurface };
+  ) => TessellatedSurface;
   readonly onCurvatureToggle: (on: boolean) => void;
 }
 
 const COMPONENT_LABELS = ["x", "y", "z"] as const;
+
+/** Coarse mesh while the user is still typing or dragging. */
+const DRAFT_RESOLUTION = 72;
+/** Full mesh once things settle. */
+const FULL_RESOLUTION = 160;
+
+const DRAFT_DELAY_MS = 90;
+const FULL_DELAY_MS = 320;
+
+interface FormulaField {
+  readonly root: HTMLElement;
+  readonly input: HTMLInputElement;
+  readonly echo: HTMLElement;
+}
 
 export function mountPanel(options: PanelOptions): void {
   const panel = document.querySelector<HTMLElement>(".panel");
   if (!panel) return;
 
   let spec: SurfaceSpec = options.catalog[0]!;
-  let components: [string, string, string] = [...spec.components] as [string, string, string];
+  let components: [string, string, string] = [...spec.components];
   let params = options.defaultParams(spec);
 
-  // ---- containers, created once and refilled ----
+  /** The compiled surface, plus the key it was compiled from. */
+  let compiled: ParametricSurface | null = null;
+  let compiledKey = "";
+  let fields: FormulaField[] = [];
+
+  let draftTimer = 0;
+  let fullTimer = 0;
+
   const picker = el("select", { class: "field" });
-  const formulaFields = el("div", { class: "formulas" });
-  const sliders = el("div", { class: "sliders" });
+  for (const entry of options.catalog) {
+    picker.append(el("option", { value: entry.id, text: entry.name }));
+  }
+  const blurb = el("p", { class: "blurb" });
+  const formulaHost = el("div", { class: "formulas" });
   const errors = el("div", { class: "errors" });
+  /** Runtime notices (compile failure, mostly-degenerate domain). Cleared per render,
+   *  unlike `errors`, which is owned by the per-keystroke parse pass. */
+  const warnings = el("div", { class: "errors" });
+  const sliders = el("div", { class: "sliders" });
   const forms = el("div", { class: "forms" });
   const readout = el("div", { class: "readout" });
   const legendLabels = el("div", { class: "legend-labels" });
 
-  for (const entry of options.catalog) {
-    picker.append(el("option", { value: entry.id, text: entry.name }));
-  }
+  // ---- the cheap path: parse, typeset, diagnose. Runs on every keystroke. ----
 
-  const blurb = el("p", { class: "blurb" });
-
-  const rebuild = (refit: boolean) => {
-    // Parse each component on its own so a mistake in z does not blank x and y.
+  const refreshEchoes = (): boolean => {
     const diagnostics: Diagnostic[] = [];
-    const parsed = components.map((source, index) => {
-      const result = parse(source);
-      for (const d of result.diags) {
+    let allParsed = true;
+
+    components.forEach((source, index) => {
+      const { expr, diags } = parse(source);
+      for (const d of diags) {
         diagnostics.push({ ...d, message: `${COMPONENT_LABELS[index]}: ${d.message}` });
       }
-      return result.expr;
+      const field = fields[index];
+      if (field) {
+        // Only the echo is replaced. The input itself is untouched, so focus and the
+        // caret survive.
+        replace(field.echo, [expr ? tex(toLatex(expr)) : el("span", { text: "—" })]);
+      }
+      if (!expr) allParsed = false;
     });
 
     replace(
@@ -71,61 +115,75 @@ export function mountPanel(options: PanelOptions): void {
         el("div", { class: `diag diag--${d.severity}`, text: d.message }),
       ),
     );
+    return allParsed;
+  };
 
-    // The typeset echo renders whatever parsed, even if a sibling failed.
-    replace(
-      formulaFields,
-      components.map((source, index) =>
-        el("div", { class: "formula" }, [
-          el("label", { class: "formula__label" }, [`${COMPONENT_LABELS[index]} =`]),
-          el("input", {
-            class: "field field--mono",
-            value: source,
-            spellcheck: "false",
-            onInput: (event: Event) => {
-              components[index] = (event.target as HTMLInputElement).value;
-              rebuild(false);
-            },
-          }),
-          el("div", { class: "formula__echo" }, [
-            parsed[index] ? tex(toLatex(parsed[index]!)) : el("span", { text: "—" }),
-          ]),
-        ]),
-      ),
-    );
+  // ---- the expensive path: compile and tessellate. Debounced. ----
 
-    if (parsed.some((expr) => expr === null)) {
-      replace(readout, [el("div", { text: "waiting for a complete formula" })]);
-      return;
-    }
-
-    const liveSpec: SurfaceSpec = { ...spec, components };
-    let result;
+  const compileIfNeeded = (): boolean => {
+    const key = `${spec.id}|${components.join("|")}`;
+    if (compiled && key === compiledKey) return true;
     try {
-      result = options.show(liveSpec, params, refit);
+      compiled = options.compile({ ...spec, components });
+      compiledKey = key;
+      return true;
     } catch (error) {
-      replace(errors, [
+      replace(warnings, [
         el("div", {
           class: "diag diag--error",
           text: error instanceof Error ? error.message : String(error),
         }),
       ]);
-      return;
+      return false;
     }
+  };
 
-    const { mesh } = result;
-    const surface = result.built.surface;
+  const renderAt = (resolution: number, refit: boolean) => {
+    if (!compiled) return;
+    const mesh = options.render(compiled, params, resolution, refit);
+    replace(warnings, []);
+    updateForms(compiled);
+    updateMeshReadout(mesh);
+  };
 
-    // Fundamental forms at the centre of the domain — the exact quantities, live.
+  const scheduleHeavy = (refit: boolean, paramsOnly = false) => {
+    window.clearTimeout(draftTimer);
+    window.clearTimeout(fullTimer);
+
+    draftTimer = window.setTimeout(() => {
+      if (!paramsOnly && !compileIfNeeded()) return;
+      renderAt(DRAFT_RESOLUTION, refit);
+    }, paramsOnly ? 0 : DRAFT_DELAY_MS);
+
+    fullTimer = window.setTimeout(() => {
+      if (!compiled) return;
+      renderAt(FULL_RESOLUTION, false);
+    }, FULL_DELAY_MS);
+  };
+
+  const onEdit = () => {
+    const allParsed = refreshEchoes();
+    // A half-typed formula leaves the previous surface on screen rather than blanking
+    // the canvas, so the view stays stable while editing.
+    if (allParsed) scheduleHeavy(false);
+  };
+
+  // ---- rendering the derived panels ----
+
+  const fmt = (x: number) => (Number.isFinite(x) ? x.toFixed(4) : "—");
+
+  const updateForms = (surface: ParametricSurface) => {
     const point = makeSurfacePoint();
     const chart = makeChartData();
     const uMid = (surface.u.min + surface.u.max) / 2;
     const vMid = (surface.v.min + surface.v.max) / 2;
     surface.at(uMid, vMid, params, point, chart);
 
-    const fmt = (x: number) => (Number.isFinite(x) ? x.toFixed(4) : "—");
     replace(forms, [
-      el("div", { class: "forms__at", text: `at u = ${uMid.toFixed(3)}, v = ${vMid.toFixed(3)}` }),
+      el("div", {
+        class: "forms__at",
+        text: `at u = ${uMid.toFixed(3)}, v = ${vMid.toFixed(3)}`,
+      }),
       tex(
         `\\mathrm{I} = \\begin{pmatrix} ${fmt(chart.I[0][0])} & ${fmt(chart.I[0][1])} \\\\ ` +
           `${fmt(chart.I[1][0])} & ${fmt(chart.I[1][1])} \\end{pmatrix}`,
@@ -139,13 +197,18 @@ export function mountPanel(options: PanelOptions): void {
       tex(`K = ${fmt(point.K)} \\qquad H = ${fmt(point.H)}`, true),
       tex(`k_1 = ${fmt(point.k1)} \\qquad k_2 = ${fmt(point.k2)}`, true),
       point.umbilic
-        ? el("div", { class: "note", text: point.planar ? "planar point" : "umbilic point" })
+        ? el("div", {
+            class: "note",
+            text: point.planar ? "planar point" : "umbilic point",
+          })
         : null,
       point.degenerate
         ? el("div", { class: "note", text: "degenerate: no tangent plane here" })
         : null,
     ]);
+  };
 
+  const updateMeshReadout = (mesh: TessellatedSurface) => {
     replace(legendLabels, [
       el("span", { text: (-mesh.range.scale).toPrecision(3) }),
       el("span", { text: "K" }),
@@ -159,13 +222,13 @@ export function mountPanel(options: PanelOptions): void {
 
     replace(readout, [
       el("div", { text: `K range     ${fmt(mesh.range.minK)} … ${fmt(mesh.range.maxK)}` }),
-      el("div", { text: `colour scale ±${mesh.range.scale.toPrecision(3)}` }),
+      el("div", { text: `scale       ±${mesh.range.scale.toPrecision(3)}` }),
       el("div", { text: `triangles   ${mesh.triangleCount.toLocaleString()}` }),
       el("div", { text: `dropped     ${dropped}` }),
     ]);
 
     if (mesh.range.invalidFraction > 0.5) {
-      errors.append(
+      warnings.append(
         el("div", {
           class: "diag diag--warning",
           text:
@@ -176,44 +239,76 @@ export function mountPanel(options: PanelOptions): void {
     }
   };
 
-  const rebuildSliders = () => {
+  // ---- built once per surface selection ----
+
+  const buildFields = () => {
+    fields = components.map((source, index) => {
+      const input = el("input", {
+        class: "field field--mono",
+        value: source,
+        spellcheck: "false",
+        onInput: () => {
+          components[index] = input.value;
+          onEdit();
+        },
+      }) as HTMLInputElement;
+      const echo = el("div", { class: "formula__echo" });
+      const root = el("div", { class: "formula" }, [
+        el("label", { class: "formula__label", text: `${COMPONENT_LABELS[index]} =` }),
+        input,
+        echo,
+      ]);
+      return { root, input, echo };
+    });
+    replace(formulaHost, fields.map((field) => field.root));
+  };
+
+  const buildSliders = () => {
     replace(
       sliders,
-      spec.params.map((definition, index) =>
-        el("div", { class: "slider" }, [
+      spec.params.map((definition, index) => {
+        const value = el("span", {
+          class: "slider__value",
+          text: params[index]!.toFixed(2),
+        });
+        const input = el("input", {
+          type: "range",
+          class: "slider__input",
+          min: definition.min,
+          max: definition.max,
+          step: definition.step,
+          value: params[index]!,
+          onInput: () => {
+            params[index] = Number((input as HTMLInputElement).value);
+            value.textContent = params[index]!.toFixed(2);
+            // Parameters are compiled as slots, so nothing recompiles here — only the
+            // sampling and upload repeat.
+            scheduleHeavy(false, true);
+          },
+        }) as HTMLInputElement;
+        return el("div", { class: "slider" }, [
           el("label", { class: "slider__label" }, [
             el("span", { text: definition.label }),
-            el("span", { class: "slider__value", text: params[index]!.toFixed(2) }),
+            value,
           ]),
-          el("input", {
-            type: "range",
-            class: "slider__input",
-            min: definition.min,
-            max: definition.max,
-            step: definition.step,
-            value: params[index]!,
-            onInput: (event: Event) => {
-              const value = Number((event.target as HTMLInputElement).value);
-              // Parameters are compiled as slots, so moving a slider recompiles nothing.
-              params[index] = value;
-              const label = (event.target as HTMLElement)
-                .previousElementSibling?.querySelector(".slider__value");
-              if (label) label.textContent = value.toFixed(2);
-              rebuild(false);
-            },
-          }),
-        ]),
-      ),
+          input,
+        ]);
+      }),
     );
   };
 
   const selectSpec = (id: string) => {
     spec = options.catalog.find((entry) => entry.id === id) ?? spec;
-    components = [...spec.components] as [string, string, string];
+    components = [...spec.components];
     params = options.defaultParams(spec);
+    compiled = null;
+    compiledKey = "";
     blurb.textContent = spec.blurb;
-    rebuildSliders();
-    rebuild(true);
+    buildFields();
+    buildSliders();
+    refreshEchoes();
+    // Fresh surface: compile and fit immediately rather than waiting out the debounce.
+    if (compileIfNeeded()) renderAt(FULL_RESOLUTION, true);
   };
 
   picker.addEventListener("change", () => selectSpec(picker.value));
@@ -234,8 +329,9 @@ export function mountPanel(options: PanelOptions): void {
       el("h2", { class: "section-title", text: "Surface" }),
       picker,
       blurb,
-      formulaFields,
+      formulaHost,
       errors,
+      warnings,
     ]),
     el("section", { class: "panel-section" }, [
       el("h2", { class: "section-title", text: "Parameters" }),
@@ -257,7 +353,5 @@ export function mountPanel(options: PanelOptions): void {
     ]),
   ]);
 
-  blurb.textContent = spec.blurb;
-  rebuildSliders();
-  rebuild(true);
+  selectSpec(spec.id);
 }
