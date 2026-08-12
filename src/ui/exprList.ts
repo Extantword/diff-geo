@@ -2,7 +2,12 @@ import type { Diagnostic } from "../core/expr/diagnostics.ts";
 import { toLatex } from "../core/expr/latex.ts";
 import { parse, parseRow } from "../core/expr/parse.ts";
 import type { DocumentStore, Item, RowId } from "../state/graph.ts";
-import { DEFAULT_DOMAIN, type DomainRange, type RowReport } from "../state/scene.ts";
+import {
+  DEFAULT_DOMAIN,
+  type DomainRange,
+  type FrameRequest,
+  type RowReport,
+} from "../state/scene.ts";
 import { el, replace } from "./dom.ts";
 import { tex } from "./tex.ts";
 
@@ -36,12 +41,7 @@ const KIND_LABEL: Readonly<Record<string, string>> = {
 };
 
 /** Not yet drawn by the renderer; the badge says so rather than failing silently. */
-const NOT_YET_DRAWN = new Set([
-  "implicitSurface",
-  "implicitPlaneCurve",
-  "point",
-  "vectorField",
-]);
+const NOT_YET_DRAWN = new Set(["implicitSurface", "implicitPlaneCurve", "vectorField"]);
 
 export interface SliderSpec {
   value: number;
@@ -58,6 +58,8 @@ export interface ExprListOptions {
   readonly domains: Map<RowId, DomainRange[]>;
   /** Slider state, mutated in place. */
   readonly sliders: Map<string, SliderSpec>;
+  /** Which curve rows show a moving frame, and where along the curve. */
+  readonly frames: Map<RowId, FrameRequest>;
 }
 
 export interface ExprList {
@@ -74,6 +76,7 @@ interface RowView {
   readonly badge: HTMLElement;
   readonly notes: HTMLElement;
   readonly domainHost: HTMLElement;
+  readonly frameHost: HTMLElement;
 }
 
 export function createExprList(options: ExprListOptions): ExprList {
@@ -143,6 +146,7 @@ export function createExprList(options: ExprListOptions): ExprList {
     const badge = el("span", { class: "row__badge" });
     const notes = el("div", { class: "row__notes" });
     const domainHost = el("div", { class: "row__domain" });
+    const frameHost = el("div", { class: "row__frame" });
 
     const remove = el("button", {
       class: "row__remove",
@@ -161,10 +165,11 @@ export function createExprList(options: ExprListOptions): ExprList {
       input,
       echo,
       domainHost,
+      frameHost,
       notes,
     ]);
 
-    return { id, root, input, echo, badge, notes, domainHost };
+    return { id, root, input, echo, badge, notes, domainHost, frameHost };
   }
 
   /** One slider per undefined symbol, created on demand and reused after that. */
@@ -289,6 +294,71 @@ export function createExprList(options: ExprListOptions): ExprList {
     );
   };
 
+  /**
+   * The moving frame control, on curve rows only.
+   *
+   * Built once per row and then left alone, like the text input: rebuilding it on every
+   * refresh would fight the user mid-drag. The `t` slider redraws immediately rather than
+   * on the debounce, since only the three glyphs move.
+   */
+  const syncFrameControl = (view: RowView, item: Item | null) => {
+    const isCurve = item?.kind === "spaceCurve" || item?.kind === "planeCurve";
+    if (!isCurve) {
+      if (view.frameHost.childElementCount > 0) replace(view.frameHost, []);
+      options.frames.delete(view.id);
+      return;
+    }
+    if (view.frameHost.childElementCount > 0) return;
+
+    const state: FrameRequest = options.frames.get(view.id) ?? { show: false, at: 0.5 };
+    let show = state.show;
+    let at = state.at;
+    const commit = () => options.frames.set(view.id, { show, at });
+    commit();
+
+    const readout = el("span", { class: "slider__value", text: at.toFixed(2) });
+
+    const position = el("input", {
+      type: "range",
+      class: "slider__input",
+      min: 0,
+      max: 1,
+      step: 0.002,
+      value: at,
+      onInput: () => {
+        at = Number(position.value);
+        readout.textContent = at.toFixed(2);
+        commit();
+        options.requestRender(false);
+      },
+    }) as HTMLInputElement;
+
+    const toggle = el("input", {
+      type: "checkbox",
+      checked: show,
+      onChange: () => {
+        show = toggle.checked;
+        commit();
+        position.disabled = !show;
+        options.requestRender(false);
+      },
+    }) as HTMLInputElement;
+    position.disabled = !show;
+
+    replace(view.frameHost, [
+      el("label", { class: "toggle toggle--tight" }, [
+        toggle,
+        el("span", { text: "moving frame" }),
+        el("span", { class: "frame-key" }, [
+          el("span", { class: "frame-key__t", text: "T" }),
+          el("span", { class: "frame-key__n", text: "N" }),
+          el("span", { class: "frame-key__b", text: "B" }),
+        ]),
+      ]),
+      el("div", { class: "frame-position" }, [position, readout]),
+    ]);
+  };
+
   const refresh = (reports: readonly RowReport[]) => {
     syncRows();
     const resolution = store.resolution();
@@ -312,6 +382,7 @@ export function createExprList(options: ExprListOptions): ExprList {
         (label === "" ? " row__badge--empty" : "");
 
       syncDomain(view, item);
+      syncFrameControl(view, item);
 
       const diagnostics = resolution.diagnostics.get(id) ?? [];
       const report = reportById.get(id);

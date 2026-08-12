@@ -425,3 +425,42 @@ body {
 .echo-empty {
   color: var(--text-dim);
 }
+
+/* ---- moving frame control ---- */
+
+.row__frame:empty {
+  display: none;
+}
+
+.toggle--tight {
+  margin-bottom: 4px;
+  margin-top: 6px;
+  font-size: 11.5px;
+}
+
+.frame-key {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.frame-key__t { color: #6bff95; }
+.frame-key__n { color: #ffe066; }
+.frame-key__b { color: #ff6b6b; }
+
+.frame-position {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.frame-position .slider__input {
+  flex: 1;
+}
+
+.frame-position .slider__input:disabled {
+  opacity: 0.35;
+}

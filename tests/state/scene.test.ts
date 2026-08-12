@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createDocument } from "../../src/state/graph.ts";
-import { buildScene, type DomainRange } from "../../src/state/scene.ts";
+import { buildScene, type DomainRange, type FrameRequest } from "../../src/state/scene.ts";
 import type { RowId } from "../../src/state/graph.ts";
 
 const closeRel = (a: number, b: number, rel = 1e-6) =>
@@ -10,6 +10,7 @@ function sceneOf(
   sources: readonly string[],
   parameters: Record<string, number> = {},
   domains: Map<RowId, DomainRange[]> = new Map(),
+  frames: Map<RowId, FrameRequest> = new Map(),
 ) {
   const document = createDocument(sources);
   const items = [...document.resolution().items.values()];
@@ -18,6 +19,7 @@ function sceneOf(
     parameters: new Map(Object.entries(parameters)),
     domains,
     resolution: 24,
+    frames,
   });
   return { document, scene };
 }
@@ -198,3 +200,99 @@ describe("buildScene", () => {
     closeRel(maxY, 5, 1e-6);
   });
 });
+
+describe("the moving frame", () => {
+  it("is absent until a row asks for it", () => {
+    const { scene } = sceneOf(["alpha(t) = (cos t, sin t, t/4)"]);
+    expect(scene.lines).toHaveLength(1);
+  });
+
+  it("adds T, N and B on a regular curve", () => {
+    const document = createDocument(["alpha(t) = (cos t, sin t, t/4)"]);
+    const items = [...document.resolution().items.values()];
+    const scene = buildScene({
+      items,
+      parameters: new Map(),
+      domains: new Map(),
+      resolution: 8,
+      frames: new Map([[items[0]!.rowId, { show: true, at: 0.5 }]]),
+    });
+    // The curve, plus one group holding three glyph segments.
+    expect(scene.lines).toHaveLength(2);
+    expect(scene.lines[1]!.polylines).toHaveLength(3);
+    const report = scene.reports.find((r) => r.rowId === items[0]!.rowId);
+    expect(report?.info).toMatch(/κ = /);
+    expect(report?.info).toMatch(/τ = /);
+  });
+
+  it("draws only T on a straight line, refusing to invent N and B", () => {
+    // The visible half of the degeneracy policy: at κ = 0 the osculating plane does not
+    // exist, so two of the three glyphs must be missing rather than arbitrary.
+    const document = createDocument(["L(t) = (t, 2t, 3t)"]);
+    const items = [...document.resolution().items.values()];
+    const scene = buildScene({
+      items,
+      parameters: new Map(),
+      domains: new Map(),
+      resolution: 8,
+      frames: new Map([[items[0]!.rowId, { show: true, at: 0.5 }]]),
+    });
+    expect(scene.lines[1]!.polylines).toHaveLength(1);
+    const report = scene.reports.find((r) => r.rowId === items[0]!.rowId);
+    expect(report?.info).toContain("N and B undefined here");
+  });
+
+  it("follows the requested position along the curve", () => {
+    const document = createDocument(["alpha(t) = (cos t, sin t, 0)"]);
+    const items = [...document.resolution().items.values()];
+    const at = (fraction: number) => {
+      const scene = buildScene({
+        items,
+        parameters: new Map(),
+        domains: new Map(),
+        resolution: 8,
+        frames: new Map([[items[0]!.rowId, { show: true, at: fraction }]]),
+      });
+      const glyph = scene.lines[1]!.polylines[0]!;
+      return [glyph.points[0]!, glyph.points[1]!] as const;
+    };
+    // t runs over [0, 2π], so fraction 0 sits at (1,0) and 0.25 at (0,1).
+    const start = at(0);
+    const quarter = at(0.25);
+    closeRel(start[0], 1, 1e-6);
+    expect(Math.abs(start[1])).toBeLessThan(1e-6);
+    expect(Math.abs(quarter[0])).toBeLessThan(1e-6);
+    closeRel(quarter[1], 1, 1e-6);
+  });
+  });
+
+describe("points", () => {
+  it("draws a point as a zero-length segment, which the round caps render as a disc", () => {
+    const { scene } = sceneOf(["(1, 2, 3)"]);
+    expect(scene.mesh).toBeNull();
+    const dot = scene.lines.at(-1)!.polylines[0]!;
+    expect(dot.count).toBe(2);
+    // Both endpoints coincide; the fragment shader's distance-to-segment then measures
+    // distance to a single position.
+    expect([...dot.points]).toEqual([1, 2, 3, 1, 2, 3]);
+  });
+
+  it("evaluates a point through its sliders", () => {
+    const document = createDocument(["(a, 0, 0)"]);
+    const items = [...document.resolution().items.values()];
+    const scene = buildScene({
+      items,
+      parameters: new Map([["a", 4]]),
+      domains: new Map(),
+      resolution: 8,
+    });
+    expect(scene.lines.at(-1)!.polylines[0]!.points[0]).toBe(4);
+  });
+
+  it("reports a non-finite point rather than emitting it", () => {
+    const { document, scene } = sceneOf(["(1/0, 0, 0)"]);
+    const report = scene.reports.find((r) => r.rowId === document.rows()[0]!.id);
+    expect(report?.error).toContain("not finite");
+    expect(scene.lines).toHaveLength(0);
+  });
+  });

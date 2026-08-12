@@ -1,7 +1,7 @@
 import "./style.css";
 import { legendGradient } from "./core/geom/curvatureColor.ts";
 import { createDocument, type RowId } from "./state/graph.ts";
-import { buildScene, type DomainRange } from "./state/scene.ts";
+import { buildScene, type DomainRange, type FrameRequest } from "./state/scene.ts";
 import { createDevice } from "./gl/device.ts";
 import { createRenderer } from "./gl/renderer.ts";
 import { createExprList, type SliderSpec } from "./ui/exprList.ts";
@@ -54,6 +54,7 @@ function main() {
   const store = createDocument(STARTER_ROWS);
   const domains = new Map<RowId, DomainRange[]>();
   const sliders = new Map<string, SliderSpec>();
+  const frames = new Map<RowId, FrameRequest>();
 
   const legendLabels = el("div", { class: "legend-labels" });
   const stats = el("div", { class: "readout" });
@@ -71,6 +72,7 @@ function main() {
       parameters,
       domains,
       resolution,
+      frames,
     });
 
     renderer.setSurfaceMesh(
@@ -126,7 +128,7 @@ function main() {
     fullTimer = window.setTimeout(() => render(FULL_RESOLUTION, false), FULL_DELAY_MS);
   };
 
-  const list = createExprList({ document: store, requestRender, domains, sliders });
+  const list = createExprList({ document: store, requestRender, domains, sliders, frames });
 
   const curvatureToggle = el("input", {
     type: "checkbox",

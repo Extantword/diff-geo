@@ -4,6 +4,7 @@ import { bishopFrames, createSpaceCurve, makeFrenetFrame } from "../core/geom/cu
 import { createParametricSurface } from "../core/geom/parametric.ts";
 import { robustScale, sampleCurvatureRange } from "../core/geom/curvatureColor.ts";
 import { interval, makeSurfacePoint, type Vec3 } from "../core/geom/types.ts";
+import { compileScalar } from "../core/expr/eval.ts";
 import { tessellate, type TessellatedSurface } from "../core/mesh/tessellate.ts";
 import type { LineGroup, Polyline } from "../gl/passes/lines.ts";
 import type { Item, RowId } from "./graph.ts";
@@ -32,6 +33,13 @@ export interface DomainRange {
   max: number;
 }
 
+/** Per-row request to draw a moving frame at one parameter value. */
+export interface FrameRequest {
+  readonly show: boolean;
+  /** position along the domain, as a fraction in [0, 1] */
+  readonly at: number;
+}
+
 export interface SceneRequest {
   readonly items: readonly Item[];
   /** slider values by name */
@@ -39,6 +47,8 @@ export interface SceneRequest {
   /** per-row, per-variable sampling ranges */
   readonly domains: ReadonlyMap<RowId, readonly DomainRange[]>;
   readonly resolution: number;
+  /** which curve rows should show their Frenet trihedron, and where */
+  readonly frames?: ReadonlyMap<RowId, FrameRequest>;
 }
 
 export interface RowReport {
@@ -71,8 +81,32 @@ const CURVE_PALETTE: readonly Vec3[] = [
 
 const CURVE_SAMPLES = 700;
 
+/** Colours for the moving frame, shared with the row legend. */
+const T_COLOR: Vec3 = [0.42, 1.0, 0.58];
+const N_COLOR: Vec3 = [1.0, 0.88, 0.4];
+const B_COLOR: Vec3 = [1.0, 0.42, 0.42];
+const POINT_COLOR: Vec3 = [1.0, 0.85, 0.45];
+
+/** A two-point polyline standing in for one frame vector. */
+function arrow(from: Vec3, direction: Vec3, length: number, color: Vec3): Polyline {
+  return {
+    points: new Float64Array([
+      from[0],
+      from[1],
+      from[2],
+      from[0] + direction[0] * length,
+      from[1] + direction[1] * length,
+      from[2] + direction[2] * length,
+    ]),
+    count: 2,
+    color,
+    arcLength: new Float64Array([0, length]),
+  };
+}
+
 export function buildScene(request: SceneRequest): Scene {
   const { items, parameters, domains, resolution } = request;
+  const frameRequests = request.frames ?? new Map<RowId, FrameRequest>();
 
   const reports: RowReport[] = [];
   const meshes: TessellatedSurface[] = [];
@@ -196,22 +230,80 @@ export function buildScene(request: SceneRequest): Scene {
       lines.push({ polylines: [polyline], style: { widthPx: 3.5 } });
       curveIndex++;
 
+      // The moving frame, if this row asked for one. Its position along the domain is
+      // where kappa and tau are reported too, so the readout follows the glyphs.
+      const wanted = frameRequests.get(item.rowId);
+      const at = wanted?.show ? Math.min(Math.max(wanted.at, 0), 1) : 0.5;
+      const t = curve.t.min + (curve.t.max - curve.t.min) * at;
+
       const frame = makeFrenetFrame();
-      curve.frenet((curve.t.min + curve.t.max) / 2, params, frame);
+      curve.frenet(t, params, frame);
+
+      if (wanted?.show) {
+        // Glyph length tracks the curve's own extent, so the frame stays legible whether
+        // the curve is a unit circle or a hundred units across.
+        const extent = extentOf(frames);
+        const glyphLength = Math.max(extent * 0.22, 1e-3);
+        const glyphs: Polyline[] = [];
+        // T exists wherever the parametrization is regular.
+        if (frame.status !== "singular") {
+          glyphs.push(arrow(frame.p, frame.T, glyphLength, T_COLOR));
+        }
+        // N and B exist only where the osculating plane does. Refusing to draw them at an
+        // inflection is the whole point of tracking `status`.
+        if (frame.status === "regular") {
+          glyphs.push(arrow(frame.p, frame.N, glyphLength, N_COLOR));
+          glyphs.push(arrow(frame.p, frame.B, glyphLength, B_COLOR));
+        }
+        if (glyphs.length > 0) {
+          lines.push({ polylines: glyphs, style: { widthPx: 5 } });
+        }
+      }
+
       reports.push({
         rowId: item.rowId,
         info:
           frame.status === "regular"
-            ? `κ = ${frame.kappa.toFixed(3)}` +
+            ? `t = ${t.toFixed(3)}   κ = ${frame.kappa.toFixed(3)}` +
               (frame.tauValid ? `   τ = ${frame.tau.toFixed(3)}` : "   τ undefined")
             : frame.status === "inflection"
-              ? "κ = 0 at the midpoint — N and B undefined there"
-              : "singular parametrization at the midpoint",
+              ? `t = ${t.toFixed(3)}   κ = 0 — N and B undefined here`
+              : `t = ${t.toFixed(3)}   singular parametrization here`,
       });
     } catch (thrown) {
       reports.push({ rowId: item.rowId, error: messageOf(thrown) });
     }
   }
+
+  // Points come free from the lines pass: a zero-length segment with round caps renders
+  // as a disc, so no separate billboard pass is needed for them.
+  const dots: Polyline[] = [];
+  for (const item of items) {
+    if (item.kind !== "point") continue;
+    try {
+      const coords = item.comps.map((comp) => {
+        const compiled = compileScalar(comp, { vars: [], params: [...item.params] });
+        return compiled.call([], packParameters([...item.params], parameters));
+      });
+      const position: Vec3 = [coords[0] ?? 0, coords[1] ?? 0, coords[2] ?? 0];
+      if (!position.every((value) => Number.isFinite(value))) {
+        reports.push({ rowId: item.rowId, error: "this point is not finite" });
+        continue;
+      }
+      dots.push({
+        points: new Float64Array([...position, ...position]),
+        count: 2,
+        color: POINT_COLOR,
+      });
+      reports.push({
+        rowId: item.rowId,
+        info: `(${position.map((v) => v.toFixed(3)).join(", ")})`,
+      });
+    } catch (thrown) {
+      reports.push({ rowId: item.rowId, error: messageOf(thrown) });
+    }
+  }
+  if (dots.length > 0) lines.push({ polylines: dots, style: { widthPx: 11 } });
 
   const mesh = meshes.length === 0 ? null : concatenate(meshes);
   const bounds = computeBounds(mesh, lines);
@@ -223,6 +315,31 @@ export function buildScene(request: SceneRequest): Scene {
     bounds,
     curvatureScale,
   };
+}
+
+/** Largest span of a sampled curve, used to scale frame glyphs to the object. */
+function extentOf(frames: {
+  points: Float64Array;
+  valid: Uint8Array;
+  count: number;
+}): number {
+  let min = [Infinity, Infinity, Infinity];
+  let max = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < frames.count; i++) {
+    if (!frames.valid[i]) continue;
+    for (let c = 0; c < 3; c++) {
+      const value = frames.points[i * 3 + c]!;
+      if (!Number.isFinite(value)) continue;
+      if (value < min[c]!) min[c] = value;
+      if (value > max[c]!) max[c] = value;
+    }
+  }
+  let span = 0;
+  for (let c = 0; c < 3; c++) {
+    const width = max[c]! - min[c]!;
+    if (Number.isFinite(width)) span = Math.max(span, width);
+  }
+  return span;
 }
 
 function messageOf(thrown: unknown): string {
