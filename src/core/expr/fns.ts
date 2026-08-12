@@ -32,6 +32,12 @@ export interface FnDef {
   readonly partial: (c: Ctx, args: readonly Expr[], i: number) => Expr;
   /** LaTeX head, e.g. `\sin`, or a full renderer when the shape is unusual */
   readonly latex: string | ((args: readonly string[]) => string);
+  /**
+   * Inline JavaScript for the code generator. Omitted when `Math.<name>` is exactly
+   * right, which covers all but the six reciprocal trigonometric functions — keeping
+   * the table free of two dozen identical `Math.sin(x)` lines.
+   */
+  readonly js?: (args: readonly string[]) => string;
   /** GLSL ES 3.00 name — a builtin, or a helper from the shader prelude */
   readonly glsl: string;
   /** true when `glsl` names a prelude helper rather than a GLSL builtin */
@@ -95,6 +101,7 @@ define({
   // singular: the sphere's Γᵛᵤᵥ is cot u, infinite at u = 0 and π.
   partial: (c, a) => c.neg(c.pow(c.call("sin", a[0]!), c.num(-2))),
   latex: "\\cot",
+  js: (a) => `(1 / Math.tan(${a[0]}))`,
   glsl: "cot_",
   glslPrelude: true,
 });
@@ -106,6 +113,7 @@ define({
   // (sec u)′ = sec u · tan u
   partial: (c, a) => c.mul(c.call("sec", a[0]!), c.call("tan", a[0]!)),
   latex: "\\sec",
+  js: (a) => `(1 / Math.cos(${a[0]}))`,
   glsl: "sec_",
   glslPrelude: true,
   exact: [[0, 1]],
@@ -118,6 +126,7 @@ define({
   // (csc u)′ = −csc u · cot u
   partial: (c, a) => c.neg(c.mul(c.call("csc", a[0]!), c.call("cot", a[0]!))),
   latex: "\\csc",
+  js: (a) => `(1 / Math.sin(${a[0]}))`,
   glsl: "csc_",
   glslPrelude: true,
 });
@@ -222,6 +231,7 @@ define({
   evaluate: (a) => 1 / Math.tanh(a[0]!),
   partial: (c, a) => c.neg(c.pow(c.call("sinh", a[0]!), c.num(-2))),
   latex: "\\coth",
+  js: (a) => `(1 / Math.tanh(${a[0]}))`,
   glsl: "coth_",
   glslPrelude: true,
 });
@@ -234,6 +244,7 @@ define({
   // u − tanh u), so this one is load-bearing for the K = −1 ground truth.
   partial: (c, a) => c.neg(c.mul(c.call("sech", a[0]!), c.call("tanh", a[0]!))),
   latex: "\\operatorname{sech}",
+  js: (a) => `(1 / Math.cosh(${a[0]}))`,
   glsl: "sech_",
   glslPrelude: true,
   exact: [[0, 1]],
@@ -245,6 +256,7 @@ define({
   evaluate: (a) => 1 / Math.sinh(a[0]!),
   partial: (c, a) => c.neg(c.mul(c.call("csch", a[0]!), c.call("coth", a[0]!))),
   latex: "\\operatorname{csch}",
+  js: (a) => `(1 / Math.sinh(${a[0]}))`,
   glsl: "csch_",
   glslPrelude: true,
 });
