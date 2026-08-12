@@ -100,6 +100,16 @@ export function sprayDirections(I: Mat2, count: number): Vec2[] {
 export interface GeodesicOptions {
   readonly maxSteps?: number;
   readonly tolerance?: number;
+  /**
+   * Fewest samples to produce along the requested arc length.
+   *
+   * Error tolerance governs *accuracy*; this governs *density*, and they are not the same
+   * requirement. On a smooth surface the adaptive stepper grows its step until the error
+   * estimate objects, which on a cylinder means five steps for two units of arc — perfectly
+   * accurate and visibly faceted when drawn. Capping the step only ever makes it smaller, so
+   * accuracy is unaffected.
+   */
+  readonly minSamples?: number;
 }
 
 function inDomain(surface: ParametricSurface, u: number, v: number): boolean {
@@ -125,7 +135,7 @@ export function integrateGeodesic(
   length: number,
   options: GeodesicOptions = {},
 ): GeodesicResult {
-  const maxSteps = options.maxSteps ?? 4000;
+  const maxSteps = options.maxSteps ?? Math.max(4000, (options.minSamples ?? 240) * 4);
   const point = makeSurfacePoint();
   const chartData = makeChartData();
 
@@ -163,9 +173,11 @@ export function integrateGeodesic(
     );
   };
 
+  const minSamples = options.minSamples ?? 240;
   const stepper = createStepper(derivative, [start[0], start[1], du0, dv0], 0, {
     tolerance: options.tolerance ?? 1e-9,
     initialStep: Math.max(length / 400, 1e-4),
+    maxStep: length / minSamples,
   });
 
   const chart: Vec2[] = [[start[0], start[1]]];
