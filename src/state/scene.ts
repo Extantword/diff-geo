@@ -1,5 +1,5 @@
 import { ctx, type Expr } from "../core/expr/ast.ts";
-import { buildDiffMap } from "../core/jets/compile.ts";
+import { buildDiffMap, type DiffMap } from "../core/jets/compile.ts";
 import { bishopFrames, createSpaceCurve, makeFrenetFrame } from "../core/geom/curve.ts";
 import { createParametricSurface } from "../core/geom/parametric.ts";
 import { robustScale, sampleCurvatureRange } from "../core/geom/curvatureColor.ts";
@@ -42,8 +42,16 @@ export interface FrameRequest {
 
 export interface SceneRequest {
   readonly items: readonly Item[];
-  /** slider values by name */
+  /** live slider values by name; these win */
   readonly parameters: ReadonlyMap<string, number>;
+  /**
+   * Values declared by numeric rows, used for any parameter the caller did not override.
+   *
+   * Without this, a document reading `R = 2` / `r = 0.6` would compile R and r as slots and
+   * then fill them with an arbitrary default — the torus renders with R = r, self-intersects,
+   * and loses a ring of triangles. Passing the declared values closes that gap.
+   */
+  readonly declaredParameters?: ReadonlyMap<string, number>;
   /** per-row, per-variable sampling ranges */
   readonly domains: ReadonlyMap<RowId, readonly DomainRange[]>;
   readonly resolution: number;
@@ -81,6 +89,53 @@ const CURVE_PALETTE: readonly Vec3[] = [
 
 const CURVE_SAMPLES = 700;
 
+/**
+ * Compiled jets, keyed by the interned identity of their inputs.
+ *
+ * Differentiating and simplifying a surface costs a few milliseconds — fine once, ruinous at
+ * 60 frames a second while a slider moves. Because expressions are interned, a node's id *is*
+ * its structural identity, so the key is exact and cheap to build: same mathematics, same
+ * entry, no re-differentiation.
+ *
+ * Parameter *values* are deliberately absent from the key. They are compiled as slots, so a
+ * slider changes the numbers fed to an unchanged program — which is the whole reason dragging
+ * one can be free.
+ */
+const diffMapCache = new Map<string, DiffMap>();
+const DIFF_MAP_CACHE_LIMIT = 64;
+
+function cachedDiffMap(request: {
+  id: string;
+  comps: readonly Expr[];
+  vars: readonly string[];
+  params: readonly string[];
+  order: number;
+}): DiffMap {
+  const key =
+    `${request.order}|${request.vars.join(",")}|${request.params.join(",")}|` +
+    request.comps.map((comp) => comp.id).join(",");
+
+  const hit = diffMapCache.get(key);
+  if (hit) return hit;
+
+  const built = buildDiffMap({
+    id: request.id,
+    comps: request.comps,
+    vars: [...request.vars],
+    params: [...request.params],
+    order: request.order,
+  });
+
+  if (diffMapCache.size >= DIFF_MAP_CACHE_LIMIT) {
+    // Plain FIFO eviction. The working set is the handful of rows on screen, so anything
+    // fancier would be complexity without a payoff.
+    const oldest = diffMapCache.keys().next().value;
+    if (oldest !== undefined) diffMapCache.delete(oldest);
+  }
+  diffMapCache.set(key, built);
+  return built;
+}
+
 /** Colours for the moving frame, shared with the row legend. */
 const T_COLOR: Vec3 = [0.42, 1.0, 0.58];
 const N_COLOR: Vec3 = [1.0, 0.88, 0.4];
@@ -107,6 +162,7 @@ function arrow(from: Vec3, direction: Vec3, length: number, color: Vec3): Polyli
 export function buildScene(request: SceneRequest): Scene {
   const { items, parameters, domains, resolution } = request;
   const frameRequests = request.frames ?? new Map<RowId, FrameRequest>();
+  const declared = request.declaredParameters ?? new Map<string, number>();
 
   const reports: RowReport[] = [];
   const meshes: TessellatedSurface[] = [];
@@ -132,7 +188,7 @@ export function buildScene(request: SceneRequest): Scene {
     try {
       const comps = surfaceComponents(item);
       const paramNames = [...item.params];
-      const map = buildDiffMap({
+      const map = cachedDiffMap({
         id: `row-${item.rowId}`,
         comps,
         vars: surfaceVars(item),
@@ -146,7 +202,7 @@ export function buildScene(request: SceneRequest): Scene {
         u: uRange,
         v: vRange,
       });
-      const params = packParameters(paramNames, parameters);
+      const params = packParameters(paramNames, parameters, declared);
       compiledSurfaces.push({ item, surface, params });
 
       const range = sampleCurvatureRange(surface, params, 24);
@@ -201,7 +257,7 @@ export function buildScene(request: SceneRequest): Scene {
       const comps = [...item.comps];
       if (item.kind === "planeCurve") comps.push(ctx.zero);
       const paramNames = [...item.params];
-      const map = buildDiffMap({
+      const map = cachedDiffMap({
         id: `row-${item.rowId}`,
         comps,
         vars: [item.vars[0] ?? "t"],
@@ -217,7 +273,7 @@ export function buildScene(request: SceneRequest): Scene {
           range?.max ?? DEFAULT_DOMAIN["t"]![1],
         ),
       });
-      const params = packParameters(paramNames, parameters);
+      const params = packParameters(paramNames, parameters, declared);
       const frames = bishopFrames(curve, params, CURVE_SAMPLES);
 
       const polyline: Polyline = {
@@ -283,7 +339,7 @@ export function buildScene(request: SceneRequest): Scene {
     try {
       const coords = item.comps.map((comp) => {
         const compiled = compileScalar(comp, { vars: [], params: [...item.params] });
-        return compiled.call([], packParameters([...item.params], parameters));
+        return compiled.call([], packParameters([...item.params], parameters, declared));
       });
       const position: Vec3 = [coords[0] ?? 0, coords[1] ?? 0, coords[2] ?? 0];
       if (!position.every((value) => Number.isFinite(value))) {
@@ -376,8 +432,11 @@ function surfaceRanges(
 function packParameters(
   names: readonly string[],
   values: ReadonlyMap<string, number>,
+  declared: ReadonlyMap<string, number> = new Map(),
 ): Float64Array {
-  return Float64Array.from(names.map((name) => values.get(name) ?? 1));
+  return Float64Array.from(
+    names.map((name) => values.get(name) ?? declared.get(name) ?? 1),
+  );
 }
 
 /**

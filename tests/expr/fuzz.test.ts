@@ -97,16 +97,13 @@ describe("printing round-trips", () => {
    * The exact guarantee, which is narrower than "print then parse is the identity".
    *
    * The constructors preserve input order on purpose (so the typeset echo mirrors what was
-   * typed), while the printer always writes a product's numeric coefficient first — it
-   * emits `2 * a` for both `a * 2` and `2 * a`. Those are deliberately *different* interned
-   * nodes, so structural round-tripping cannot hold for arbitrary input, and claiming it
-   * did was an error in an earlier version of this test rather than a bug in the printer.
+   * typed), while the printer writes a product's numeric coefficient first and splits
+   * denominators out — it emits `2 * a` for both `a * 2` and `2 * a`. Those are deliberately
+   * *different* interned nodes, so structural round-tripping cannot hold for arbitrary input.
+   * Claiming it did was an error in an earlier version of this test, not a bug in the printer.
    *
-   * What does hold, and is what actually matters:
-   *
-   *   - on a **canonical** expression, printing and reparsing is the identity;
-   *   - on **any** expression, printing and reparsing preserves meaning, i.e. it agrees
-   *     after canonicalization.
+   * So the property asserted is **numeric agreement**, and structural identity is checked only
+   * on the shapes where the printer takes no liberties.
    */
   it("always reparses to something that evaluates identically", () => {
     // Checked NUMERICALLY, not by comparing canonical forms. `simplify` is bounded on
@@ -337,11 +334,13 @@ describe("random documents", () => {
     }
   });
 
-  it("never leaves an item referencing an undefined name it could have resolved", () => {
+  it("never leaves an item referencing a definition it could have inlined", () => {
     const random = makeRandom(SEED + 10);
     for (let trial = 0; trial < 200; trial++) {
+      // A computed definition, not a bare literal: literals deliberately stay symbolic as
+      // parameter slots, whereas anything computed must be substituted.
       const document = createDocument([
-        "a = 2",
+        "a = 2 sin(1)",
         `X(u,v) = (${randomExpression(random, 2)}, v, 0)`,
       ]);
       const resolution = document.resolution();

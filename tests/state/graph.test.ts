@@ -22,7 +22,9 @@ function kindsOf(...sources: string[]): Array<ItemKind | undefined> {
 
 describe("classification", () => {
   it("recognizes the shapes do Carmo actually uses", () => {
-    expect(kindsOf("a = 2")).toEqual(["scalar"]);
+    // A row declaring a plain number is a parameter, not a constant to inline.
+    expect(kindsOf("a = 2")).toEqual(["parameter"]);
+    expect(kindsOf("b = 1 + 2 sin(1)")).toEqual(["scalar"]);
     expect(kindsOf("alpha(t) = (cos t, sin t, t)")).toEqual(["spaceCurve"]);
     expect(kindsOf("c(t) = (cos t, sin t)")).toEqual(["planeCurve"]);
     expect(kindsOf("X(u,v) = (u, v, u v)")).toEqual(["parametricSurface"]);
@@ -54,13 +56,24 @@ describe("classification", () => {
 });
 
 describe("cross-row references", () => {
-  it("inlines a scalar into a later row", () => {
+  it("keeps a declared number symbolic, as a compiled slot", () => {
+    // Inlining `a = 2` would rebuild the whole interned tree every time the value moved, and
+    // re-differentiate the surface with it. Leaving it symbolic is what makes a slider free.
     const { document, resolution } = documentOf("a = 2", "X(u,v) = (a u, v, 0)");
     const surface = resolution.items.get(document.rows()[1]!.id)!;
     expect(surface.kind).toBe("parametricSurface");
-    // `a` is gone: it was substituted, so `diff` never sees an unknown name.
+    expect(surface.params).toEqual(["a"]);
+    expect(toSource(surface.comps[0]!)).toBe("a * u");
+    expect(resolution.declaredParameters.get("a")).toBe(2);
+  });
+
+  it("still inlines a scalar that is not a plain number", () => {
+    // Only literals become slots; anything computed is substituted, since there is nothing
+    // to drag and inlining keeps the expression differentiable.
+    const { document, resolution } = documentOf("w = 3 sin(1)", "X(u,v) = (w u, v, 0)");
+    const surface = resolution.items.get(document.rows()[1]!.id)!;
     expect(surface.params).toEqual([]);
-    expect(toSource(surface.comps[0]!)).toBe("2 * u");
+    expect(toSource(surface.comps[0]!)).toBe("3 * sin(1) * u");
   });
 
   it("inlines user functions, which is what makes them differentiable at all", () => {
@@ -90,22 +103,30 @@ describe("cross-row references", () => {
   });
 
   it("resolves a chain regardless of row order", () => {
-    // c depends on b depends on a, declared backwards.
+    // c depends on b depends on a, declared backwards. `a` is a slot, so the chain compiles
+    // to a function of a rather than to a constant.
     const { document, resolution } = documentOf("c = b + 1", "b = a + 1", "a = 1");
     const c = resolution.items.get(document.rows()[0]!.id)!;
-    expect(compileScalar(c.comps[0]!, { vars: [] }).call([])).toBe(3);
+    expect(c.params).toEqual(["a"]);
+    const compiled = compileScalar(c.comps[0]!, { vars: [], params: ["a"] });
+    expect(compiled.call([], [1])).toBe(3);
+    expect(compiled.call([], [10])).toBe(12);
   });
 
-  it("evaluates an inlined surface numerically", () => {
+  it("evaluates a surface through its parameter slots", () => {
     const { document, resolution } = documentOf(
       "R = 2",
       "r = 0.5",
       "X(u,v) = ((R + r cos u) cos v, (R + r cos u) sin v, r sin u)",
     );
     const surface = resolution.items.get(document.rows()[2]!.id)!;
-    const x = compileScalar(surface.comps[0]!, { vars: ["u", "v"] });
-    // At u = v = 0: (R + r) = 2.5.
-    expect(x.call([0, 0])).toBeCloseTo(2.5, 12);
+    expect(surface.params).toEqual(["R", "r"]);
+
+    const x = compileScalar(surface.comps[0]!, { vars: ["u", "v"], params: ["R", "r"] });
+    // At u = v = 0 the x-component is R + r.
+    expect(x.call([0, 0], [2, 0.5])).toBeCloseTo(2.5, 12);
+    // The same compiled program, different slot values — no recompilation involved.
+    expect(x.call([0, 0], [3, 1])).toBeCloseTo(4, 12);
   });
 });
 
@@ -166,8 +187,15 @@ describe("free parameters become slider candidates", () => {
     expect(resolution.freeParameters).toEqual(["a", "b"]);
   });
 
-  it("does not count bound variables or defined names", () => {
+  it("includes declared numbers, and records their values", () => {
+    // They need sliders too — that is the point of them being slots.
     const { resolution } = documentOf("a = 2", "X(u,v) = (a u, v, 0)");
+    expect(resolution.freeParameters).toEqual(["a"]);
+    expect(resolution.declaredParameters.get("a")).toBe(2);
+  });
+
+  it("does not count bound variables or inlined definitions", () => {
+    const { resolution } = documentOf("w = 3 sin(1)", "X(u,v) = (w u, v, 0)");
     expect(resolution.freeParameters).toEqual([]);
   });
 
@@ -185,9 +213,15 @@ describe("reactivity", () => {
     const bId = document.rows()[1]!.id;
     const b = document.itemFor(bId);
 
-    expect(compileScalar(b()!.comps[0]!, { vars: [] }).call([])).toBe(2);
+    const evaluate = () =>
+      compileScalar(b()!.comps[0]!, { vars: [], params: ["a"] }).call(
+        [],
+        [document.resolution().declaredParameters.get("a") ?? 0],
+      );
+
+    expect(evaluate()).toBe(2);
     document.rows()[0]!.source.set("a = 10");
-    expect(compileScalar(b()!.comps[0]!, { vars: [] }).call([])).toBe(11);
+    expect(evaluate()).toBe(11);
   });
 
   it("leaves a row's item identical when an unrelated row changes", () => {
@@ -218,8 +252,9 @@ describe("reactivity", () => {
     const aId = document.rows()[0]!.id;
     document.removeRow(aId);
     const b = document.resolution().items.get(document.rows()[0]!.id)!;
-    // `a` reverts to a free parameter rather than the row breaking.
+    // `a` was already a slot; removing its declaration only drops the recorded value.
     expect(b.params).toEqual(["a"]);
+    expect(document.resolution().declaredParameters.has("a")).toBe(false);
   });
 });
 

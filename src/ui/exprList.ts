@@ -26,6 +26,12 @@ import { tex } from "./tex.ts";
  * parameter; this file materializes one slider per name and never asks.
  */
 
+/** Short decimal for a slider-written literal; a full-precision float is unreadable in a row. */
+function format(value: number): string {
+  if (Number.isInteger(value)) return String(value);
+  return String(Number(value.toFixed(4)));
+}
+
 const KIND_LABEL: Readonly<Record<string, string>> = {
   scalar: "scalar",
   planeCurve: "plane curve",
@@ -60,6 +66,8 @@ export interface ExprListOptions {
   readonly sliders: Map<string, SliderSpec>;
   /** Which curve rows show a moving frame, and where along the curve. */
   readonly frames: Map<RowId, FrameRequest>;
+  /** Slider bounds for rows that define a plain number, keyed by row. */
+  readonly rowSliders: Map<RowId, SliderSpec>;
 }
 
 export interface ExprList {
@@ -88,6 +96,10 @@ interface RowView {
   readonly frameHost: HTMLElement;
   /** the variables the domain fields were built for, so they are not rebuilt needlessly */
   domainVars: string;
+  /** host for the inline slider a numeric row gets */
+  readonly valueHost: HTMLElement;
+  /** the name the inline slider was built for, or "" if there is none */
+  valueName: string;
 }
 
 export function createExprList(options: ExprListOptions): ExprList {
@@ -174,6 +186,7 @@ export function createExprList(options: ExprListOptions): ExprList {
     const notes = el("div", { class: "row__notes" });
     const domainHost = el("div", { class: "row__domain" });
     const frameHost = el("div", { class: "row__frame" });
+    const valueHost = el("div", { class: "row__value" });
 
     const remove = el("button", {
       class: "row__remove",
@@ -191,15 +204,34 @@ export function createExprList(options: ExprListOptions): ExprList {
       el("div", { class: "row__head" }, [badge, remove]),
       input,
       echo,
+      valueHost,
       domainHost,
       frameHost,
       notes,
     ]);
 
-    return { id, root, input, echo, badge, notes, domainHost, frameHost, domainVars: "" };
+    return {
+      id,
+      root,
+      input,
+      echo,
+      badge,
+      notes,
+      domainHost,
+      frameHost,
+      valueHost,
+      domainVars: "",
+      valueName: "",
+    };
   }
 
-  /** One slider per undefined symbol, created on demand and reused after that. */
+  /**
+   * One slider per undefined symbol.
+   *
+   * Names *declared* by a numeric row are excluded: those already have a slider on the row
+   * that declares them, and showing a second one for the same name would be two controls
+   * fighting over one value.
+   */
   const syncSliders = (names: readonly string[]) => {
     for (const name of names) {
       if (!options.sliders.has(name)) {
@@ -397,6 +429,123 @@ export function createExprList(options: ExprListOptions): ExprList {
     ]);
   };
 
+
+  /**
+   * A slider on any row that defines a plain number.
+   *
+   * This is the Desmos model, and it is what makes `R = 2` immediately adjustable rather than
+   * something you have to retype. Dragging rewrites the row's own text, so the document stays
+   * the single source of truth — the row still says exactly what it means, and undo, sharing
+   * and reloading all keep working without a parallel store of "current values".
+   *
+   * Built once per row and only rebuilt when the declared name changes, for the same reason
+   * everything else here is: replacing an input the user is holding is what steals focus.
+   */
+  const syncValueSlider = (view: RowView, item: Item | null) => {
+    const numeric =
+      item !== null &&
+      item.kind === "scalar" &&
+      item.name !== null &&
+      item.comps[0]?.kind === "num";
+
+    const name = numeric ? item.name! : "";
+    if (view.valueName === name) return;
+    view.valueName = name;
+
+    if (!numeric) {
+      replace(view.valueHost, []);
+      options.rowSliders.delete(view.id);
+      return;
+    }
+
+    const current = (item.comps[0] as { value: number }).value;
+    let spec = options.rowSliders.get(view.id);
+    if (!spec) {
+      // A symmetric range around twice the declared magnitude covers a radius, a pitch or a
+      // coefficient without asking for bounds up front; both ends stay editable.
+      const reach = Math.max(1, Math.abs(current) * 2);
+      spec = {
+        value: current,
+        min: -reach,
+        max: reach,
+        step: Math.abs(current) > 10 ? 0.1 : 0.01,
+      };
+      options.rowSliders.set(view.id, spec);
+    }
+    spec.value = current;
+    store.setParameter(name, current);
+
+    const readout = el("span", { class: "slider__value", text: format(current) });
+    const range = el("input", {
+      type: "range",
+      class: "slider__input",
+      min: spec.min,
+      max: spec.max,
+      step: spec.step,
+      value: spec.value,
+      /**
+       * While dragging, only the parameter *value* moves — never the row text.
+       *
+       * The row declares a number, and that number compiles to a **slot**, so changing it
+       * leaves every expression in the document byte-identical and the compiled jet is reused
+       * straight from cache. Rewriting `R = 2` to `R = 2.01` on each frame instead would build
+       * a whole new interned tree and re-differentiate the surface sixty times a second, which
+       * is exactly the jank this replaced.
+       */
+      onInput: () => {
+        const next = Number(range.value);
+        spec!.value = next;
+        readout.textContent = format(next);
+        store.setParameter(name, next);
+        options.requestRender(false);
+      },
+      /**
+       * On release, reconcile the row's text with where the slider ended up, so the document
+       * still says what it means. Once per drag, not once per frame.
+       */
+      onChange: () => {
+        const next = Number(range.value);
+        const row = store.rows().find((candidate) => candidate.id === view.id);
+        if (!row) return;
+        const text = `${name} = ${format(next)}`;
+        view.input.value = text;
+        row.source.set(text);
+        options.requestRender(false);
+      },
+    }) as HTMLInputElement;
+
+    const bound = (which: "min" | "max") =>
+      el("input", {
+        type: "number",
+        class: "field field--tiny",
+        value: Number(spec![which].toFixed(4)),
+        step: "any",
+        title: `${which} of the slider range`,
+        onChange: (event: Event) => {
+          const next = Number((event.target as HTMLInputElement).value);
+          if (!Number.isFinite(next)) return;
+          spec![which] = next;
+          range.min = String(spec!.min);
+          range.max = String(spec!.max);
+        },
+      });
+
+    replace(view.valueHost, [
+      el("div", { class: "slider" }, [
+        el("label", { class: "slider__label" }, [
+          el("span", { text: "value" }),
+          readout,
+        ]),
+        range,
+        el("div", { class: "slider__bounds" }, [
+          bound("min"),
+          el("span", { text: "…" }),
+          bound("max"),
+        ]),
+      ]),
+    ]);
+  };
+
   const refresh = (reports: readonly RowReport[]) => {
     syncRows();
     const resolution = store.resolution();
@@ -419,6 +568,7 @@ export function createExprList(options: ExprListOptions): ExprList {
         (item && NOT_YET_DRAWN.has(item.kind) ? " row__badge--pending" : "") +
         (label === "" ? " row__badge--empty" : "");
 
+      syncValueSlider(view, item);
       syncDomain(view, item);
       syncFrameControl(view, item);
 
@@ -446,7 +596,9 @@ export function createExprList(options: ExprListOptions): ExprList {
       replace(view.notes, notes);
     }
 
-    syncSliders(resolution.freeParameters);
+    syncSliders(
+      resolution.freeParameters.filter((name) => !resolution.declaredParameters.has(name)),
+    );
   };
 
   const root = el("div", {}, [

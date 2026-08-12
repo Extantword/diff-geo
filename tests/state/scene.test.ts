@@ -13,10 +13,13 @@ function sceneOf(
   frames: Map<RowId, FrameRequest> = new Map(),
 ) {
   const document = createDocument(sources);
-  const items = [...document.resolution().items.values()];
+  const resolved = document.resolution();
+  const items = [...resolved.items.values()];
   const scene = buildScene({
     items,
     parameters: new Map(Object.entries(parameters)),
+    // Numeric rows compile to slots, so their declared values have to be supplied.
+    declaredParameters: resolved.declaredParameters,
     domains,
     resolution: 24,
     frames,

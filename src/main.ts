@@ -56,6 +56,7 @@ function main() {
   const domains = new Map<RowId, DomainRange[]>();
   const sliders = new Map<string, SliderSpec>();
   const frames = new Map<RowId, FrameRequest>();
+  const rowSliders = new Map<RowId, SliderSpec>();
 
   const legendLabels = el("div", { class: "legend-labels" });
   const stats = el("div", { class: "readout" });
@@ -65,12 +66,17 @@ function main() {
   let framedOnce = false;
 
   const render = (resolution: number, refit: boolean) => {
-    const parameters = new Map<string, number>();
+    const resolved = store.resolution();
+
+    // Live values win; declared numeric rows supply the rest. Both slider kinds write into
+    // the document's parameter store, so reading it covers them uniformly.
+    const parameters = new Map<string, number>(store.parameters());
     for (const [name, spec] of sliders) parameters.set(name, spec.value);
 
     const scene = buildScene({
-      items: [...store.resolution().items.values()],
+      items: [...resolved.items.values()],
       parameters,
+      declaredParameters: resolved.declaredParameters,
       domains,
       resolution,
       frames,
@@ -129,7 +135,14 @@ function main() {
     fullTimer = window.setTimeout(() => render(FULL_RESOLUTION, false), FULL_DELAY_MS);
   };
 
-  const list = createExprList({ document: store, requestRender, domains, sliders, frames });
+  const list = createExprList({
+    document: store,
+    requestRender,
+    domains,
+    sliders,
+    frames,
+    rowSliders,
+  });
   const templates = createTemplatePicker({
     document: store,
     sliders,

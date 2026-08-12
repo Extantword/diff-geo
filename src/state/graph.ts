@@ -48,6 +48,8 @@ export type ItemKind =
   | "point"
   | "vectorField"
   | "functionDefinition"
+  /** a row declaring a plain number: becomes a compiled slot, not an inlined literal */
+  | "parameter"
   | "unknown";
 
 export interface Item {
@@ -68,8 +70,17 @@ export interface Resolution {
   readonly order: readonly RowId[];
   readonly diagnostics: ReadonlyMap<RowId, readonly Diagnostic[]>;
   readonly items: ReadonlyMap<RowId, Item>;
-  /** every undefined symbol across the document, sorted — the auto-slider candidates */
+  /** every symbol needing a slider, sorted — undefined ones and declared numbers alike */
   readonly freeParameters: readonly string[];
+  /**
+   * Rows that declare a plain number, as name → declared value.
+   *
+   * These stay **symbolic** in the rows that use them rather than being inlined, so they
+   * compile to a slot. That is what lets a slider move without changing a single expression:
+   * inlining the literal instead would build a whole new interned tree per frame and force
+   * re-differentiation of everything downstream.
+   */
+  readonly declaredParameters: ReadonlyMap<string, number>;
 }
 
 export interface DocumentStore {
@@ -307,6 +318,7 @@ export function resolve(rows: readonly Row[]): Resolution {
   const functions = new Map<string, UserFunction>();
   const items = new Map<RowId, Item>();
   const freeParameters = new Set<string>();
+  const declaredParameters = new Map<string, number>();
 
   for (const id of order) {
     if (cyclic.has(id)) continue;
@@ -322,7 +334,11 @@ export function resolve(rows: readonly Row[]): Resolution {
     for (const name of item.params) freeParameters.add(name);
 
     // Publish this row's definition for the rows that depend on it.
-    if (item.kind === "scalar" && item.name && item.comps[0]) {
+    if (item.kind === "parameter" && item.name && item.comps[0]?.kind === "num") {
+      // Deliberately NOT added to `values`: leaving it symbolic is what makes it a slot.
+      declaredParameters.set(item.name, item.comps[0].value);
+      freeParameters.add(item.name);
+    } else if (item.kind === "scalar" && item.name && item.comps[0]) {
       values.set(item.name, item.comps[0]);
     } else if (item.kind === "functionDefinition" && item.name) {
       functions.set(item.name, {
@@ -334,8 +350,9 @@ export function resolve(rows: readonly Row[]): Resolution {
   }
 
   for (const name of freeParameters) {
-    // Reported as a hint rather than an error: an undefined single letter is usually a
-    // parameter the user wants a slider for, which is how Desmos feels alive.
+    // Only for genuinely undefined symbols: a declared number already has its own slider on
+    // the row that declares it, so hinting there would be noise.
+    if (declaredParameters.has(name)) continue;
     const owner = [...items.values()].find((item) => item.params.includes(name));
     if (owner) {
       push(owner.rowId, hint("H_ADD_SLIDER", `add a slider for "${name}"`));
@@ -347,6 +364,7 @@ export function resolve(rows: readonly Row[]): Resolution {
     diagnostics,
     items,
     freeParameters: [...freeParameters].sort(),
+    declaredParameters,
   };
 }
 
@@ -512,6 +530,19 @@ function classify(
       // `z = x² − y²` declares a name but is really a graph surface.
       if (parsed.name === "z" && free.every((n) => n === "x" || n === "y")) {
         return graphItem(rowId, parsed.name, ["x", "y"], comps[0]!, new Set(["x", "y"]));
+      }
+      // A plain number becomes a parameter rather than a constant to inline. `R = 2` is
+      // something the user will want to drag, and keeping it symbolic downstream is what
+      // makes dragging it cost nothing.
+      if (comps[0]!.kind === "num") {
+        return {
+          rowId,
+          kind: "parameter",
+          name: parsed.name,
+          vars: [],
+          comps,
+          params: [],
+        };
       }
       return {
         rowId,

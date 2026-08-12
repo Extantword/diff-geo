@@ -479,3 +479,18 @@ optgroup {
 option {
   color: var(--text);
 }
+
+.row__value:empty,
+.row__domain:empty {
+  display: none;
+}
+
+.row__value {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--panel-border);
+}
+
+.row__value .slider {
+  margin-bottom: 0;
+}

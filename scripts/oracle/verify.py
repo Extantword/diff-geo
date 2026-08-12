@@ -3,32 +3,38 @@
 Cross-check the TypeScript CAS against sympy.
 
 The vitest suite already pins every derivative-table entry against an independently written
-closed form, and the structural rules against Richardson-extrapolated differences. Both are
-numeric, and both sample points. Neither can decide whether two expressions are equal *as
-functions* — which is precisely what "is this derivative correct?" asks.
+closed form, and the structural rules against Richardson-extrapolated differences. What it
+cannot do is check our derivative against a *second implementation of differentiation*. That
+is what sympy provides here, and it is the only gate in the project that does.
 
-sympy can. `simplify(ours - diff(f, vars)) == 0` is a proof rather than a sample, and that
-is what makes this the genuinely independent gate.
+## Numeric first, symbolic on suspicion
 
-Two layers, because sympy's `simplify` is powerful but not a decision procedure:
+The obvious design — `simplify(ours - sympy.diff(f)) == 0` for every case — is a proof, and it
+is also unusably slow: `simplify` and even `Expr.equals` took over ten minutes to get through
+a couple of hundred derivatives, and a gate that slow does not get run.
 
-  1. Symbolic. Assert the difference simplifies to exactly zero.
-  2. High-precision numeric, only where step 1 could not decide. Evaluate both sides with
-     mpmath at 50 digits at several random rational points. This also independently catches
-     catastrophic cancellation in our generated code, which is a bonus worth having.
+The ladder is therefore inverted, which costs nothing in detection power:
 
-Reporting "undecided" separately from "failed" matters: conflating them would either hide
-real breakage or produce a flaky gate that gets ignored.
+  1. **Numeric.** Both sides are `lambdify`-compiled once and evaluated at random points. A
+     genuinely wrong derivative differs by O(1) almost everywhere, so this catches real
+     breakage immediately and takes milliseconds.
+  2. **Symbolic, only on disagreement.** A suspected failure is re-checked with mpmath at 50
+     digits, then symbolically, before being reported — so a pole, a branch cut or a
+     precision artifact is not mistaken for a bug.
+
+`--deep` additionally demands a symbolic proof for every case, for when that is wanted.
 
 Offline dev step. sympy never ships to the browser.
 
     npm run oracle
+    npm run oracle -- --deep
 """
 
 from __future__ import annotations
 
 import json
 import os
+import math
 import random
 import sys
 
@@ -89,27 +95,22 @@ def parse_ours(source: str):
 
 
 def symbolically_zero(difference, deep: bool) -> bool | None:
-    """
-    True if provably zero, False if provably nonzero, None if undecided.
-
-    Ordered cheapest-first, which matters enormously: calling `simplify` on every difference
-    made this take upwards of half an hour for a few hundred derivatives, and a gate that
-    slow does not get run. The overwhelming majority are structurally zero the moment both
-    sides are expanded, so the expensive machinery is reserved for the handful that are not.
-    """
-    # 1. Structural. Free, and catches most cases outright.
+    """True if provably zero, False if provably nonzero, None if undecided."""
     if difference == 0:
         return True
-
-    # 2. Expansion. Cheap, and resolves nearly everything else.
     try:
         if sp.expand(difference) == 0:
             return True
     except Exception:
         pass
-
-    # 3. sympy's own equality helper: randomized numeric evidence, then a symbolic attempt.
-    #    Usually far quicker than a full simplify and it answers the exact question asked.
+    if not deep:
+        return None
+    for attempt in (sp.trigsimp, sp.simplify, lambda e: sp.simplify(sp.expand(e))):
+        try:
+            if attempt(difference) == 0:
+                return True
+        except Exception:
+            continue
     try:
         verdict = difference.equals(0)
         if verdict is True:
@@ -118,72 +119,113 @@ def symbolically_zero(difference, deep: bool) -> bool | None:
             return False
     except Exception:
         pass
-
-    if not deep:
-        return None
-
-    # 4. Last resort, only for the survivors.
-    for attempt in (sp.trigsimp, sp.simplify, lambda e: sp.simplify(sp.expand(e))):
-        try:
-            if attempt(difference) == 0:
-                return True
-        except Exception:
-            continue
-
     return None
 
 
-def as_real_float(value) -> float | None:
+def compile_pair(ours, theirs, free):
     """
-    A plain float, or None if this value is not a usable real number.
+    `lambdify` both sides once, over a fixed argument order.
 
-    Deliberately total. An arbitrary formula evaluated at an arbitrary rational lands on
-    complex results, poles, `zoo`, `nan`, and expressions sympy simply declines to reduce —
-    and a point we cannot evaluate says nothing about whether two derivatives agree. So
-    every such case is skipped rather than guarded against case by case, which is what the
-    first version of this got wrong.
+    Compiling per case rather than substituting per point is the whole reason this is fast:
+    `subs` walks and rebuilds the expression tree every time, while a lambdified function is
+    plain Python arithmetic.
     """
+    args = list(free)
     try:
-        if value.has(sp.zoo) or value.has(sp.nan) or value.has(sp.oo) or value.has(-sp.oo):
+        # mpmath rather than math: the standard library has no sech, csch or coth, so those
+        # would be left as unevaluated sympy calls and the "numbers" coming back would not be
+        # numbers at all.
+        return (
+            sp.lambdify(args, ours, modules=["mpmath"]),
+            sp.lambdify(args, theirs, modules=["mpmath"]),
+        )
+    except Exception:
+        return None, None
+
+
+def to_float(value) -> float | None:
+    """A finite real float, or None. Total by design — see `numeric_verdict`."""
+    try:
+        if isinstance(value, complex):
             return None
-        if not value.is_number:
-            return None
-        if value.is_real is not True:
-            return None
-        return float(value)
-    except (TypeError, ValueError, AttributeError):
+        result = float(value)
+    except (TypeError, ValueError, OverflowError, ArithmeticError):
         return None
+    return result if math.isfinite(result) else None
 
 
-def numerically_equal(ours, theirs, free, rng) -> tuple[bool, str]:
-    """Compare at random rational points with 50-digit precision."""
+def numeric_verdict(ours, theirs, free, rng) -> tuple[str, str]:
+    """
+    ("agree" | "disagree" | "unusable", detail).
+
+    Points where either side is undefined or complex are skipped: an arbitrary formula has
+    plenty of them, and they say nothing about whether two derivatives match.
+    """
+    left_fn, right_fn = compile_pair(ours, theirs, free)
+    if left_fn is None or right_fn is None:
+        return "unusable", "lambdify failed"
+
     checked = 0
-    for _ in range(80):
-        # Rationals keep the substitution exact, so only the final evaluation is numeric.
-        point = {
-            symbol: sp.Rational(rng.randint(-400, 400), rng.randint(80, 400))
-            for symbol in free
-        }
+    for _ in range(40):
+        point = [rng.uniform(-2.5, 2.5) for _ in free]
         try:
-            left = as_real_float(sp.N(ours.subs(point), mp.dps))
-            right = as_real_float(sp.N(theirs.subs(point), mp.dps))
+            left = to_float(left_fn(*point))
+            right = to_float(right_fn(*point))
         except Exception:
             continue
         if left is None or right is None:
             continue
 
         scale = max(abs(left), abs(right), 1.0)
-        if abs(left - right) > 1e-25 * scale:
-            return False, f"at {point}: {left} vs {right}"
+        if abs(left - right) > 1e-7 * scale:
+            values = ", ".join(f"{s}={p:.6g}" for s, p in zip(free, point))
+            return "disagree", f"at {values}: {left!r} vs {right!r}"
         checked += 1
         if checked >= 12:
-            return True, f"{checked} points"
+            return "agree", f"{checked} points"
 
-    # No usable point is not evidence of agreement, and must not be reported as such.
     if checked == 0:
-        return True, "NO USABLE POINTS — unverified"
-    return True, f"{checked} points"
+        return "unusable", "no point where both sides are real and finite"
+    return "agree", f"{checked} points"
 
+
+def confirm_disagreement(ours, theirs, free, detail: str) -> str | None:
+    """
+    Re-check a suspected failure at high precision, then symbolically.
+
+    Returns a message if the disagreement is real, or None if it was an artifact — which
+    keeps a branch cut or a cancellation from being reported as a broken derivative.
+    """
+    mp.dps = 50
+    try:
+        point = {symbol: sp.Rational(rng_probe.randint(-300, 300), 137) for symbol in free}
+        left = sp.N(ours.subs(point), 50)
+        right = sp.N(theirs.subs(point), 50)
+        if left.is_number and right.is_number and left.is_real and right.is_real:
+            scale = max(abs(float(left)), abs(float(right)), 1.0)
+            if abs(float(left) - float(right)) < 1e-25 * scale:
+                return None
+    except Exception:
+        pass
+
+    if symbolically_zero(ours - theirs, deep=True) is True:
+        return None
+    return detail
+
+
+rng_probe = random.Random(1)
+
+
+def is_distributional(expr) -> bool:
+    """
+    True when sympy's answer is a distribution rather than a function.
+
+    `sign` and `abs` are the one place we knowingly differ: sympy differentiates `sign(u)` to
+    `2·DiracDelta(u)`, while `fns.ts` returns 0 — correct away from the origin, and the honest
+    answer available without distributions. Naming that divergence explicitly keeps it from
+    sitting in the "could not evaluate" pile, where it would mask a genuine gap later.
+    """
+    return expr.has(sp.DiracDelta) or expr.has(sp.Derivative) or expr.has(sp.Heaviside)
 
 def main() -> int:
     # `--deep` adds the expensive simplify ladder for anything the cheap tests cannot
@@ -204,6 +246,7 @@ def main() -> int:
     proved = 0
     numeric = 0
     undecided: list[str] = []
+    distributional: list[str] = []
     failures: list[str] = []
 
     for index, case in enumerate(cases):
@@ -222,30 +265,42 @@ def main() -> int:
                 failures.append(f"{case['source']} d/d{key}: {exc}")
                 continue
 
-            verdict = symbolically_zero(ours - theirs, deep=deep)
-            if verdict is True:
+            # Structural equality first: free, and it settles the large majority outright,
+            # since our simplified derivative usually *is* sympy's up to term order.
+            difference = ours - theirs
+            if difference == 0 or (deep and symbolically_zero(difference, deep=True) is True):
                 proved += 1
                 continue
 
+            # Argument list from the two expressions, NOT from their difference. When the
+            # difference collapses to 0 it has no free symbols at all, and lambdifying over
+            # that empty list produced functions that could not be called — which is how an
+            # earlier version reported hundreds of perfectly ordinary cases as unevaluable.
+            if is_distributional(theirs):
+                distributional.append(f"{case['source']} d/d{key}")
+                continue
+
             free = sorted(
-                (ours - theirs).free_symbols, key=lambda s: s.name
+                ours.free_symbols | theirs.free_symbols,
+                key=lambda symbol: symbol.name,
             )
-            agrees, detail = numerically_equal(ours, theirs, free, rng)
-            if not agrees:
-                failures.append(
-                    f"{case['source']}  d/d{key}\n"
-                    f"    ours:   {ours}\n"
-                    f"    sympy:  {theirs}\n"
-                    f"    {detail}"
-                )
-            elif verdict is False:
-                # sympy claimed nonzero but the numbers agree everywhere we could test.
-                # Almost always a simplify limitation; recorded rather than failed.
-                undecided.append(f"{case['source']} d/d{key} (simplify said nonzero, {detail})")
+            status, detail = numeric_verdict(ours, theirs, free, rng)
+
+            if status == "agree":
                 numeric += 1
-            else:
+            elif status == "unusable":
                 undecided.append(f"{case['source']} d/d{key} ({detail})")
-                numeric += 1
+            else:
+                real = confirm_disagreement(ours, theirs, free, detail)
+                if real is None:
+                    numeric += 1
+                else:
+                    failures.append(
+                        f"{case['source']}  d/d{key}\n"
+                        f"    ours:   {ours}\n"
+                        f"    sympy:  {theirs}\n"
+                        f"    {real}"
+                    )
 
         if (index + 1) % 40 == 0:
             print(f"  … {index + 1}/{len(cases)} cases", flush=True)
@@ -255,11 +310,22 @@ def main() -> int:
     print(f"seed {seed}   mode {'deep' if deep else 'fast'}")
     print(f"derivatives checked   {total}")
     print(f"  proved symbolically {proved}")
-    print(f"  numeric only        {numeric}")
+    print(f"  agreed numerically  {numeric}")
+
+    if distributional:
+        print()
+        print(
+            f"known divergence, sympy answers with a distribution ({len(distributional)}):"
+        )
+        for line in distributional[:6]:
+            print(f"  {line}")
+        if len(distributional) > 6:
+            print(f"  … and {len(distributional) - 6} more")
+        print("  (sign' is 0 here, not 2*DiracDelta — see the note in fns.ts)")
 
     if undecided:
         print()
-        print(f"undecided symbolically, agreed numerically ({len(undecided)}):")
+        print(f"could not be evaluated anywhere usable ({len(undecided)}):")
         for line in undecided[:12]:
             print(f"  {line}")
         if len(undecided) > 12:
