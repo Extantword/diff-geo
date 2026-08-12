@@ -66,6 +66,15 @@ export interface ExprList {
   readonly root: HTMLElement;
   /** Refresh echoes, badges and diagnostics from the current resolution. */
   refresh(reports: readonly RowReport[]): void;
+  /**
+   * Force the sliders to be rebuilt on the next refresh.
+   *
+   * The rebuild guard keys off the parameter *names*, which is what keeps a refresh from
+   * replacing a range input mid-drag. Loading a template re-seeds the specs behind those same
+   * names with different bounds, so it has to say so explicitly rather than relying on the
+   * name list to have changed.
+   */
+  invalidateSliders(): void;
 }
 
 interface RowView {
@@ -77,6 +86,8 @@ interface RowView {
   readonly notes: HTMLElement;
   readonly domainHost: HTMLElement;
   readonly frameHost: HTMLElement;
+  /** the variables the domain fields were built for, so they are not rebuilt needlessly */
+  domainVars: string;
 }
 
 export function createExprList(options: ExprListOptions): ExprList {
@@ -90,6 +101,8 @@ export function createExprList(options: ExprListOptions): ExprList {
   });
 
   const views = new Map<RowId, RowView>();
+  /** the parameter list the sliders were built for */
+  let renderedSliders = "\u0000";
 
   const addButton = el("button", {
     class: "add-row",
@@ -121,10 +134,24 @@ export function createExprList(options: ExprListOptions): ExprList {
         views.delete(id);
       }
     }
-    // Reorder by appending in document order; appending an existing child moves it.
-    for (const row of rows) {
-      const view = views.get(row.id);
-      if (view) rowHost.append(view.root);
+    /**
+     * Reorder only when the order is actually wrong.
+     *
+     * `append` on an element that is already a child is a **move**: the browser detaches and
+     * reinserts it, which blurs any focused descendant. Doing that unconditionally on every
+     * refresh meant the formula input lost focus after each keystroke — the same class of bug
+     * as replacing the input outright, arriving by a different route. So the DOM is only
+     * touched when the desired order genuinely differs from the current one, which is almost
+     * never.
+     */
+    const desired = rows.map((row) => views.get(row.id)).filter((view) => view !== undefined);
+    const current = Array.from(rowHost.children);
+    const alreadyOrdered =
+      desired.length === current.length &&
+      desired.every((view, index) => view!.root === current[index]);
+
+    if (!alreadyOrdered) {
+      for (const view of desired) rowHost.append(view!.root);
     }
   };
 
@@ -169,7 +196,7 @@ export function createExprList(options: ExprListOptions): ExprList {
       notes,
     ]);
 
-    return { id, root, input, echo, badge, notes, domainHost, frameHost };
+    return { id, root, input, echo, badge, notes, domainHost, frameHost, domainVars: "" };
   }
 
   /** One slider per undefined symbol, created on demand and reused after that. */
@@ -185,10 +212,15 @@ export function createExprList(options: ExprListOptions): ExprList {
       if (!names.includes(name)) options.sliders.delete(name);
     }
 
-    const active = names.length > 0;
+    // Rebuilt only when the set of parameters changes. Otherwise a refresh mid-drag would
+    // replace the very range input being dragged.
+    const signature = names.join(",");
+    if (signature === renderedSliders) return;
+    renderedSliders = signature;
+
     replace(
       sliderHost,
-      active
+      names.length > 0
         ? names.map((name) => sliderRow(name, options.sliders.get(name)!))
         : [sliderEmpty],
     );
@@ -250,6 +282,12 @@ export function createExprList(options: ExprListOptions): ExprList {
         item.kind === "graphSurface" ||
         item.kind === "spaceCurve" ||
         item.kind === "planeCurve");
+
+    // Same rule as the row list: the number inputs are only rebuilt when the variables
+    // change, so typing a domain bound is not interrupted by the next refresh.
+    const signature = drawable ? vars.join(",") : "";
+    if (view.domainVars === signature) return;
+    view.domainVars = signature;
 
     if (!drawable || vars.length === 0) {
       replace(view.domainHost, []);
@@ -425,7 +463,13 @@ export function createExprList(options: ExprListOptions): ExprList {
 
   syncRows();
 
-  return { root, refresh };
+  return {
+    root,
+    refresh,
+    invalidateSliders: () => {
+      renderedSliders = "\u0000";
+    },
+  };
 }
 
 function diagnosticNode(diagnostic: Diagnostic): HTMLElement {

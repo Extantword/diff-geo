@@ -6,9 +6,8 @@ import { lookupFn } from "./fns.ts";
  *
  * Two jobs, hence the `power` option:
  *
- *  - `"^"` (default) emits text this project's own parser accepts, which is what makes
- *    the round-trip property `parse(toSource(parse(s))) === parse(s)` meaningful.
- *    Interning turns that into a reference-equality check.
+ *  - `"^"` (default) emits text this project's own parser accepts, so output can be fed
+ *    straight back in. Interning turns the round-trip check into reference equality.
  *  - `"**"` emits a strict subset of Python expression syntax that `sympy.parse_expr`
  *    accepts. Guaranteeing that subset is nearly free and it removes any need for a
  *    serialization format in the sympy oracle.
@@ -16,6 +15,20 @@ import { lookupFn } from "./fns.ts";
  * The AST has no subtraction or division nodes, so this printer reconstructs `a − b`
  * and `a / b` from the normalized forms. Without that, output would be a wall of
  * `x^(-1)` and `(-1)*y` that neither a human nor sympy would want to read.
+ *
+ * ## What round-tripping actually guarantees
+ *
+ * A product's numeric coefficient is always written first: both `a * 2` and `2 * a` print
+ * as `2 * a`. Since the constructors preserve input order — deliberately, so the typeset
+ * echo mirrors what the user typed — those two are *different* interned nodes, and
+ * `parse(toSource(e)) === e` therefore does **not** hold in general.
+ *
+ * The two guarantees that do hold, both fuzz-tested:
+ *
+ *     parse(toSource(e)) === e                     for canonical e (that is, e = simplify(…))
+ *     simplify(parse(toSource(e))) === simplify(e)  for any e
+ *
+ * Meaning is preserved unconditionally; structure only once canonicalized.
  */
 
 export interface PrintOptions {
@@ -109,9 +122,21 @@ export function toSource(e: Expr, options: PrintOptions = {}): string {
     const top = numerator.length === 0 ? "1" : numerator.join(" * ");
     if (denominator.length === 0) return { negative: coeff < 0, text: top };
 
-    const bottom =
-      denominator.length === 1 ? denominator[0]! : `(${denominator.join(" * ")})`;
-    return { negative: coeff < 0, text: `${top} / ${bottom}` };
+    /**
+     * Each denominator factor gets its own `/`, rather than being gathered into
+     * `x / (a * b)`.
+     *
+     * Both spellings mean the same thing, but the gathered form reparses as a single
+     * inverted *product* — `mul(x, (ab)⁻¹)` instead of `mul(x, a⁻¹, b⁻¹)` — and `simplify`
+     * cannot reunify those, because distributing a power over a product is exactly the kind
+     * of rewrite it deliberately does not do. Emitting `x / a / b` keeps the printed text
+     * structurally close to the tree it came from, which matters both for round-tripping and
+     * for the sympy oracle, since it leans less on sympy's own simplifier.
+     */
+    return {
+      negative: coeff < 0,
+      text: top + denominator.map((factor) => ` / ${factor}`).join(""),
+    };
   };
 
   const emit = (node: Expr, outer: number): string => {

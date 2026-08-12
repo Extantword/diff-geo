@@ -464,3 +464,18 @@ body {
 .frame-position .slider__input:disabled {
   opacity: 0.35;
 }
+
+.panel-section--first {
+  margin-top: 16px;
+  padding-top: 0;
+  border-top: none;
+}
+
+optgroup {
+  color: var(--text-dim);
+  font-style: normal;
+}
+
+option {
+  color: var(--text);
+}

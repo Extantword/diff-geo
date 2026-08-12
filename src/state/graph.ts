@@ -79,6 +79,8 @@ export interface DocumentStore {
   readonly parameters: WritableSignal<ReadonlyMap<string, number>>;
   addRow(source?: string): Row;
   removeRow(id: RowId): void;
+  /** Replace every row at once, for loading a template. */
+  setRows(sources: readonly string[]): Row[];
   /** Per-row diagnostics, as a stable signal so a row can render its own errors. */
   diagnosticsFor(id: RowId): Signal<readonly Diagnostic[]>;
   itemFor(id: RowId): Signal<Item | null>;
@@ -123,6 +125,18 @@ export function createDocument(initial: readonly string[] = []): DocumentStore {
       rowsSignal.set(rowsSignal().filter((row) => row.id !== id));
       diagnosticCache.delete(id);
       itemCache.delete(id);
+    },
+
+    setRows(sources) {
+      // Fresh ids rather than reusing the old ones: the per-row caches key off the id, and a
+      // recycled id would hand a new row its predecessor's memoized item.
+      for (const row of rowsSignal()) {
+        diagnosticCache.delete(row.id);
+        itemCache.delete(row.id);
+      }
+      const rows = sources.map((source) => ({ id: nextId++, source: signal(source) }));
+      rowsSignal.set(rows);
+      return rows;
     },
 
     diagnosticsFor(id) {

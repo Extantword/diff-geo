@@ -5,6 +5,7 @@ import { buildScene, type DomainRange, type FrameRequest } from "./state/scene.t
 import { createDevice } from "./gl/device.ts";
 import { createRenderer } from "./gl/renderer.ts";
 import { createExprList, type SliderSpec } from "./ui/exprList.ts";
+import { createTemplatePicker } from "./ui/templates.ts";
 import { el, replace } from "./ui/dom.ts";
 
 /**
@@ -129,6 +130,13 @@ function main() {
   };
 
   const list = createExprList({ document: store, requestRender, domains, sliders, frames });
+  const templates = createTemplatePicker({
+    document: store,
+    sliders,
+    domains,
+    requestRender,
+    invalidateSliders: () => list.invalidateSliders(),
+  });
 
   const curvatureToggle = el("input", {
     type: "checkbox",
@@ -144,6 +152,7 @@ function main() {
         el("h1", { text: "DiffGeo" }),
         el("p", { text: "Curves and surfaces in R³, after do Carmo." }),
       ]),
+      templates,
       list.root,
       el("section", { class: "panel-section" }, [
         el("h2", { class: "section-title", text: "Gaussian curvature" }),
