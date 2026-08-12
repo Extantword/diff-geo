@@ -113,6 +113,19 @@ const CURVE_VAR = "t";
 const SURFACE_VARS = ["u", "v"] as const;
 const AMBIENT_VARS = ["x", "y", "z"] as const;
 
+/**
+ * Names that are **coordinates**, never parameters.
+ *
+ * `u, v` chart the domain, `x, y, z` the ambient space, `t` parametrizes curves. A row like
+ * `v = log(u)` is a graph over the chart, and offering a slider for `u` treats a coordinate as
+ * a free constant — which is not a slightly-wrong guess but a category error, since the whole
+ * point of u is that it varies over the domain.
+ *
+ * So these are excluded from the slider candidates everywhere, and declaring one as a name is
+ * handled specially rather than as an ordinary definition.
+ */
+const COORDINATES: ReadonlySet<string> = new Set(["u", "v", "x", "y", "z", "t"]);
+
 export function createDocument(initial: readonly string[] = []): DocumentStore {
   let nextId = 1;
   const rowsSignal = signal<readonly Row[]>(
@@ -578,9 +591,69 @@ function classify(
       if (!comps) return null;
       const free = freeVars(comps[0]!);
 
+      /**
+       * `v = …` and `u = …` are graphs over the chart, checked before anything else.
+       *
+       * This has to come first. Otherwise `v = 2` is caught by the numeric-parameter rule and
+       * becomes a slider called v, and `v = log(u)` becomes a scalar with u offered as a
+       * slider — both of which treat a coordinate as a free constant.
+       *
+       * The pleasant consequence is that `u = 3` and `v = 2` are coordinate curves, which is
+       * exactly what they should mean.
+       */
+      if (parsed.name === "u" || parsed.name === "v") {
+        const other = parsed.name === "v" ? "u" : "v";
+        if (free.includes(parsed.name)) {
+          push(
+            rowId,
+            error(
+              "E_CLASSIFY",
+              `${parsed.name} appears on both sides. For a relation between u and v, write ` +
+                `it as an equation such as u^2 + v^2 = 1`,
+            ),
+          );
+          return null;
+        }
+        return {
+          rowId,
+          kind: "chartGraph",
+          name: parsed.name,
+          vars: [other],
+          comps,
+          params: remainingParams(comps[0]!, new Set([other]), values, functions),
+        };
+      }
+
       // `z = x² − y²` declares a name but is really a graph surface.
       if (parsed.name === "z" && free.every((n) => n === "x" || n === "y")) {
         return graphItem(rowId, parsed.name, ["x", "y"], comps[0]!, new Set(["x", "y"]));
+      }
+
+      // The remaining coordinates are not names to bind at all.
+      if (COORDINATES.has(parsed.name)) {
+        push(
+          rowId,
+          error(
+            "E_RESERVED",
+            `"${parsed.name}" is a coordinate, not a name that can be defined`,
+          ),
+        );
+        return null;
+      }
+
+      // A definition that depends on a coordinate is a function of it, so say so rather than
+      // leaving the user wondering why no slider appeared.
+      const usedCoordinates = free.filter((n) => COORDINATES.has(n));
+      if (usedCoordinates.length > 0) {
+        push(
+          rowId,
+          hint(
+            "H_ADD_SLIDER",
+            `${usedCoordinates.join(", ")} ${usedCoordinates.length === 1 ? "is a" : "are"} ` +
+              `coordinate${usedCoordinates.length === 1 ? "" : "s"}, so ${parsed.name} is a ` +
+              `function of ${usedCoordinates.join(", ")} rather than a constant`,
+          ),
+        );
       }
       // A plain number becomes a parameter rather than a constant to inline. `R = 2` is
       // something the user will want to drag, and keeping it symbolic downstream is what
@@ -827,7 +900,12 @@ function remainingParams(
   functions: ReadonlyMap<string, UserFunction>,
 ): string[] {
   return freeVars(e).filter(
-    (name) => !keep.has(name) && !values.has(name) && !functions.has(name),
+    (name) =>
+      !keep.has(name) &&
+      !values.has(name) &&
+      !functions.has(name) &&
+      // A coordinate is never a slider, even where it is not one of this row's own variables.
+      !COORDINATES.has(name),
   );
 }
 

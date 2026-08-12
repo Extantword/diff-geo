@@ -61,6 +61,57 @@ describe("classification", () => {
     expect(toSource(surface.comps[0]!)).toBe("(2 + cos(u)) * cos(v)");
   });
 
+  it("treats u and v as coordinates, never as sliders", () => {
+    // The reported bug: `v = log(u)` was a scalar with `u` offered as a slider. Offering one
+    // for a coordinate is a category error — the whole point of u is that it varies.
+    expect(kindsOf("v = log(u)")).toEqual(["chartGraph"]);
+    const { resolution } = documentOf("v = log(u)");
+    expect(resolution.freeParameters).toEqual([]);
+  });
+
+  it("reads u = c and v = c as coordinate curves", () => {
+    // Checked before the numeric-parameter rule, or `v = 2` would become a slider called v.
+    expect(kindsOf("v = 2")).toEqual(["chartGraph"]);
+    expect(kindsOf("u = 3")).toEqual(["chartGraph"]);
+    const { document, resolution } = documentOf("u = 3");
+    const item = resolution.items.get(document.rows()[0]!.id)!;
+    // u = 3 varies with v, so v is its parameter.
+    expect(item.vars).toEqual(["v"]);
+  });
+
+  it("never offers a slider for any coordinate", () => {
+    for (const source of [
+      "X(u,v) = (u, v, t)",
+      "w = x + y + z",
+      "c(s) = (s, u, v)",
+    ]) {
+      const { resolution } = documentOf(source);
+      for (const name of resolution.freeParameters) {
+        expect(["u", "v", "x", "y", "z", "t"]).not.toContain(name);
+      }
+    }
+  });
+
+  it("refuses to bind a coordinate that is not u, v or z", () => {
+    expect(codesFor(["t = 5"], 0)).toContain("E_RESERVED");
+    expect(codesFor(["x = 5"], 0)).toContain("E_RESERVED");
+  });
+
+  it("says why a definition depending on a coordinate got no slider", () => {
+    const { document, resolution } = documentOf("w = u + 1");
+    const messages = (resolution.diagnostics.get(document.rows()[0]!.id) ?? [])
+      .map((d) => d.message)
+      .join(" ");
+    expect(messages).toContain("is a coordinate");
+    expect(resolution.freeParameters).toEqual([]);
+  });
+
+  it("refuses a coordinate appearing on both sides", () => {
+    const { document, resolution } = documentOf("v = v + 1");
+    const codes = (resolution.diagnostics.get(document.rows()[0]!.id) ?? []).map((d) => d.code);
+    expect(codes.some((c) => c === "E_CLASSIFY" || c === "E_RECURSION")).toBe(true);
+  });
+
   it("reads an equation in u and v as a relation on the chart", () => {
     // u² + v² = 1 is a circle in the DOMAIN, whose image on the surface is generally not a
     // circle at all — which is the thing worth looking at.
