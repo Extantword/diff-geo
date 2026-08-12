@@ -4,6 +4,7 @@ import { createDocument, type RowId } from "./state/graph.ts";
 import { buildScene, type DomainRange, type FrameRequest } from "./state/scene.ts";
 import { createDevice } from "./gl/device.ts";
 import { createRenderer } from "./gl/renderer.ts";
+import { createAnimator } from "./ui/animate.ts";
 import { createExprList, type SliderSpec } from "./ui/exprList.ts";
 import { createTemplatePicker } from "./ui/templates.ts";
 import { el, replace } from "./ui/dom.ts";
@@ -75,6 +76,7 @@ function main() {
   const frames = new Map<RowId, FrameRequest>();
   const rowSliders = new Map<RowId, SliderSpec>();
   const inChart = new Set<RowId>();
+  const animator = createAnimator();
 
   const legendLabels = el("div", { class: "legend-labels" });
   const stats = el("div", { class: "readout" });
@@ -198,6 +200,7 @@ function main() {
     frames,
     rowSliders,
     inChart,
+    animator,
   });
   const templates = createTemplatePicker({
     document: store,
@@ -206,6 +209,10 @@ function main() {
     requestRender: (refit: boolean) => onEdit(refit),
     invalidateSliders: () => list.invalidateSliders(),
   });
+
+  // A playing slider redraws through the same throttled path as a drag: one draft render per
+  // animation frame, with the full-resolution pass arriving once it settles.
+  animator.setOnTick(() => onParameterChange());
 
   const chartToggle = el("input", {
     type: "checkbox",

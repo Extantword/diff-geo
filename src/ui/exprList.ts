@@ -8,7 +8,8 @@ import {
   type FrameRequest,
   type RowReport,
 } from "../state/scene.ts";
-import { el, replace } from "./dom.ts";
+import type { Animator } from "./animate.ts";
+import { el, formatValue, replace } from "./dom.ts";
 import { tex } from "./tex.ts";
 
 /**
@@ -82,6 +83,8 @@ export interface ExprListOptions {
   readonly rowSliders: Map<RowId, SliderSpec>;
   /** Plane-curve rows to read as curves in the chart rather than in the z = 0 plane. */
   readonly inChart: Set<RowId>;
+  /** Drives play / pause / rewind on any slider. */
+  readonly animator: Animator;
 }
 
 export interface ExprList {
@@ -260,6 +263,40 @@ export function createExprList(options: ExprListOptions): ExprList {
   }
 
   /**
+   * Play, pause and rewind for one slider.
+   *
+   * The play button's label is the only state here that must be kept in step, and it is read
+   * back from the animator rather than tracked separately — two copies of "is this playing" is
+   * exactly the kind of thing that drifts apart.
+   */
+  const transport = (key: string): HTMLElement => {
+    const play = el("button", {
+      class: "transport__button",
+      title: "play / pause",
+      text: options.animator.playing(key) ? "\u275a\u275a" : "\u25b6",
+    });
+    const paint = () => {
+      const active = options.animator.playing(key);
+      play.textContent = active ? "\u275a\u275a" : "\u25b6";
+      play.classList.toggle("transport__button--active", active);
+    };
+    play.addEventListener("click", () => {
+      options.animator.toggle(key);
+      paint();
+    });
+    paint();
+
+    const rewind = el("button", {
+      class: "transport__button",
+      title: "back to the start of the range",
+      text: "\u25c0\u25c0",
+      onClick: () => options.animator.rewind(key),
+    });
+
+    return el("div", { class: "transport" }, [rewind, play]);
+  };
+
+  /**
    * One slider per undefined symbol.
    *
    * Names *declared* by a numeric row are excluded: those already have a slider on the row
@@ -275,7 +312,10 @@ export function createExprList(options: ExprListOptions): ExprList {
       }
     }
     for (const name of [...options.sliders.keys()]) {
-      if (!names.includes(name)) options.sliders.delete(name);
+      if (!names.includes(name)) {
+        options.sliders.delete(name);
+        options.animator.unregister(`param:${name}`);
+      }
     }
 
     // Rebuilt only when the set of parameters changes. Otherwise a refresh mid-drag would
@@ -329,13 +369,25 @@ export function createExprList(options: ExprListOptions): ExprList {
 
     store.setParameter(name, spec.value);
 
+    // Registered so the animator can drive this slider's DOM directly.
+    options.animator.register(`param:${name}`, spec, (value) => {
+      range.value = String(value);
+      readout.textContent = formatValue(value);
+      store.setParameter(name, value);
+    });
+
     return el("div", { class: "slider" }, [
       el("label", { class: "slider__label" }, [
         tex(name.length === 1 ? name : `\\mathrm{${name}}`),
         readout,
       ]),
       range,
-      el("div", { class: "slider__bounds" }, [bound("min"), el("span", { text: "…" }), bound("max")]),
+      el("div", { class: "slider__bounds" }, [
+        bound("min"),
+        el("span", { text: "…" }),
+        bound("max"),
+        transport(`param:${name}`),
+      ]),
     ]);
   }
 
@@ -532,6 +584,7 @@ export function createExprList(options: ExprListOptions): ExprList {
     if (!numeric) {
       replace(view.valueHost, []);
       options.rowSliders.delete(view.id);
+      options.animator.unregister(`row:${view.id}`);
       return;
     }
 
@@ -608,6 +661,29 @@ export function createExprList(options: ExprListOptions): ExprList {
         },
       });
 
+    /**
+     * The animator moves the parameter slot every frame but rewrites the row's text only on
+     * pause. Rewriting it per frame would rebuild the whole interned expression tree sixty
+     * times a second — the same trap that made dragging janky before parameters became slots.
+     */
+    options.animator.register(
+      `row:${view.id}`,
+      spec,
+      (next) => {
+        range.value = String(next);
+        readout.textContent = format(next);
+        store.setParameter(name, next);
+      },
+      (next) => {
+        const row = store.rows().find((candidate) => candidate.id === view.id);
+        if (!row) return;
+        const text = `${name} = ${format(next)}`;
+        view.input.value = text;
+        row.source.set(text);
+        options.onEdit(false);
+      },
+    );
+
     replace(view.valueHost, [
       el("div", { class: "slider" }, [
         el("label", { class: "slider__label" }, [
@@ -619,6 +695,7 @@ export function createExprList(options: ExprListOptions): ExprList {
           bound("min"),
           el("span", { text: "…" }),
           bound("max"),
+          transport(`row:${view.id}`),
         ]),
       ]),
     ]);

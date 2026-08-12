@@ -507,3 +507,34 @@ option {
   margin-bottom: 0;
   color: var(--text-dim);
 }
+
+/* ---- slider transport ---- */
+
+.transport {
+  display: flex;
+  gap: 3px;
+  margin-left: auto;
+}
+
+.transport__button {
+  min-width: 26px;
+  padding: 2px 5px;
+  background: #0b1017;
+  color: var(--text-dim);
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+  font-size: 10px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.transport__button:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.transport__button--active {
+  background: var(--accent);
+  color: #06231f;
+  border-color: var(--accent);
+}
