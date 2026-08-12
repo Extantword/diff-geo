@@ -46,6 +46,12 @@ interface Node<T = unknown> {
   isEffect: boolean;
   /** teardown returned by the previous effect run */
   cleanup?: () => void;
+  /**
+   * False until the first successful computation. Until then `value` is a placeholder,
+   * and a custom `eq` must not be shown it — a comparator like `(x, y) => x.id === y.id`
+   * would throw on `undefined`.
+   */
+  initialized: boolean;
   disposed: boolean;
 }
 
@@ -134,9 +140,24 @@ function recompute<T>(node: Node<T>): void {
 
   try {
     const next = node.fn();
-    const changed = !node.eq(node.value, next);
+    // Skip the comparison entirely on the first run: `node.value` is still the
+    // placeholder, and handing that to a caller's `eq` is a trap rather than an
+    // optimization.
+    if (node.initialized && node.eq(node.value, next)) {
+      /**
+       * Equal, so the **previous** value is kept rather than overwritten.
+       *
+       * This is the point of `eq`, and assigning anyway would defeat it. A consumer whose
+       * guard is `if (item === lastItem) return;` — the GPU-upload check — must keep
+       * seeing the same object when nothing meaningful changed. Recomputing produces a
+       * fresh but equal object every time, so storing it would hand every downstream
+       * identity comparison a false positive.
+       */
+      return;
+    }
+    node.initialized = true;
     node.value = next;
-    if (changed) markDownstream(node as Node, DIRTY);
+    markDownstream(node as Node, DIRTY);
   } finally {
     currentObserver = previousObserver;
     tracking = previousTracking;
@@ -208,6 +229,7 @@ export function signal<T>(
     observers: [],
     eq,
     isEffect: false,
+    initialized: true,
     disposed: false,
   };
 
@@ -241,6 +263,7 @@ export function computed<T>(
     observers: [],
     eq,
     isEffect: false,
+    initialized: false,
     disposed: false,
   };
   return () => read(node);
@@ -260,6 +283,7 @@ export function effect(fn: () => void | (() => void)): () => void {
     observers: [],
     eq: Object.is,
     isEffect: true,
+    initialized: false,
     disposed: false,
   };
 

@@ -1,0 +1,263 @@
+import { describe, expect, it } from "vitest";
+import { createDocument, topologicalOrder, type ItemKind } from "../../src/state/graph.ts";
+import { compileScalar } from "../../src/core/expr/eval.ts";
+import { toSource } from "../../src/core/expr/print.ts";
+
+/** Build a document and return its resolution. */
+function documentOf(...sources: string[]) {
+  const document = createDocument(sources);
+  return { document, resolution: document.resolution() };
+}
+
+function codesFor(sources: string[], index: number): string[] {
+  const { document, resolution } = documentOf(...sources);
+  const id = document.rows()[index]!.id;
+  return (resolution.diagnostics.get(id) ?? []).map((d) => d.code);
+}
+
+function kindsOf(...sources: string[]): Array<ItemKind | undefined> {
+  const { document, resolution } = documentOf(...sources);
+  return document.rows().map((row) => resolution.items.get(row.id)?.kind);
+}
+
+describe("classification", () => {
+  it("recognizes the shapes do Carmo actually uses", () => {
+    expect(kindsOf("a = 2")).toEqual(["scalar"]);
+    expect(kindsOf("alpha(t) = (cos t, sin t, t)")).toEqual(["spaceCurve"]);
+    expect(kindsOf("c(t) = (cos t, sin t)")).toEqual(["planeCurve"]);
+    expect(kindsOf("X(u,v) = (u, v, u v)")).toEqual(["parametricSurface"]);
+    expect(kindsOf("z = x^2 - y^2")).toEqual(["graphSurface"]);
+    expect(kindsOf("f(x,y) = x^2 - y^2")).toEqual(["graphSurface"]);
+    expect(kindsOf("x^2 + y^2 + z^2 = 1")).toEqual(["implicitSurface"]);
+    expect(kindsOf("x^2 + y^2 = 1")).toEqual(["implicitPlaneCurve"]);
+    expect(kindsOf("(1, 2, 3)")).toEqual(["point"]);
+    expect(kindsOf("V(x,y,z) = (y, -x, 0)")).toEqual(["vectorField"]);
+  });
+
+  it("treats a bare tuple in t or u,v as a curve or surface", () => {
+    expect(kindsOf("(cos t, sin t, 0)")).toEqual(["spaceCurve"]);
+    expect(kindsOf("(u, v, u^2)")).toEqual(["parametricSurface"]);
+  });
+
+  it("publishes a single-variable function as a definition, not a drawable", () => {
+    // r(u) = 2 + cos u is a building block for a surface of revolution, not a thing to
+    // draw on its own.
+    expect(kindsOf("r(u) = 2 + cos u")).toEqual(["functionDefinition"]);
+  });
+
+  it("reports a shape it cannot classify", () => {
+    // Four parameters and two components parses fine; it just is not any object in the
+    // book, so the failure belongs to classification rather than to the parser.
+    expect(codesFor(["W(u,v,w,q) = (1, 2)"], 0)).toContain("E_CLASSIFY");
+    expect(codesFor(["X(u,v) = (1, 2, 3, 4)"], 0)).toContain("E_CLASSIFY");
+  });
+});
+
+describe("cross-row references", () => {
+  it("inlines a scalar into a later row", () => {
+    const { document, resolution } = documentOf("a = 2", "X(u,v) = (a u, v, 0)");
+    const surface = resolution.items.get(document.rows()[1]!.id)!;
+    expect(surface.kind).toBe("parametricSurface");
+    // `a` is gone: it was substituted, so `diff` never sees an unknown name.
+    expect(surface.params).toEqual([]);
+    expect(toSource(surface.comps[0]!)).toBe("2 * u");
+  });
+
+  it("inlines user functions, which is what makes them differentiable at all", () => {
+    const { document, resolution } = documentOf(
+      "r(u) = 2 + cos u",
+      "h(u) = sin u",
+      "X(u,v) = (r(u) cos v, r(u) sin v, h(u))",
+    );
+    const surface = resolution.items.get(document.rows()[2]!.id)!;
+    expect(surface.kind).toBe("parametricSurface");
+    expect(toSource(surface.comps[0]!)).toBe("(2 + cos(u)) * cos(v)");
+    expect(toSource(surface.comps[2]!)).toBe("sin(u)");
+  });
+
+  it("shares inlined subexpressions through interning", () => {
+    const { document, resolution } = documentOf(
+      "r(u) = 2 + cos u",
+      "X(u,v) = (r(u) cos v, r(u) sin v, 0)",
+    );
+    const surface = resolution.items.get(document.rows()[1]!.id)!;
+    const first = surface.comps[0]!;
+    const second = surface.comps[1]!;
+    // Both components multiply the *same* interned node for r(u), so the compiled program
+    // evaluates 2 + cos u once.
+    if (first.kind !== "mul" || second.kind !== "mul") throw new Error("expected products");
+    expect(first.factors[0]).toBe(second.factors[0]);
+  });
+
+  it("resolves a chain regardless of row order", () => {
+    // c depends on b depends on a, declared backwards.
+    const { document, resolution } = documentOf("c = b + 1", "b = a + 1", "a = 1");
+    const c = resolution.items.get(document.rows()[0]!.id)!;
+    expect(compileScalar(c.comps[0]!, { vars: [] }).call([])).toBe(3);
+  });
+
+  it("evaluates an inlined surface numerically", () => {
+    const { document, resolution } = documentOf(
+      "R = 2",
+      "r = 0.5",
+      "X(u,v) = ((R + r cos u) cos v, (R + r cos u) sin v, r sin u)",
+    );
+    const surface = resolution.items.get(document.rows()[2]!.id)!;
+    const x = compileScalar(surface.comps[0]!, { vars: ["u", "v"] });
+    // At u = v = 0: (R + r) = 2.5.
+    expect(x.call([0, 0])).toBeCloseTo(2.5, 12);
+  });
+});
+
+describe("cycles are data, not control flow", () => {
+  it("diagnoses a two-row cycle without hanging", () => {
+    // The property the single-resolution-computed design exists to guarantee: if rows read
+    // each other's signals directly, this would be an infinite recomputation instead.
+    const { document, resolution } = documentOf("a = b", "b = a");
+    for (const row of document.rows()) {
+      const codes = (resolution.diagnostics.get(row.id) ?? []).map((d) => d.code);
+      expect(codes).toContain("E_CYCLE");
+      expect(resolution.items.has(row.id)).toBe(false);
+    }
+  });
+
+  it("diagnoses a longer cycle", () => {
+    const { resolution } = documentOf("a = c", "b = a", "c = b");
+    expect(resolution.order).toHaveLength(0);
+    for (const diags of resolution.diagnostics.values()) {
+      expect(diags.map((d) => d.code)).toContain("E_CYCLE");
+    }
+  });
+
+  it("keeps unrelated rows working alongside a cycle", () => {
+    const { document, resolution } = documentOf("a = b", "b = a", "X(u,v) = (u, v, 0)");
+    const surface = resolution.items.get(document.rows()[2]!.id);
+    expect(surface?.kind).toBe("parametricSurface");
+  });
+
+  it("rejects self-reference as recursion", () => {
+    expect(codesFor(["f(u) = f(u) + 1"], 0)).toContain("E_RECURSION");
+  });
+});
+
+describe("the symbol table", () => {
+  it("fails closed on a duplicate name", () => {
+    // Resolving to "the first one" would make editing order silently significant.
+    const { document, resolution } = documentOf("a = 1", "a = 2", "b = a");
+    for (const index of [0, 1]) {
+      const id = document.rows()[index]!.id;
+      expect((resolution.diagnostics.get(id) ?? []).map((d) => d.code)).toContain(
+        "E_DUPLICATE",
+      );
+    }
+    // `a` resolves to neither, so it survives as a free parameter rather than picking one.
+    const b = resolution.items.get(document.rows()[2]!.id)!;
+    expect(b.params).toEqual(["a"]);
+  });
+
+  it("refuses to shadow a built-in", () => {
+    expect(codesFor(["sin = 2"], 0)).toContain("E_RESERVED");
+  });
+});
+
+describe("free parameters become slider candidates", () => {
+  it("collects undefined symbols across the document", () => {
+    const { resolution } = documentOf("X(u,v) = (a u, b v, 0)");
+    expect(resolution.freeParameters).toEqual(["a", "b"]);
+  });
+
+  it("does not count bound variables or defined names", () => {
+    const { resolution } = documentOf("a = 2", "X(u,v) = (a u, v, 0)");
+    expect(resolution.freeParameters).toEqual([]);
+  });
+
+  it("offers a hint rather than an error", () => {
+    // An undefined single letter is usually a parameter the user wants a slider for.
+    const codes = codesFor(["X(u,v) = (a u, v, 0)"], 0);
+    expect(codes).toContain("H_ADD_SLIDER");
+    expect(codes).not.toContain("E_UNDEF_SYMBOL");
+  });
+});
+
+describe("reactivity", () => {
+  it("re-resolves when a row's text changes", () => {
+    const document = createDocument(["a = 1", "b = a + 1"]);
+    const bId = document.rows()[1]!.id;
+    const b = document.itemFor(bId);
+
+    expect(compileScalar(b()!.comps[0]!, { vars: [] }).call([])).toBe(2);
+    document.rows()[0]!.source.set("a = 10");
+    expect(compileScalar(b()!.comps[0]!, { vars: [] }).call([])).toBe(11);
+  });
+
+  it("leaves a row's item identical when an unrelated row changes", () => {
+    // The granularity that keeps one edit from invalidating the whole document.
+    const document = createDocument(["X(u,v) = (u, v, 0)", "unrelated = 1"]);
+    const xId = document.rows()[0]!.id;
+    const item = document.itemFor(xId);
+
+    const before = item();
+    document.rows()[1]!.source.set("unrelated = 2");
+    // Same object: `itemsEqual` compared interned components and stopped propagation.
+    expect(item()).toBe(before);
+  });
+
+  it("tracks rows being added and removed", () => {
+    const document = createDocument(["a = 1"]);
+    expect(document.resolution().items.size).toBe(1);
+
+    const added = document.addRow("b = a + 1");
+    expect(document.resolution().items.size).toBe(2);
+
+    document.removeRow(added.id);
+    expect(document.resolution().items.size).toBe(1);
+  });
+
+  it("keeps a dependent row resolvable after its dependency is removed", () => {
+    const document = createDocument(["a = 1", "b = a + 1"]);
+    const aId = document.rows()[0]!.id;
+    document.removeRow(aId);
+    const b = document.resolution().items.get(document.rows()[0]!.id)!;
+    // `a` reverts to a free parameter rather than the row breaking.
+    expect(b.params).toEqual(["a"]);
+  });
+});
+
+describe("topologicalOrder", () => {
+  it("orders dependencies first", () => {
+    const dependencies = new Map([
+      [1, new Set([2])],
+      [2, new Set([3])],
+      [3, new Set<number>()],
+    ]);
+    const { order, cyclic } = topologicalOrder([1, 2, 3], dependencies);
+    expect(order).toEqual([3, 2, 1]);
+    expect(cyclic.size).toBe(0);
+  });
+
+  it("reports every member of a cycle and still orders the rest", () => {
+    const dependencies = new Map([
+      [1, new Set([2])],
+      [2, new Set([1])],
+      [3, new Set<number>()],
+    ]);
+    const { order, cyclic } = topologicalOrder([1, 2, 3], dependencies);
+    expect(order).toEqual([3]);
+    expect([...cyclic].sort()).toEqual([1, 2]);
+  });
+
+  it("respects every edge it emits", () => {
+    const dependencies = new Map([
+      [1, new Set([2, 3])],
+      [2, new Set([4])],
+      [3, new Set([4])],
+      [4, new Set<number>()],
+    ]);
+    const { order } = topologicalOrder([1, 2, 3, 4], dependencies);
+    for (const [id, deps] of dependencies) {
+      for (const dep of deps) {
+        expect(order.indexOf(dep)).toBeLessThan(order.indexOf(id));
+      }
+    }
+  });
+});

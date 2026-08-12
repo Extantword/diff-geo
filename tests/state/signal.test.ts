@@ -55,6 +55,23 @@ describe("signal and computed", () => {
     expect(downstream).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps the previous value when the new one compares equal", () => {
+    // The whole point of `eq`: a consumer guarding with `if (v === last) return;` — the
+    // GPU-upload check — must keep seeing the same object. Storing a fresh-but-equal value
+    // would hand every downstream identity comparison a false positive.
+    const a = signal(1);
+    const derived = computed(
+      () => ({ parity: a() % 2 }),
+      (x, y) => x.parity === y.parity,
+    );
+
+    const first = derived();
+    a.set(3); // same parity, different source value
+    expect(derived()).toBe(first);
+    a.set(4);
+    expect(derived()).not.toBe(first);
+  });
+
   it("honours a custom equality", () => {
     const a = signal({ n: 1 }, (x, y) => x.n === y.n);
     const spy = vi.fn(() => a().n);
