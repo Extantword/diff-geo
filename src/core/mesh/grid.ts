@@ -134,6 +134,28 @@ export function buildSurfaceMesh(src: ParametricSource, opts: GridOpts = {}): Su
   // than sprinkling `!` through the loops below.
   const vertexAt = (k: number): Vec3 => [pos[k * 3]!, pos[k * 3 + 1]!, pos[k * 3 + 2]!];
 
+  /**
+   * Seam welding for periodic charts.
+   *
+   * A periodic chart duplicates its seam: X(0,v) and X(2π,v) are the same point of
+   * the surface, but the two vertices need *distinct* chart coordinates, or the
+   * (u,v) attribute would run backwards across the seam strip and smear both the
+   * chart grid and the pick result over the whole domain.
+   *
+   * So positions stay duplicated while normals must not be — a normal averaged from
+   * only one side of the seam leaves a visibly lit stripe down the torus (the
+   * precedent has exactly this artifact). Face normals therefore accumulate at a
+   * canonical index, and every duplicate reads that same accumulated value.
+   */
+  const canon = new Int32Array(vertexCount);
+  for (let i = 0; i < nU; i++) {
+    for (let j = 0; j < nV; j++) {
+      const ci = src.periodicU && i === resU ? 0 : i;
+      const cj = src.periodicV && j === resV ? 0 : j;
+      canon[i * stride + j] = ci * stride + cj;
+    }
+  }
+
   const indices: number[] = [];
   const nrm = new Float64Array(vertexCount * 3);
   let droppedTriangles = 0;
@@ -162,7 +184,7 @@ export function buildSurfaceMesh(src: ParametricSource, opts: GridOpts = {}): Su
     }
     indices.push(a, b, c);
     for (const k of [a, b, c]) {
-      const base = k * 3;
+      const base = canon[k]! * 3;
       // Written out rather than `+=`: a compound assignment counts as a read, which
       // noUncheckedIndexedAccess types as possibly undefined.
       nrm[base] = nrm[base]! + nx;
@@ -184,9 +206,12 @@ export function buildSurfaceMesh(src: ParametricSource, opts: GridOpts = {}): Su
 
   const normals = new Float32Array(vertexCount * 3);
   for (let k = 0; k < vertexCount; k++) {
-    const x = nrm[k * 3]!;
-    const y = nrm[k * 3 + 1]!;
-    const z = nrm[k * 3 + 2]!;
+    // Reading through `canon` is what welds the seam: a duplicate vertex resolves to
+    // the same accumulated normal as its twin, so shading is continuous across it.
+    const c = canon[k]!;
+    const x = nrm[c * 3]!;
+    const y = nrm[c * 3 + 1]!;
+    const z = nrm[c * 3 + 2]!;
     const len = Math.hypot(x, y, z);
     if (len > 1e-12) {
       normals[k * 3] = x / len;

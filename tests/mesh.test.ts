@@ -59,6 +59,27 @@ describe("buildSurfaceMesh", () => {
     }
   });
 
+  it("welds normals across periodic seams", () => {
+    // X(0,v) and X(2π,v) are the same point, so their normals must agree exactly —
+    // otherwise the seam renders as a lit stripe down the torus.
+    const stride = 33;
+    for (let j = 0; j <= 32; j++) {
+      const first = 0 * stride + j;
+      const last = 24 * stride + j;
+      close(mesh.normals[first * 3]!, mesh.normals[last * 3]!, 1e-12);
+      close(mesh.normals[first * 3 + 1]!, mesh.normals[last * 3 + 1]!, 1e-12);
+      close(mesh.normals[first * 3 + 2]!, mesh.normals[last * 3 + 2]!, 1e-12);
+    }
+  });
+
+  it("keeps chart coordinates distinct across the seam despite welding", () => {
+    // The welding must NOT collapse (u,v): the pick pass and the chart grid both
+    // need u to stay monotonic across the seam strip.
+    const stride = 33;
+    close(mesh.chart[(0 * stride + 5) * 2]!, 0, 1e-12);
+    close(mesh.chart[(24 * stride + 5) * 2]!, 2 * Math.PI, 1e-6);
+  });
+
   it("frames a bounding sphere around the outer radius", () => {
     const { center, radius } = boundingSphere(mesh);
     close(center[0], 0, 1e-6);
