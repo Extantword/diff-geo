@@ -78,6 +78,8 @@ export interface ExprListOptions {
   readonly frames: Map<RowId, FrameRequest>;
   /** Slider bounds for rows that define a plain number, keyed by row. */
   readonly rowSliders: Map<RowId, SliderSpec>;
+  /** Plane-curve rows to read as curves in the chart rather than in the z = 0 plane. */
+  readonly inChart: Set<RowId>;
 }
 
 export interface ExprList {
@@ -116,6 +118,8 @@ interface RowView {
   domainVars: string;
   /** host for the inline slider a numeric row gets */
   readonly valueHost: HTMLElement;
+  /** host for the chart toggle a plane-curve row gets */
+  readonly chartHost: HTMLElement;
   /** the name the inline slider was built for, or "" if there is none */
   valueName: string;
 }
@@ -210,6 +214,7 @@ export function createExprList(options: ExprListOptions): ExprList {
     const domainHost = el("div", { class: "row__domain" });
     const frameHost = el("div", { class: "row__frame" });
     const valueHost = el("div", { class: "row__value" });
+    const chartHost = el("div", { class: "row__chart" });
 
     const remove = el("button", {
       class: "row__remove",
@@ -228,6 +233,7 @@ export function createExprList(options: ExprListOptions): ExprList {
       input,
       echo,
       valueHost,
+      chartHost,
       domainHost,
       frameHost,
       notes,
@@ -243,6 +249,7 @@ export function createExprList(options: ExprListOptions): ExprList {
       domainHost,
       frameHost,
       valueHost,
+      chartHost,
       domainVars: "",
       valueName: "",
     };
@@ -394,6 +401,41 @@ export function createExprList(options: ExprListOptions): ExprList {
    * refresh would fight the user mid-drag. The `t` slider redraws immediately rather than
    * on the debounce, since only the three glyphs move.
    */
+  /**
+   * On a plane-curve row: read its two components as (u, v) instead of as a curve in z = 0.
+   *
+   * `(cos t, sin t)` is a circle in the plane and also a circle in the chart, and those are
+   * completely different objects — the second one wraps around whatever surface the chart
+   * belongs to. Only the user knows which they meant, so this is a choice rather than an
+   * inference.
+   */
+  const syncChartToggle = (view: RowView, item: Item | null) => {
+    const eligible = item?.kind === "planeCurve";
+    if (!eligible) {
+      if (view.chartHost.childElementCount > 0) replace(view.chartHost, []);
+      options.inChart.delete(view.id);
+      return;
+    }
+    if (view.chartHost.childElementCount > 0) return;
+
+    const toggle = el("input", {
+      type: "checkbox",
+      checked: options.inChart.has(view.id),
+      onChange: () => {
+        if (toggle.checked) options.inChart.add(view.id);
+        else options.inChart.delete(view.id);
+        options.onEdit(false);
+      },
+    }) as HTMLInputElement;
+
+    replace(view.chartHost, [
+      el("label", { class: "toggle toggle--tight" }, [
+        toggle,
+        el("span", { text: "read as (u, v) — draw in the chart and on the surface" }),
+      ]),
+    ]);
+  };
+
   const syncFrameControl = (view: RowView, item: Item | null) => {
     const isCurve = item?.kind === "spaceCurve" || item?.kind === "planeCurve";
     if (!isCurve) {
@@ -634,6 +676,7 @@ export function createExprList(options: ExprListOptions): ExprList {
         (label === "" ? " row__badge--empty" : "");
 
       syncValueSlider(view, item);
+      syncChartToggle(view, item);
       syncDomain(view, item);
       syncFrameControl(view, item);
 

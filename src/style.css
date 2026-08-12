@@ -494,3 +494,16 @@ option {
 .row__value .slider {
   margin-bottom: 0;
 }
+
+.row__chart:empty {
+  display: none;
+}
+
+.row__chart {
+  margin-top: 6px;
+}
+
+.row__chart .toggle {
+  margin-bottom: 0;
+  color: var(--text-dim);
+}

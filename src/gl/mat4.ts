@@ -82,3 +82,32 @@ export function lookAt(eye: V3, target: V3, up: V3): Mat4 {
   m[15] = 1;
   return m;
 }
+
+/**
+ * Orthographic projection, for the chart inset.
+ *
+ * The (u, v) domain is a flat rectangle, so a perspective camera would only distort it. An
+ * orthographic map from the domain straight to the viewport is what makes the inset readable
+ * as *coordinates* rather than as a picture of a plane floating in space.
+ */
+export function orthographic(
+  left: number,
+  right: number,
+  bottom: number,
+  top: number,
+  near = -1,
+  far = 1,
+): Mat4 {
+  const m = new Float32Array(16);
+  const width = right - left || 1;
+  const height = top - bottom || 1;
+  const depth = far - near || 1;
+  m[0] = 2 / width;
+  m[5] = 2 / height;
+  m[10] = -2 / depth;
+  m[12] = -(right + left) / width;
+  m[13] = -(top + bottom) / height;
+  m[14] = -(far + near) / depth;
+  m[15] = 1;
+  return m;
+}

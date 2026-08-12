@@ -8,6 +8,7 @@ import { compileScalar } from "../core/expr/eval.ts";
 import { tessellate, type TessellatedSurface } from "../core/mesh/tessellate.ts";
 import type { LineGroup, Polyline } from "../gl/passes/lines.ts";
 import type { Item, RowId } from "./graph.ts";
+import { chartGrid, chartLift, pushForward, type ChartBounds } from "./chart.ts";
 
 /**
  * Turning a resolved document into things on screen.
@@ -57,6 +58,14 @@ export interface SceneRequest {
   readonly resolution: number;
   /** which curve rows should show their Frenet trihedron, and where */
   readonly frames?: ReadonlyMap<RowId, FrameRequest>;
+  /**
+   * Plane-curve rows to read as curves in the chart rather than in the z = 0 plane.
+   *
+   * Their two components become (u, v), and the curve is drawn twice: flat in the chart inset,
+   * and pushed forward onto the surface in the same colour, so the parametrization itself
+   * becomes visible.
+   */
+  readonly inChart?: ReadonlySet<RowId>;
 }
 
 export interface RowReport {
@@ -72,6 +81,10 @@ export interface RowReport {
 export interface Scene {
   readonly mesh: TessellatedSurface | null;
   readonly lines: readonly LineGroup[];
+  /** polylines for the chart inset, in (u, v) */
+  readonly chartLines: readonly LineGroup[];
+  /** the domain the inset shows, or null when there is no surface to chart */
+  readonly chartBounds: ChartBounds | null;
   readonly reports: readonly RowReport[];
   readonly bounds: { center: Vec3; radius: number } | null;
   /** the shared colour scale, for the legend */
@@ -163,6 +176,7 @@ export function buildScene(request: SceneRequest): Scene {
   const { items, parameters, domains, resolution } = request;
   const frameRequests = request.frames ?? new Map<RowId, FrameRequest>();
   const declared = request.declaredParameters ?? new Map<string, number>();
+  const inChart = request.inChart ?? new Set<RowId>();
 
   const reports: RowReport[] = [];
   const meshes: TessellatedSurface[] = [];
@@ -250,6 +264,8 @@ export function buildScene(request: SceneRequest): Scene {
   // Curves.
   for (const item of items) {
     if (item.kind !== "spaceCurve" && item.kind !== "planeCurve") continue;
+    // Chart curves take the push-forward path below instead.
+    if (item.kind === "planeCurve" && inChart.has(item.rowId)) continue;
     try {
       // A plane curve is drawn in the z = 0 plane. Its signed curvature remains a
       // separate quantity computed from the genuine two-component map — see curve.ts on
@@ -331,6 +347,70 @@ export function buildScene(request: SceneRequest): Scene {
     }
   }
 
+  // ---- the chart view ----
+  //
+  // The first surface in the document owns the chart. With several surfaces there is no single
+  // (u, v) plane to show, so picking the first is a stated convention rather than a guess.
+  const primary = compiledSurfaces[0] ?? null;
+  const chartBounds: ChartBounds | null = primary
+    ? {
+        u: [primary.surface.u.min, primary.surface.u.max],
+        v: [primary.surface.v.min, primary.surface.v.max],
+      }
+    : null;
+
+  const chartLines: LineGroup[] = chartBounds ? [...chartGrid(chartBounds)] : [];
+  const chartCurves: Polyline[] = [];
+  let chartColorIndex = 0;
+
+  if (chartBounds && primary) {
+    // The lift needs the scene's size, which is only known once the meshes exist.
+    const provisional = meshes.length > 0 ? extentOfMeshes(meshes) : 1;
+    const lift = chartLift(provisional, resolution, curvatureScale);
+
+    for (const item of items) {
+      if (item.kind !== "planeCurve" || !inChart.has(item.rowId)) continue;
+      try {
+        const range = domains.get(item.rowId)?.[0] ?? {
+          min: DEFAULT_DOMAIN["t"]![0],
+          max: DEFAULT_DOMAIN["t"]![1],
+        };
+        const paramNames = [...item.params];
+        const result = pushForward(
+          {
+            rowId: item.rowId,
+            comps: item.comps,
+            params: paramNames,
+            variable: item.vars[0] ?? "t",
+            range,
+            colorIndex: chartColorIndex++,
+          },
+          primary.surface,
+          packParameters(paramNames, parameters, declared),
+          lift,
+        );
+
+        chartCurves.push(result.chart);
+        if (result.surface) lines.push({ polylines: [result.surface], style: { widthPx: 4 } });
+
+        reports.push({
+          rowId: item.rowId,
+          info: `in the chart of the first surface`,
+          warning:
+            result.outsideFraction > 0.02
+              ? `${Math.round(result.outsideFraction * 100)}% of this curve lies outside the domain`
+              : undefined,
+        });
+      } catch (thrown) {
+        reports.push({ rowId: item.rowId, error: messageOf(thrown) });
+      }
+    }
+  }
+
+  if (chartCurves.length > 0) {
+    chartLines.push({ polylines: chartCurves, style: { widthPx: 2.5 } });
+  }
+
   // Points come free from the lines pass: a zero-length segment with round caps renders
   // as a disc, so no separate billboard pass is needed for them.
   const dots: Polyline[] = [];
@@ -367,10 +447,34 @@ export function buildScene(request: SceneRequest): Scene {
   return {
     mesh,
     lines,
+    chartLines,
+    chartBounds,
     reports,
     bounds,
     curvatureScale,
   };
+}
+
+/** Half the largest span across a set of meshes — a stand-in for scene size. */
+function extentOfMeshes(meshes: readonly TessellatedSurface[]): number {
+  let min = [Infinity, Infinity, Infinity];
+  let max = [-Infinity, -Infinity, -Infinity];
+  for (const mesh of meshes) {
+    for (let i = 0; i < mesh.vertexCount; i++) {
+      for (let c = 0; c < 3; c++) {
+        const value = mesh.positions[i * 3 + c]!;
+        if (!Number.isFinite(value)) continue;
+        if (value < min[c]!) min[c] = value;
+        if (value > max[c]!) max[c] = value;
+      }
+    }
+  }
+  let span = 0;
+  for (let c = 0; c < 3; c++) {
+    const width = max[c]! - min[c]!;
+    if (Number.isFinite(width)) span = Math.max(span, width);
+  }
+  return Math.max(span / 2, 1e-3);
 }
 
 /** Largest span of a sampled curve, used to scale frame glyphs to the object. */

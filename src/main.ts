@@ -74,6 +74,7 @@ function main() {
   const sliders = new Map<string, SliderSpec>();
   const frames = new Map<RowId, FrameRequest>();
   const rowSliders = new Map<RowId, SliderSpec>();
+  const inChart = new Set<RowId>();
 
   const legendLabels = el("div", { class: "legend-labels" });
   const stats = el("div", { class: "readout" });
@@ -82,6 +83,7 @@ function main() {
   let fullTimer = 0;
   let framePending = false;
   let framedOnce = false;
+  let chartVisible = true;
 
   const render = (resolution: number, refit: boolean, fullRefresh: boolean) => {
     const resolved = store.resolution();
@@ -98,10 +100,13 @@ function main() {
       domains,
       resolution,
       frames,
+      inChart,
     });
 
     renderer.setSurfaceMesh(scene.mesh ?? EMPTY_MESH);
     renderer.setLines(scene.lines);
+    renderer.setChartLines(scene.chartLines);
+    renderer.setChartBounds(chartVisible ? scene.chartBounds : null);
 
     if (scene.bounds && (refit || !framedOnce)) {
       renderer.camera.frame(scene.bounds.center, scene.bounds.radius);
@@ -174,6 +179,7 @@ function main() {
     sliders,
     frames,
     rowSliders,
+    inChart,
   });
   const templates = createTemplatePicker({
     document: store,
@@ -181,6 +187,15 @@ function main() {
     domains,
     requestRender: (refit: boolean) => onEdit(refit),
     invalidateSliders: () => list.invalidateSliders(),
+  });
+
+  const chartToggle = el("input", {
+    type: "checkbox",
+    checked: true,
+    onChange: (event: Event) => {
+      chartVisible = (event.target as HTMLInputElement).checked;
+      onParameterChange();
+    },
   });
 
   const curvatureToggle = el("input", {
@@ -204,6 +219,19 @@ function main() {
         el("label", { class: "toggle" }, [curvatureToggle, el("span", { text: "paint K" })]),
         el("div", { class: "legend", style: `background:${legendGradient()}` }),
         legendLabels,
+      ]),
+      el("section", { class: "panel-section" }, [
+        el("h2", { class: "section-title", text: "Chart" }),
+        el("label", { class: "toggle" }, [
+          chartToggle,
+          el("span", { text: "show the (u, v) plane" }),
+        ]),
+        el("p", {
+          class: "blurb",
+          text:
+            "The domain of the first surface, drawn flat. Tick “read as (u, v)” on a " +
+            "two-component curve to draw it here and on the surface at once.",
+        }),
       ]),
       el("section", { class: "panel-section" }, [
         el("h2", { class: "section-title", text: "Scene" }),
