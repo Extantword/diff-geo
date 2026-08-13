@@ -1,0 +1,7 @@
+# Dependencies of the offline CAS oracle only. NEVER shipped to the browser — the whole point of
+# writing the CAS in TypeScript is that sympy stays a development-time cross-check.
+#
+# Pinned so a sympy release cannot turn the oracle red on an unrelated commit. Bump deliberately:
+# a genuine disagreement after an upgrade is worth reading, not worth silently floating past.
+sympy==1.14.0
+mpmath==1.3.0
