@@ -605,3 +605,85 @@ describe("one colour scale for the whole scene", () => {
     }
   });
 });
+
+describe("geodesics across a chart seam", () => {
+  /**
+   * The bug this pins: a sphere's v runs 0 → 2π and closes up, so a geodesic crossing that seam
+   * has gone around rather than left the surface. The integrator always knew how to wrap — it
+   * checks `surface.periodicV` — but nothing set the flag for a compiled row, so every great
+   * circle stopped dead at the seam. Loading the sphere TEMPLATE did not help: a template is
+   * inserted as source text, so its declared periodicity never reached the surface.
+   */
+  function sphereSpray(start: readonly [number, number]) {
+    const document = createDocument([
+      "X(u,v) = (sin u cos v, sin u sin v, cos u)",
+    ]);
+    const rowId = document.rows()[0]!.id;
+    const scene = buildScene({
+      items: [...document.resolution().items.values()],
+      parameters: new Map(),
+      domains: new Map([
+        [rowId, [{ min: 0.01, max: Math.PI - 0.01 }, { min: 0, max: 2 * Math.PI }]],
+      ]),
+      resolution: 32,
+      overlays: new Map([
+        [rowId, { geodesics: 6, geodesicLength: 1.5, curvatureLines: false, start }],
+      ]),
+    });
+    const lengths = (scene.lines[0]?.polylines ?? []).map((p) => {
+      let total = 0;
+      for (let k = 1; k < p.count; k++) {
+        total += Math.hypot(
+          p.points[k * 3]! - p.points[(k - 1) * 3]!,
+          p.points[k * 3 + 1]! - p.points[(k - 1) * 3 + 1]!,
+          p.points[k * 3 + 2]! - p.points[(k - 1) * 3 + 2]!,
+        );
+      }
+      return total;
+    });
+    return { scene, lengths };
+  }
+
+  it("runs every ray to full length from a point on the seam", () => {
+    // v = 0 IS the seam. Before periodicity was detected, the two rays heading across it were
+    // dropped entirely and the spray came back with four arms instead of six.
+    const { lengths } = sphereSpray([Math.PI / 2, 0]);
+    expect(lengths).toHaveLength(6);
+    for (const length of lengths) expect(length).toBeGreaterThan(1.4);
+  });
+
+  it("gives the same spray on either side of the seam", () => {
+    // The seam is not a place on the surface, so shooting from v = 0 and from v = 2π must be
+    // indistinguishable. This is the invariant the flag exists to preserve.
+    const near = sphereSpray([Math.PI / 2, 0.0]).lengths.slice().sort();
+    const far = sphereSpray([Math.PI / 2, 2 * Math.PI]).lengths.slice().sort();
+    expect(near).toHaveLength(far.length);
+    for (const [i, value] of near.entries()) expect(value).toBeCloseTo(far[i]!, 6);
+  });
+
+  it("still stops at a pole, where the chart genuinely ends", () => {
+    // u is NOT periodic — the sphere's two u boundaries are different points. A ray reaching a
+    // pole must stop and say so rather than wrapping to nonsense, so the fix must not be a
+    // blanket "never leave the domain".
+    const { scene } = sphereSpray([0.02, Math.PI]);
+    const info = scene.reports.flatMap((r) => r.info).join(" ");
+    expect(info).toContain("outOfDomain");
+  });
+
+  it("keeps every point of a wrapped geodesic on the sphere", () => {
+    // Wrapping must continue the curve, not teleport it. Every point still at radius 1 is the
+    // check that a ray crossing the seam stayed on the surface the whole way.
+    const { scene } = sphereSpray([Math.PI / 2, 0]);
+    for (const polyline of scene.lines[0]!.polylines) {
+      for (let k = 0; k < polyline.count; k++) {
+        const r = Math.hypot(
+          polyline.points[k * 3]!,
+          polyline.points[k * 3 + 1]!,
+          polyline.points[k * 3 + 2]!,
+        );
+        // The overlay lift holds the curve just off the surface, hence the loose tolerance.
+        expect(Math.abs(r - 1)).toBeLessThan(0.02);
+      }
+    }
+  });
+});

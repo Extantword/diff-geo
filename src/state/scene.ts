@@ -2,6 +2,7 @@ import { ctx, type Expr } from "../core/expr/ast.ts";
 import { buildDiffMap, type DiffMap } from "../core/jets/compile.ts";
 import { bishopFrames, createSpaceCurve, makeFrenetFrame } from "../core/geom/curve.ts";
 import { createParametricSurface } from "../core/geom/parametric.ts";
+import { detectPeriodicity } from "../core/geom/periodic.ts";
 import {
   integrateCurvatureLine,
   integrateGeodesic,
@@ -266,13 +267,36 @@ export function buildScene(request: SceneRequest): Scene {
         order: 2,
       });
       const [uRange, vRange] = surfaceRanges(item, domains);
-      const surface = createParametricSurface({
+      const params = packParameters(paramNames, parameters, declared);
+
+      /**
+       * Built twice, because periodicity can only be measured and only matters once measured.
+       *
+       * Whether a chart boundary is a wall or a seam decides where geodesics stop, whether the
+       * mesh welds its normals across it, and whether curves in the chart wrap — but the test
+       * needs to evaluate X, which needs the parameters, which are not available when a surface
+       * is compiled. So a provisional surface answers the question and a second one carries the
+       * answer. Both share the cached DiffMap, so the only repeated cost is a few field copies.
+       *
+       * The alternative — declaring periodicity per template — does not survive loading one,
+       * since a template is inserted as source text and a hand-typed sphere has no declaration
+       * at all. Measuring it treats both the same.
+       */
+      const provisional = createParametricSurface({
         id: `row-${item.rowId}`,
         map,
         u: uRange,
         v: vRange,
       });
-      const params = packParameters(paramNames, parameters, declared);
+      const periodic = detectPeriodicity(provisional, params);
+      const surface = createParametricSurface({
+        id: `row-${item.rowId}`,
+        map,
+        u: uRange,
+        v: vRange,
+        periodicU: periodic.u,
+        periodicV: periodic.v,
+      });
       compiledSurfaces.push({ item, surface, params });
 
       const range = sampleCurvatureRange(surface, params, 24);

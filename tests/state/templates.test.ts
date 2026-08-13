@@ -9,7 +9,7 @@ import { buildScene, type DomainRange } from "../../src/state/scene.ts";
  * Every template must survive the whole document → scene path.
  *
  * The catalog stores these as source text, so this exercises parse → inline → differentiate →
- * jets → fundamental forms → tessellate for all fifteen, exactly as the UI does. Loading a
+ * jets → fundamental forms → tessellate for every entry, exactly as the UI does. Loading a
  * template is not a special path, and this asserts that.
  */
 

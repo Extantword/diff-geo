@@ -40,6 +40,15 @@ touching non-finite vertices; readouts show "—"; integrators bail out. A singl
 buffer becomes a triangle smeared across the whole scene, so culling at the mesh boundary is
 load-bearing. See `src/core/geom/types.ts`.
 
+**A chart boundary is a wall or a seam, and the difference is measured, not declared.** A sphere's
+v closes up at 2π, so a geodesic crossing there has gone *around*, not left the surface. The same
+flag decides three things: where geodesics stop, whether the mesh welds normals across the seam,
+and whether chart curves wrap. The catalog declares it per template — and that declaration is
+**useless**, because loading a template inserts its *source text* into a row, so the flag never
+reaches the compiled surface, and a hand-typed sphere never had one. `geom/periodic.ts` measures it
+by comparing `X(u₀,v)` against `X(u₁,v)`, relative to the surface's own extent. Symptom when it is
+wrong: a great-circle spray comes back with four arms instead of six, at uneven lengths.
+
 **Domain insets are the default, not a special case.** Chart quantities routinely blow up exactly
 at the coordinate boundary. `Interval.inset` pulls sampling in from both ends. ManifoldSandbox
 shipped the sphere as `uRange: [0.001, 3.1405926535897932]` for exactly this reason — its
