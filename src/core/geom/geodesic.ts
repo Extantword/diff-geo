@@ -110,11 +110,39 @@ export interface GeodesicOptions {
    * accuracy is unaffected.
    */
   readonly minSamples?: number;
+  /**
+   * Longest step allowed, in arc length — the *geometric* density control.
+   *
+   * `minSamples` divides the requested length, so it fixes a sample COUNT and therefore lets the
+   * spacing grow without limit as the curve gets longer: a geodesic wrapping a sphere nine times
+   * came back with the same 242 points as one crossing it once, drawn as a visible polygon. This
+   * bounds the spacing instead, so density is a property of the surface rather than of how far the
+   * user happened to drag a slider. Whichever of the two is smaller wins.
+   */
+  readonly maxStepArc?: number;
+  /**
+   * Where to stop integrating, overriding the surface's own sampling bounds.
+   *
+   * Exists so a caller can integrate ACROSS a coordinate pole. The sphere's u = 0 is not an edge
+   * of the surface — the whole line collapses to a point and the parametrization continues
+   * straight through it, X(-u, v) landing on the same sphere — so a great circle reaching it has
+   * not left anything. Stopping there is an artifact of the chart, and only the caller knows
+   * which boundaries are poles.
+   */
+  readonly bounds?: {
+    readonly u: readonly [number, number];
+    readonly v: readonly [number, number];
+  };
 }
 
-function inDomain(surface: ParametricSurface, u: number, v: number): boolean {
-  const [u0, u1] = sampleBounds(surface.u);
-  const [v0, v1] = sampleBounds(surface.v);
+function inDomain(
+  surface: ParametricSurface,
+  u: number,
+  v: number,
+  bounds?: GeodesicOptions["bounds"],
+): boolean {
+  const [u0, u1] = bounds ? bounds.u : sampleBounds(surface.u);
+  const [v0, v1] = bounds ? bounds.v : sampleBounds(surface.v);
   const okU = surface.periodicU || (u >= u0 && u <= u1);
   const okV = surface.periodicV || (v >= v0 && v <= v1);
   return okU && okV;
@@ -135,7 +163,20 @@ export function integrateGeodesic(
   length: number,
   options: GeodesicOptions = {},
 ): GeodesicResult {
-  const maxSteps = options.maxSteps ?? Math.max(4000, (options.minSamples ?? 240) * 4);
+  /**
+   * Enough steps to reach the requested length at the allowed spacing, with headroom.
+   *
+   * Tied to the step cap rather than to a fixed number, because bounding the SPACING means a long
+   * geodesic legitimately needs proportionally more steps; a constant budget would silently
+   * truncate it and report `maxSteps` as though the curve had run into something.
+   */
+  const stepCap = Math.min(
+    length / (options.minSamples ?? 240),
+    options.maxStepArc ?? Infinity,
+  );
+  const maxSteps =
+    options.maxSteps ??
+    Math.max(4000, Math.ceil(Math.abs(length) / Math.max(stepCap, 1e-12)) * 4);
   const point = makeSurfacePoint();
   const chartData = makeChartData();
 
@@ -174,10 +215,11 @@ export function integrateGeodesic(
   };
 
   const minSamples = options.minSamples ?? 240;
+  const maxStep = Math.min(length / minSamples, options.maxStepArc ?? Infinity);
   const stepper = createStepper(derivative, [start[0], start[1], du0, dv0], 0, {
     tolerance: options.tolerance ?? 1e-9,
-    initialStep: Math.max(length / 400, 1e-4),
-    maxStep: length / minSamples,
+    initialStep: Math.max(Math.min(length / 400, maxStep), 1e-6),
+    maxStep,
   });
 
   const chart: Vec2[] = [[start[0], start[1]]];
@@ -205,7 +247,7 @@ export function integrateGeodesic(
       stop = "nonFinite";
       break;
     }
-    if (!inDomain(surface, u, v)) {
+    if (!inDomain(surface, u, v, options.bounds)) {
       stop = "outOfDomain";
       break;
     }
@@ -281,7 +323,7 @@ export function integrateCurvatureLine(
   start: Vec2,
   which: 1 | 2,
   length: number,
-  options: { steps?: number } = {},
+  options: { steps?: number; bounds?: GeodesicOptions["bounds"] } = {},
 ): { chart: Vec2[]; stop: StopReason | "umbilic" } {
   const steps = options.steps ?? 900;
   const step = length / steps;
@@ -322,7 +364,9 @@ export function integrateCurvatureLine(
     // direction field does not warrant an adaptive integrator.
     const midU = u + 0.5 * step * direction[0];
     const midV = v + 0.5 * step * direction[1];
-    if (!inDomain(surface, midU, midV)) return { chart, stop: "outOfDomain" };
+    if (!inDomain(surface, midU, midV, options.bounds)) {
+      return { chart, stop: "outOfDomain" };
+    }
 
     surface.at(midU, midV, params, point, chartData);
     if (point.degenerate) return { chart, stop: "singular" };
@@ -346,7 +390,7 @@ export function integrateCurvatureLine(
     }
 
     if (!Number.isFinite(u) || !Number.isFinite(v)) return { chart, stop: "nonFinite" };
-    if (!inDomain(surface, u, v)) {
+    if (!inDomain(surface, u, v, options.bounds)) {
       chart.push([u, v]);
       return { chart, stop: "outOfDomain" };
     }

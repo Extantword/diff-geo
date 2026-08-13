@@ -49,6 +49,24 @@ reaches the compiled surface, and a hand-typed sphere never had one. `geom/perio
 by comparing `X(u₀,v)` against `X(u₁,v)`, relative to the surface's own extent. Symptom when it is
 wrong: a great-circle spray comes back with four arms instead of six, at uneven lengths.
 
+**A pole is not an edge, and it is found by collapse rather than by degeneracy.** `detectPoles`
+asks whether a boundary's *image* shrinks to nothing next to the surface's extent — not whether
+X_u × X_v vanishes on it. The degeneracy test fails in practice because insets are usually already
+folded into the bounds by the time geometry sees them (the sphere arrives as u ∈ [0.0063, 3.1353],
+where it is perfectly regular), and probing outward cannot help: the degeneracy sits at exactly one
+value of u and discrete samples step over it. Collapse survives the inset and is scale-free.
+Geodesics may integrate one interval-width *past* a pole, because the parametrization continues
+through it; a **regular** boundary is left alone, since a cylinder's rim really is where the surface
+stops. Note the lift flips sign past a pole — chart orientation reverses — a 0.2% visual artifact.
+
+**Overlay curve density is geometric, never a sample count.** `minSamples` divides the requested
+arc length, so it pins a count and lets spacing grow without limit: a geodesic wrapping a sphere
+nine times came back with the same 242 points as one crossing it once, drawn as a visible polygon.
+`maxStepArc` bounds the spacing instead. Density is capped twice — `SEGMENTS_PER_EXTENT` for
+smoothness, `MAX_SPRAY_SEGMENTS` so turning up both length and ray count cannot freeze the UI (12
+rays × 40 units costs 89k points and 0.9 s uncapped). The numeric symptom of faceting is that the
+summed chords fall short of the arc length; that is what the test asserts.
+
 **Domain insets are the default, not a special case.** Chart quantities routinely blow up exactly
 at the coordinate boundary. `Interval.inset` pulls sampling in from both ends. ManifoldSandbox
 shipped the sphere as `uRange: [0.001, 3.1405926535897932]` for exactly this reason — its

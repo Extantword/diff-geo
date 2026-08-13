@@ -54,6 +54,37 @@ export interface Periodicity {
 }
 
 /**
+ * Which of the four chart boundaries are coordinate poles rather than edges of the surface.
+ *
+ * The distinction decides whether a geodesic reaching a boundary has *left the surface* or merely
+ * run out of chart. At the sphere's u = 0 the whole boundary line collapses to a single point and
+ * X_u × X_v vanishes: the surface continues perfectly well through there, and it is the
+ * coordinates that fail. At a cylinder's u = 0 the surface genuinely stops, and a geodesic should
+ * stop with it.
+ *
+ * ## Measured by collapse, not by degeneracy
+ *
+ * The obvious test — is X_u × X_v zero along the boundary — fails in practice, because the pole is
+ * usually just *outside* the interval being examined. Domain insets exist to keep sampling off a
+ * pole, and by the time a domain arrives here the inset has often been folded into the bounds: the
+ * sphere comes as u ∈ [0.0063, 3.1353] rather than [0, π] with an inset. At 0.0063 the surface is
+ * perfectly regular, so the pole goes unnoticed and every meridian keeps stopping at an invisible
+ * wall. Probing outward does not rescue it either — the degeneracy sits at exactly one value of u
+ * and discrete samples step straight over it.
+ *
+ * What survives the inset is that the boundary's **image collapses**: X(0.0063, ·) traces a circle
+ * of radius 0.0063, which is a point next to a surface of size 2. So the test is whether the whole
+ * boundary line maps into a region negligible against the surface's own extent. That is what a
+ * coordinate pole *is*, it needs no probing, and it is scale-free.
+ */
+export interface ChartPoles {
+  readonly uMin: boolean;
+  readonly uMax: boolean;
+  readonly vMin: boolean;
+  readonly vMax: boolean;
+}
+
+/**
  * Measure whether either chart coordinate closes up, by comparing the two opposite boundaries.
  *
  * Returns `false` for a coordinate whose boundary evaluation is non-finite, since nothing can be
@@ -66,48 +97,83 @@ export function detectPeriodicity(
   const [u0, u1] = sampleBounds(surface.u);
   const [v0, v1] = sampleBounds(surface.v);
 
-  /**
-   * A length scale for the surface, from the diagonal of a coarse sample of its own points.
-   *
-   * Needed because the comparison is relative: without it, a sphere of radius 10⁻³ would have
-   * every boundary pair look identical and a sphere of radius 10⁶ would have none.
-   */
-  let minX = Infinity;
-  let minY = Infinity;
-  let minZ = Infinity;
-  let maxX = -Infinity;
-  let maxY = -Infinity;
-  let maxZ = -Infinity;
-  let sampled = 0;
-  const probe: [number, number, number] = [0, 0, 0];
-
-  for (let i = 0; i < 4; i++) {
-    for (let j = 0; j < 4; j++) {
-      const u = u0 + ((u1 - u0) * i) / 3;
-      const v = v0 + ((v1 - v0) * j) / 3;
-      if (!position(surface, u, v, params, probe)) continue;
-      sampled++;
-      if (probe[0] < minX) minX = probe[0];
-      if (probe[1] < minY) minY = probe[1];
-      if (probe[2] < minZ) minZ = probe[2];
-      if (probe[0] > maxX) maxX = probe[0];
-      if (probe[1] > maxY) maxY = probe[1];
-      if (probe[2] > maxZ) maxZ = probe[2];
-    }
-  }
-  if (sampled === 0) return { u: false, v: false };
-
-  const scale = Math.max(
-    Math.hypot(maxX - minX, maxY - minY, maxZ - minZ),
-    // A surface that is a single point has no scale of its own; fall back to absolute.
-    1e-12,
-  );
+  const scale = extentOf(surface, params);
+  if (!(scale > 0)) return { u: false, v: false };
   const tolerance = scale * RELATIVE_TOLERANCE;
 
   return {
     u: boundariesAgree(surface, params, tolerance, u0, u1, v0, v1, true),
     v: boundariesAgree(surface, params, tolerance, v0, v1, u0, u1, false),
   };
+}
+
+/**
+ * Find which chart boundaries are coordinate poles.
+ *
+ * A boundary counts as a pole only if it is degenerate **along its whole length** — one degenerate
+ * sample is a cone point or a pinch, not a collapsed edge, and continuing a geodesic through it
+ * would not be justified.
+ */
+export function detectPoles(
+  surface: ParametricSurface,
+  params: ArrayLike<number>,
+): ChartPoles {
+  const [uLo, uHi] = sampleBounds(surface.u);
+  const [vLo, vHi] = sampleBounds(surface.v);
+  const scale = extentOf(surface, params);
+  if (!(scale > 0)) return { uMin: false, uMax: false, vMin: false, vMax: false };
+  const limit = scale * COLLAPSE_FRACTION;
+
+  return {
+    uMin: boundaryCollapses(surface, params, uLo, vLo, vHi, true, limit),
+    uMax: boundaryCollapses(surface, params, uHi, vLo, vHi, true, limit),
+    vMin: boundaryCollapses(surface, params, vLo, uLo, uHi, false, limit),
+    vMax: boundaryCollapses(surface, params, vHi, uLo, uHi, false, limit),
+  };
+}
+
+/**
+ * How small a boundary's image may be, relative to the surface, and still count as collapsed.
+ *
+ * Has to exceed the inset — a sphere inset by 0.0063 leaves a circle of that radius, about 0.6% of
+ * the surface's size — while staying far below any boundary that is a genuine curve. A cylinder's
+ * rim measures 100% by this yardstick, so there is a wide margin between the two cases.
+ */
+const COLLAPSE_FRACTION = 0.05;
+
+/** Does the whole boundary line map into a region negligible against the surface? */
+function boundaryCollapses(
+  surface: ParametricSurface,
+  params: ArrayLike<number>,
+  fixed: number,
+  otherLo: number,
+  otherHi: number,
+  fixedIsU: boolean,
+  limit: number,
+): boolean {
+  const probe: [number, number, number] = [0, 0, 0];
+  let minX = Infinity;
+  let minY = Infinity;
+  let minZ = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  let maxZ = -Infinity;
+
+  for (let k = 0; k < SAMPLES; k++) {
+    const t = otherLo + ((otherHi - otherLo) * k) / (SAMPLES - 1);
+    const ok = fixedIsU
+      ? position(surface, fixed, t, params, probe)
+      : position(surface, t, fixed, params, probe);
+    // A boundary that cannot be evaluated is not a pole; an edge is the conservative reading.
+    if (!ok) return false;
+    if (probe[0] < minX) minX = probe[0];
+    if (probe[1] < minY) minY = probe[1];
+    if (probe[2] < minZ) minZ = probe[2];
+    if (probe[0] > maxX) maxX = probe[0];
+    if (probe[1] > maxY) maxY = probe[1];
+    if (probe[2] > maxZ) maxZ = probe[2];
+  }
+  return Math.hypot(maxX - minX, maxY - minY, maxZ - minZ) <= limit;
 }
 
 /**
@@ -146,6 +212,43 @@ function boundariesAgree(
     if (distance > tolerance) return false;
   }
   return true;
+}
+
+/**
+ * A length scale for the surface, from the diagonal of a coarse sample of its own points.
+ *
+ * Both tests here are relative to it, and they have to be: without it a sphere of radius 10⁻³
+ * would have every boundary pair look identical and one of radius 10⁶ would have none.
+ */
+function extentOf(surface: ParametricSurface, params: ArrayLike<number>): number {
+  const [u0, u1] = sampleBounds(surface.u);
+  const [v0, v1] = sampleBounds(surface.v);
+  const probe: [number, number, number] = [0, 0, 0];
+  let minX = Infinity;
+  let minY = Infinity;
+  let minZ = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  let maxZ = -Infinity;
+  let sampled = 0;
+
+  for (let i = 0; i < 4; i++) {
+    for (let j = 0; j < 4; j++) {
+      const u = u0 + ((u1 - u0) * i) / 3;
+      const v = v0 + ((v1 - v0) * j) / 3;
+      if (!position(surface, u, v, params, probe)) continue;
+      sampled++;
+      if (probe[0] < minX) minX = probe[0];
+      if (probe[1] < minY) minY = probe[1];
+      if (probe[2] < minZ) minZ = probe[2];
+      if (probe[0] > maxX) maxX = probe[0];
+      if (probe[1] > maxY) maxY = probe[1];
+      if (probe[2] > maxZ) maxZ = probe[2];
+    }
+  }
+  if (sampled === 0) return 0;
+  // A surface that is a single point has no scale of its own; fall back to absolute.
+  return Math.max(Math.hypot(maxX - minX, maxY - minY, maxZ - minZ), 1e-12);
 }
 
 /** Evaluate the position only, reporting whether it came back finite. */

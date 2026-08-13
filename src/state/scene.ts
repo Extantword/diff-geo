@@ -2,14 +2,20 @@ import { ctx, type Expr } from "../core/expr/ast.ts";
 import { buildDiffMap, type DiffMap } from "../core/jets/compile.ts";
 import { bishopFrames, createSpaceCurve, makeFrenetFrame } from "../core/geom/curve.ts";
 import { createParametricSurface } from "../core/geom/parametric.ts";
-import { detectPeriodicity } from "../core/geom/periodic.ts";
+import { detectPeriodicity, detectPoles, type ChartPoles } from "../core/geom/periodic.ts";
 import {
   integrateCurvatureLine,
   integrateGeodesic,
   sprayDirections,
 } from "../core/geom/geodesic.ts";
 import { robustScale, sampleCurvatureRange } from "../core/geom/curvatureColor.ts";
-import { interval, makeChartData, makeSurfacePoint, type Vec3 } from "../core/geom/types.ts";
+import {
+  interval,
+  makeChartData,
+  makeSurfacePoint,
+  sampleBounds,
+  type Vec3,
+} from "../core/geom/types.ts";
 import { compileScalar } from "../core/expr/eval.ts";
 import { tessellate, type TessellatedSurface } from "../core/mesh/tessellate.ts";
 import type { LineGroup, Polyline } from "../gl/passes/lines.ts";
@@ -106,6 +112,27 @@ export interface SurfaceOverlay {
    */
   readonly start?: readonly [number, number];
 }
+
+/**
+ * Polyline segments per unit of the scene's extent, for overlay curves.
+ *
+ * Sets how finely a geodesic is sampled: a segment spans extent/this, so the drawn curve stays
+ * smooth no matter how long it is. High enough that a great circle reads as round rather than
+ * faceted, low enough that a long spray stays a few tens of thousands of segments.
+ */
+const SEGMENTS_PER_EXTENT = 220;
+
+/**
+ * Ceiling on the segments one surface's whole geodesic spray may spend.
+ *
+ * Density has to be bounded twice, because the two limits guard different things.
+ * `SEGMENTS_PER_EXTENT` sets the spacing needed for a curve to look round; this stops the *total*
+ * from growing without limit as the length and ray count are both turned up. Twelve rays of forty
+ * units cost 89k points and 0.9s of integration without it, which is well past interactive — so
+ * past this point the spray trades smoothness for staying responsive, which is the right way round
+ * when the alternative is a frozen UI.
+ */
+const MAX_SPRAY_SEGMENTS = 26000;
 
 /** One note about a row, before notes are merged per row. */
 interface RawReport {
@@ -253,6 +280,7 @@ export function buildScene(request: SceneRequest): Scene {
     item: Item;
     surface: ReturnType<typeof createParametricSurface>;
     params: Float64Array;
+    poles: ChartPoles;
   }> = [];
 
   for (const item of surfaceItems) {
@@ -289,6 +317,7 @@ export function buildScene(request: SceneRequest): Scene {
         v: vRange,
       });
       const periodic = detectPeriodicity(provisional, params);
+      const poles = detectPoles(provisional, params);
       const surface = createParametricSurface({
         id: `row-${item.rowId}`,
         map,
@@ -297,7 +326,7 @@ export function buildScene(request: SceneRequest): Scene {
         periodicU: periodic.u,
         periodicV: periodic.v,
       });
-      compiledSurfaces.push({ item, surface, params });
+      compiledSurfaces.push({ item, surface, params, poles });
 
       const range = sampleCurvatureRange(surface, params, 24);
       if (Number.isFinite(range.minK)) curvatureSamples.push(range.minK, range.maxK);
@@ -350,9 +379,49 @@ export function buildScene(request: SceneRequest): Scene {
   const sceneExtent = meshes.length > 0 ? extentOfMeshes(meshes) : 1;
   const overlayLift = chartLift(sceneExtent, resolution, curvatureScale);
 
-  for (const { item, surface, params } of compiledSurfaces) {
+  for (const { item, surface, params, poles } of compiledSurfaces) {
     const overlay = overlays.get(item.rowId);
     if (!overlay) continue;
+
+    /**
+     * The domain the overlay curves may integrate through, widened across coordinate poles.
+     *
+     * A pole is not an edge of the surface: the sphere's u = 0 collapses to a single point and the
+     * parametrization runs straight through it, so a great circle reaching it has left nothing and
+     * stopping there is an artifact of the chart. Extending by the interval's own width is exactly
+     * enough for one crossing on each side — for the sphere that turns u ∈ [0, π] into [-π, 2π],
+     * and since X(u + 2π, v) = X(u, v) a meridian traverses a whole great circle within it.
+     *
+     * A REGULAR boundary is left alone: a cylinder's rim really is where the surface ends, and a
+     * geodesic must stop with it rather than run off into the analytic continuation.
+     */
+    const uWidth = surface.u.max - surface.u.min;
+    const vWidth = surface.v.max - surface.v.min;
+    const [uLo, uHi] = sampleBounds(surface.u);
+    const [vLo, vHi] = sampleBounds(surface.v);
+    const bounds = {
+      u: [
+        poles.uMin ? surface.u.min - uWidth : uLo,
+        poles.uMax ? surface.u.max + uWidth : uHi,
+      ] as const,
+      v: [
+        poles.vMin ? surface.v.min - vWidth : vLo,
+        poles.vMax ? surface.v.max + vWidth : vHi,
+      ] as const,
+    };
+
+    /**
+     * Cap the step so density is geometric, not a fixed sample count.
+     *
+     * `minSamples` alone divides the requested arc length, so a geodesic wrapping a sphere nine
+     * times got the same 242 points as one crossing it once and was drawn as a visible polygon.
+     * Tying the spacing to the surface's own extent keeps the curve smooth however far it runs.
+     */
+    const sprayArc = Math.max(sceneExtent * overlay.geodesicLength * overlay.geodesics, 1e-9);
+    const maxStepArc = Math.max(
+      sceneExtent / SEGMENTS_PER_EXTENT,
+      sprayArc / MAX_SPRAY_SEGMENTS,
+    );
     const clamp = (value: number, min: number, max: number) =>
       Math.min(max, Math.max(min, value));
     const uMid = overlay.start
@@ -379,7 +448,10 @@ export function buildScene(request: SceneRequest): Scene {
           const stops = new Map<string, number>();
 
           for (const direction of sprayDirections(chart.I, overlay.geodesics)) {
-            const geodesic = integrateGeodesic(surface, params, [uMid, vMid], direction, length);
+            const geodesic = integrateGeodesic(surface, params, [uMid, vMid], direction, length, {
+              bounds,
+              maxStepArc,
+            });
             stops.set(geodesic.stop, (stops.get(geodesic.stop) ?? 0) + 1);
             if (geodesic.chart.length < 2) continue;
             polylines.push(
@@ -429,6 +501,7 @@ export function buildScene(request: SceneRequest): Scene {
                 [uMid, vMid],
                 which,
                 sign * sceneExtent * 1.2,
+                { bounds },
               );
               if (run.chart.length < 2) continue;
               polylines.push(

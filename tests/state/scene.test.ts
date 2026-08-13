@@ -661,13 +661,17 @@ describe("geodesics across a chart seam", () => {
     for (const [i, value] of near.entries()) expect(value).toBeCloseTo(far[i]!, 6);
   });
 
-  it("still stops at a pole, where the chart genuinely ends", () => {
-    // u is NOT periodic — the sphere's two u boundaries are different points. A ray reaching a
-    // pole must stop and say so rather than wrapping to nonsense, so the fix must not be a
-    // blanket "never leave the domain".
-    const { scene } = sphereSpray([0.02, Math.PI]);
-    const info = scene.reports.flatMap((r) => r.info).join(" ");
-    expect(info).toContain("outOfDomain");
+  it("completes every ray of a spray shot from right beside a pole", () => {
+    /**
+     * u = 0.02 is a hair from the north pole, so before poles were recognised the ray heading
+     * that way was cut off within 0.02 of arc and the spray came back visibly lopsided. A pole is
+     * not an edge of the surface — the boundary collapses to a point and the parametrization runs
+     * through it — so every ray should now reach its requested length.
+     */
+    const { scene, lengths } = sphereSpray([0.02, Math.PI]);
+    expect(lengths).toHaveLength(6);
+    for (const length of lengths) expect(length).toBeGreaterThan(1.4);
+    expect(scene.reports.flatMap((r) => r.info).join(" ")).toContain("6 length");
   });
 
   it("keeps every point of a wrapped geodesic on the sphere", () => {
@@ -685,5 +689,176 @@ describe("geodesics across a chart seam", () => {
         expect(Math.abs(r - 1)).toBeLessThan(0.02);
       }
     }
+  });
+});
+
+describe("extending geodesics over the whole surface", () => {
+  function sprayScene(
+    source: string,
+    u: DomainRange,
+    v: DomainRange,
+    start: readonly [number, number],
+    direction: { geodesics: number; geodesicLength: number },
+  ) {
+    const document = createDocument([source]);
+    const rowId = document.rows()[0]!.id;
+    const scene = buildScene({
+      items: [...document.resolution().items.values()],
+      parameters: new Map(),
+      domains: new Map([[rowId, [u, v]]]),
+      resolution: 32,
+      overlays: new Map([[rowId, { ...direction, curvatureLines: false, start }]]),
+    });
+    const polylines = scene.lines[0]?.polylines ?? [];
+    return {
+      scene,
+      polylines,
+      points: polylines.reduce((n, p) => n + p.count, 0),
+      info: scene.reports.flatMap((r) => r.info).join(" "),
+    };
+  }
+
+  const SPHERE = "X(u,v) = (sin u cos v, sin u sin v, cos u)";
+  const sphereU: DomainRange = { min: 0.002, max: Math.PI - 0.002 };
+  const sphereV: DomainRange = { min: 0, max: 2 * Math.PI };
+
+  it("carries a meridian past the pole instead of stopping short of it", () => {
+    /**
+     * The sphere's u = 0 is not an edge: the whole boundary collapses to one point and the
+     * parametrization runs straight through, X(-u, v) landing back on the same sphere. A meridian
+     * reaching it has left nothing, so stopping there shows the user an invisible wall.
+     *
+     * Evidence of the crossing is a point at the pole itself — |z| = R, which no geodesic confined
+     * to the open chart can reach.
+     */
+    const { polylines } = sprayScene(SPHERE, sphereU, sphereV, [Math.PI / 2, 1], {
+      geodesics: 4,
+      geodesicLength: 8,
+    });
+    let maxAbsZ = 0;
+    for (const p of polylines) {
+      for (let k = 0; k < p.count; k++) maxAbsZ = Math.max(maxAbsZ, Math.abs(p.points[k * 3 + 2]!));
+    }
+    // The overlay lift puts the curve just outside the unit sphere, hence 0.999 rather than 1.
+    expect(maxAbsZ).toBeGreaterThan(0.999);
+
+    /**
+     * Reaching the pole is not the same as passing it, and only the arc length distinguishes them.
+     * A meridian confined to the chart covers at most π/2 from the equator before it runs out;
+     * getting past that means it went through.
+     */
+    const longest = Math.max(
+      ...polylines.map((p) => {
+        let total = 0;
+        for (let k = 1; k < p.count; k++) {
+          total += Math.hypot(
+            p.points[k * 3]! - p.points[(k - 1) * 3]!,
+            p.points[k * 3 + 1]! - p.points[(k - 1) * 3 + 1]!,
+            p.points[k * 3 + 2]! - p.points[(k - 1) * 3 + 2]!,
+          );
+        }
+        return total;
+      }),
+    );
+    expect(longest).toBeGreaterThan(Math.PI);
+  });
+
+  it("keeps a geodesic on the surface after it crosses a pole", () => {
+    // Crossing must CONTINUE the curve, not teleport it. Every point still at radius 1 is the
+    // check that the continuation past u = 0 landed back on the same sphere.
+    const { polylines } = sprayScene(SPHERE, sphereU, sphereV, [Math.PI / 2, 1], {
+      geodesics: 4,
+      geodesicLength: 8,
+    });
+    for (const p of polylines) {
+      for (let k = 0; k < p.count; k++) {
+        const r = Math.hypot(p.points[k * 3]!, p.points[k * 3 + 1]!, p.points[k * 3 + 2]!);
+        expect(Math.abs(r - 1)).toBeLessThan(0.02);
+      }
+    }
+  });
+
+  it("still stops a geodesic at a cylinder's rim, which is a real edge", () => {
+    /**
+     * The rule must not over-reach. A cylinder's u boundary is regular — the surface genuinely
+     * ends — so extending past it would run the curve off the drawn shape into the analytic
+     * continuation of the formula. This is the test that keeps pole-crossing from becoming
+     * "never stop anywhere".
+     */
+    const { polylines, info } = sprayScene(
+      "X(u,v) = (cos v, sin v, u)",
+      { min: 0, max: 2 },
+      { min: 0, max: 2 * Math.PI },
+      [1, 1],
+      { geodesics: 4, geodesicLength: 20 },
+    );
+    expect(info).toContain("outOfDomain");
+    for (const p of polylines) {
+      for (let k = 0; k < p.count; k++) {
+        const z = p.points[k * 3 + 2]!;
+        // Slightly outside [0, 2] is the last accepted step overshooting; far outside would mean
+        // the geodesic escaped up the infinite cylinder.
+        expect(z).toBeGreaterThan(-0.3);
+        expect(z).toBeLessThan(2.3);
+      }
+    }
+  });
+
+  /**
+   * Density is measured on a TORUS, not a sphere.
+   *
+   * A torus is periodic in both coordinates and has no poles, so a geodesic runs as far as it is
+   * asked to and nothing else can truncate it. On a sphere the single ray of a one-ray spray leaves
+   * along u — a meridian, straight at a pole — so the measurement would be of pole handling rather
+   * than of sampling density.
+   */
+  const TORUS = "X(u,v) = ((2 + cos u) cos v, (2 + cos u) sin v, sin u)";
+  const full: DomainRange = { min: 0, max: 2 * Math.PI };
+
+  it("samples a long geodesic as densely per unit arc as a short one", () => {
+    /**
+     * The faceting bug. `minSamples` divides the REQUESTED length, so it pins a sample count and
+     * lets the spacing grow without limit: a geodesic wrapping the surface nine times came back
+     * with the same 242 points as one crossing it once, and was drawn as a visible polygon.
+     */
+    const short = sprayScene(TORUS, full, full, [1, 1], {
+      geodesics: 1,
+      geodesicLength: 2,
+    });
+    const long = sprayScene(TORUS, full, full, [1, 1], {
+      geodesics: 1,
+      geodesicLength: 20,
+    });
+    expect(long.points / 20).toBeGreaterThan((short.points / 2) * 0.8);
+  });
+
+  it("draws a long geodesic smoothly enough that its chords recover its arc length", () => {
+    // The measurable form of "not faceted": summing the drawn chords must reproduce the true arc
+    // length. A coarse polygon inscribed in a circle visibly falls short — at length 60 the old
+    // fixed sample count lost 0.26% of the arc, which is the faceting made numeric.
+    const { polylines } = sprayScene(TORUS, full, full, [1, 1], {
+      geodesics: 1,
+      geodesicLength: 20,
+    });
+    const p = polylines[0]!;
+    let chords = 0;
+    for (let k = 1; k < p.count; k++) {
+      chords += Math.hypot(
+        p.points[k * 3]! - p.points[(k - 1) * 3]!,
+        p.points[k * 3 + 1]! - p.points[(k - 1) * 3 + 1]!,
+        p.points[k * 3 + 2]! - p.points[(k - 1) * 3 + 2]!,
+      );
+    }
+    expect(chords).toBeGreaterThan(20 * 0.999);
+  });
+
+  it("holds the whole spray under a segment budget at extreme settings", () => {
+    // Density is bounded twice: once for smoothness, once so turning both the length and the ray
+    // count up cannot freeze the UI. Without the second, this costs 89k points and ~0.9s.
+    const { points } = sprayScene(SPHERE, sphereU, sphereV, [Math.PI / 2, 1], {
+      geodesics: 24,
+      geodesicLength: 40,
+    });
+    expect(points).toBeLessThan(40000);
   });
 });

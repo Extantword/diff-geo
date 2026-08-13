@@ -3,7 +3,7 @@ import { CATALOG } from "../../src/core/catalog/surfaces.ts";
 import { buildDiffMap } from "../../src/core/jets/compile.ts";
 import { parse } from "../../src/core/expr/parse.ts";
 import { createParametricSurface } from "../../src/core/geom/parametric.ts";
-import { detectPeriodicity } from "../../src/core/geom/periodic.ts";
+import { detectPeriodicity, detectPoles } from "../../src/core/geom/periodic.ts";
 import { interval, type Interval } from "../../src/core/geom/types.ts";
 
 /**
@@ -97,5 +97,86 @@ describe("detecting a chart seam", () => {
     // log(u) is non-finite at u = 0, so nothing can be concluded and the safe reading is a wall.
     const bad = surfaceOf(["u", "v", "log u"], interval(0, 1), interval(0, 1));
     expect(detectPeriodicity(bad, new Float64Array(0)).u).toBe(false);
+  });
+});
+
+describe("telling a coordinate pole from an edge of the surface", () => {
+  /**
+   * The distinction decides whether a geodesic reaching a boundary has left the surface or merely
+   * run out of chart, which is the difference between stopping correctly and stopping for no
+   * reason the user can see.
+   */
+
+  it("finds both of the sphere's u boundaries to be poles", () => {
+    const sphere = surfaceOf(
+      ["sin u cos v", "sin u sin v", "cos u"],
+      interval(0, Math.PI, 0.002),
+      interval(0, 2 * Math.PI),
+    );
+    const poles = detectPoles(sphere, new Float64Array(0));
+    expect(poles.uMin).toBe(true);
+    expect(poles.uMax).toBe(true);
+    // The seam is not a pole: v = 0 is a perfectly regular line of the surface.
+    expect(poles.vMin).toBe(false);
+    expect(poles.vMax).toBe(false);
+  });
+
+  it("finds no pole on a cylinder, whose rim is a real edge", () => {
+    // The case the rule must NOT over-reach on: extending a geodesic past a cylinder's rim would
+    // run it off the drawn surface into the analytic continuation.
+    const cylinder = surfaceOf(["cos v", "sin v", "u"], interval(0, 2), interval(0, 2 * Math.PI));
+    expect(detectPoles(cylinder, new Float64Array(0))).toEqual({
+      uMin: false,
+      uMax: false,
+      vMin: false,
+      vMax: false,
+    });
+  });
+
+  it("finds a pole that a domain inset has already been folded into the bounds", () => {
+    /**
+     * The case that made this fail silently end to end. By the time a domain reaches the geometry
+     * layer the inset has usually been applied, so the sphere arrives as u ∈ [0.0063, 3.1353]
+     * rather than [0, π] with an inset — and 0.0063 is a perfectly regular point. Probing only
+     * exactly at the boundary detects no pole, so nothing extends and every meridian still stops
+     * at an invisible wall.
+     */
+    const inset = surfaceOf(
+      ["sin u cos v", "sin u sin v", "cos u"],
+      // No `inset` field: the bounds themselves are already pulled off the poles.
+      interval(0.0063, Math.PI - 0.0063),
+      interval(0, 2 * Math.PI),
+    );
+    const poles = detectPoles(inset, new Float64Array(0));
+    expect(poles.uMin).toBe(true);
+    expect(poles.uMax).toBe(true);
+  });
+
+  it("does not reach so far outside a boundary that an edge becomes a pole", () => {
+    // The reach is bounded so an inset-sized nudge is found and nothing else is. A cylinder
+    // truncated well short of anything degenerate must still read as an edge.
+    const cylinder = surfaceOf(["cos v", "sin v", "u"], interval(0.5, 2), interval(0, 2 * Math.PI));
+    const poles = detectPoles(cylinder, new Float64Array(0));
+    expect(poles.uMin).toBe(false);
+    expect(poles.uMax).toBe(false);
+  });
+
+  it("finds the apex of a cone but not its open end", () => {
+    const cone = surfaceOf(["u cos v", "u sin v", "u"], interval(0, 2), interval(0, 2 * Math.PI));
+    const poles = detectPoles(cone, new Float64Array(0));
+    expect(poles.uMin).toBe(true);
+    expect(poles.uMax).toBe(false);
+  });
+
+  it("does not call a boundary a pole when only one point of it is degenerate", () => {
+    // A single degenerate sample is a pinch, not a collapsed edge, and continuing a geodesic
+    // through it would not be justified. Here X_u vanishes only at v = 0.
+    const pinched = surfaceOf(
+      ["u v v", "v", "u"],
+      interval(0, 1),
+      interval(0, 1),
+    );
+    const poles = detectPoles(pinched, new Float64Array(0));
+    expect(poles.vMin).toBe(false);
   });
 });

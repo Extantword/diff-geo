@@ -572,11 +572,16 @@ export function createExprList(options: ExprListOptions): ExprList {
       commit();
     });
 
+    /**
+     * The ceiling matters more than it looks: a great circle on a sphere of radius R has length
+     * 2πR, and the extent this multiplies is R — so a maximum of 6 stopped every geodesic just
+     * short of closing up, which is the one length worth being able to reach.
+     */
     const length = el("input", {
       type: "range",
       class: "slider__input",
       min: 0.2,
-      max: 6,
+      max: 40,
       step: 0.1,
       value: geodesicLength,
     }) as HTMLInputElement;
