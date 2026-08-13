@@ -888,6 +888,15 @@ function concatenate(meshes: readonly TessellatedSurface[]): TessellatedSurface 
     triangleCount: indexCount / 3,
     droppedVertices,
     droppedTriangles,
+    /**
+     * Taking the first mesh's range is safe because there is only one.
+     *
+     * `curvatureScale` is computed once from samples pooled across every surface and then handed
+     * to all of them, so all the ranges here are equal by construction. That matters: the legend
+     * labels a single scale, and if each surface had been coloured against its own, two shapes
+     * would show the same colour for different curvatures — a figure that lies about the one
+     * thing it exists to show.
+     */
     range: meshes[0]!.range,
   };
 }

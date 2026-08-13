@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createDocument } from "../../src/state/graph.ts";
 import { buildScene, type DomainRange, type FrameRequest } from "../../src/state/scene.ts";
+import { divergingColor } from "../../src/core/geom/curvatureColor.ts";
 import type { RowId } from "../../src/state/graph.ts";
 
 const closeRel = (a: number, b: number, rel = 1e-6) =>
@@ -543,5 +544,64 @@ describe("a picked start point", () => {
     const { x, y } = sprayFrom([-10, 99]);
     closeRel(x, 0, 1e-4);
     closeRel(y, 4, 1e-4);
+  });
+});
+
+describe("one colour scale for the whole scene", () => {
+  /** A sphere on a domain that avoids both poles, so no vertex is degenerate. */
+  const sphere = (radius: string, name: string) =>
+    `${name}(u,v) = (${radius} sin u cos v, ${radius} sin u sin v, ${radius} cos u)`;
+
+  function scene(sources: readonly string[]) {
+    const document = createDocument(sources);
+    const rows = document.rows();
+    const domains = new Map<RowId, DomainRange[]>(
+      rows.map((row) => [row.id, [{ min: 0.3, max: 2.8 }, { min: 0, max: 6.28 }]]),
+    );
+    return buildScene({
+      items: [...document.resolution().items.values()],
+      parameters: new Map(),
+      domains,
+      resolution: 16,
+    });
+  }
+
+  it("repaints an existing surface when a more curved one joins the scene", () => {
+    /**
+     * The legend labels one scale, so every surface must be painted against that scale — and the
+     * consequence, which is what this asserts, is that adding a surface CHANGES the colour of the
+     * ones already there. If each surface were normalized to its own curvature range instead,
+     * every shape would look equally saturated and identical colours would mean different
+     * curvatures: a figure that lies about the one thing it exists to show.
+     */
+    const alone = scene([sphere("1", "A")]);
+    // K = 1 for the unit sphere and 25 for this one, so the pooled scale jumps by 25x.
+    const together = scene([sphere("1", "A"), sphere("0.2", "B")]);
+
+    expect(alone.curvatureScale).toBeCloseTo(1, 3);
+    expect(together.curvatureScale).toBeCloseTo(25, 1);
+
+    // Vertex 0 belongs to the unit sphere in both scenes. On its own it sits at the saturated
+    // end of the scale; sharing with a far more curved surface pushes it toward neutral.
+    const neutral: [number, number, number] = [0, 0, 0];
+    divergingColor(0, neutral);
+    const distanceToNeutral = (mesh: NonNullable<typeof alone.mesh>) =>
+      Math.hypot(
+        mesh.colors[0]! - neutral[0],
+        mesh.colors[1]! - neutral[1],
+        mesh.colors[2]! - neutral[2],
+      );
+
+    expect(distanceToNeutral(together.mesh!)).toBeLessThan(distanceToNeutral(alone.mesh!));
+  });
+
+  it("gives both surfaces the same colour where their curvature agrees", () => {
+    // Two unit spheres: same K, so same colour, whichever buffer half a vertex lands in.
+    const both = scene([sphere("1", "A"), sphere("1", "B")]);
+    const mesh = both.mesh!;
+    const half = mesh.vertexCount / 2;
+    for (let k = 0; k < 3; k++) {
+      expect(mesh.colors[k]).toBeCloseTo(mesh.colors[half * 3 + k]!, 6);
+    }
   });
 });
