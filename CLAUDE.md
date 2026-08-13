@@ -130,6 +130,28 @@ is hand-enforced and consistent:
 - `noUncheckedIndexedAccess` is **on**. In tight numeric loops over typed arrays, confine the `!`
   assertions to a single named accessor rather than sprinkling them through the loop.
 
+## Two independent checks on the CAS
+
+**`core/num/taylor.ts` must never read `fns.ts`'s `partial` table.** That is the whole reason it
+exists: truncated power-series arithmetic where every elementary function's coefficients come from
+its own defining ODE (`y = eᵘ` from `y′ = y·u′`, `tan` from `y′ = (1+y²)u′`), so a wrong entry in the
+symbolic derivative table cannot hide in it. The reciprocal functions are composed (`sec = 1/cos`)
+rather than given rules — fewer rules, no less independent.
+
+Two things there are deliberate and easy to undo by accident: integer powers use repeated
+multiplication rather than the `y′ = p·y·u′/u` rule, because that rule divides by u and `x²` at
+`x = 0` is far too common to answer with NaN; and `atan2` is written from
+`(x·y′ − y·x′)/(x² + y²)` rather than as `atan(y/x)`, which is wrong across the branch.
+
+The core is **univariate**, so it yields *directional* derivatives. That still verifies every mixed
+partial, because `D_v^m f = Σ (m!/α!) v^α ∂^α f` is linear in the partials and enough directions pin
+each one. Recovering partials separately would need polarization — the missing piece before this
+could double as the numeric fallback for jets past the node budget.
+
+**Never use finite differences for this.** A third derivative by differencing lands near 1e-5
+relative, needs a step size tuned per expression, and produces flaky tests whose tolerances get
+loosened until they catch nothing.
+
 ## Testing
 
 Analytic ground truth, not snapshots. A local `close()` helper per test file. Ground truth to hold
