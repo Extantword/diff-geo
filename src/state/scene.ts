@@ -18,6 +18,7 @@ import {
 } from "../core/geom/types.ts";
 import { compileScalar } from "../core/expr/eval.ts";
 import { tessellate, type TessellatedSurface } from "../core/mesh/tessellate.ts";
+import { gaussImage, meshArea } from "../core/mesh/gaussMap.ts";
 import type { LineGroup, Polyline } from "../gl/passes/lines.ts";
 import type { Item, RowId } from "./graph.ts";
 import {
@@ -105,6 +106,15 @@ export interface SurfaceOverlay {
   /** draw the two lines of curvature through the start point */
   readonly curvatureLines: boolean;
   /**
+   * Draw the Gauss image on a sphere beside the surface.
+   *
+   * Side by side rather than in its own viewport: the two meshes share a colour scale and a vertex
+   * correspondence, so having them in one scene under one camera is what lets you see which patch
+   * went where as you orbit. A second viewport would break the shared framing that makes the
+   * comparison legible.
+   */
+  readonly gaussMap?: boolean;
+  /**
    * Where both start, in chart coordinates. Defaults to the centre of the domain.
    *
    * Clamped to the sampled domain rather than rejected when outside it, because a pick lands on
@@ -133,6 +143,33 @@ const SEGMENTS_PER_EXTENT = 220;
  * when the alternative is a frozen UI.
  */
 const MAX_SPRAY_SEGMENTS = 26000;
+
+/**
+ * Where to put a Gauss image sphere so it sits clear of the surface it belongs to.
+ *
+ * Just past the surface's own +x extent, with a gap, and centred on the surface in y and z so the
+ * two read as a pair at the same height rather than as two unrelated objects.
+ */
+function besideMesh(mesh: TessellatedSurface, radius: number): Vec3 {
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  let minZ = Infinity;
+  let maxZ = -Infinity;
+  for (let k = 0; k < mesh.vertexCount; k++) {
+    const x = mesh.positions[k * 3]!;
+    const y = mesh.positions[k * 3 + 1]!;
+    const z = mesh.positions[k * 3 + 2]!;
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+    if (z < minZ) minZ = z;
+    if (z > maxZ) maxZ = z;
+  }
+  if (!Number.isFinite(maxX)) return [0, 0, 0];
+  return [maxX + radius * 1.35, (minY + maxY) / 2, (minZ + maxZ) / 2];
+}
 
 /** One note about a row, before notes are merged per row. */
 interface RawReport {
@@ -281,6 +318,14 @@ export function buildScene(request: SceneRequest): Scene {
     surface: ReturnType<typeof createParametricSurface>;
     params: Float64Array;
     poles: ChartPoles;
+    /**
+     * The tessellated mesh, filled in by the tessellation pass below.
+     *
+     * Held on the entry rather than looked up by index in the parallel `meshes` array, because the
+     * two only stay aligned while every tessellation succeeds — one throw and every later surface's
+     * Gauss image would be built from its neighbour's normals.
+     */
+    mesh?: TessellatedSurface;
   }> = [];
 
   for (const item of surfaceItems) {
@@ -337,7 +382,8 @@ export function buildScene(request: SceneRequest): Scene {
 
   const curvatureScale = robustScale(curvatureSamples, 1);
 
-  for (const { item, surface, params } of compiledSurfaces) {
+  for (const entry of compiledSurfaces) {
+    const { item, surface, params } = entry;
     try {
       const mesh = tessellate(surface, params, {
         resU: resolution,
@@ -352,6 +398,7 @@ export function buildScene(request: SceneRequest): Scene {
         objectId: item.rowId,
       });
       meshes.push(mesh);
+      entry.mesh = mesh;
 
       const point = makeSurfacePoint();
       const uMid = (surface.u.min + surface.u.max) / 2;
@@ -379,7 +426,7 @@ export function buildScene(request: SceneRequest): Scene {
   const sceneExtent = meshes.length > 0 ? extentOfMeshes(meshes) : 1;
   const overlayLift = chartLift(sceneExtent, resolution, curvatureScale);
 
-  for (const { item, surface, params, poles } of compiledSurfaces) {
+  for (const { item, surface, params, poles, mesh: sourceMesh } of compiledSurfaces) {
     const overlay = overlays.get(item.rowId);
     if (!overlay) continue;
 
@@ -422,6 +469,29 @@ export function buildScene(request: SceneRequest): Scene {
       sceneExtent / SEGMENTS_PER_EXTENT,
       sprayArc / MAX_SPRAY_SEGMENTS,
     );
+
+    if (overlay.gaussMap && sourceMesh) {
+      {
+        const source = sourceMesh;
+        /**
+         * Placed to the right of everything drawn so far, at a radius that reads as comparable to
+         * the surface rather than dwarfed by it. The true Gauss map has radius 1, so this is a
+         * presentation scale — the shape of the image and its area RATIO are what carry meaning,
+         * and both are preserved.
+         */
+        const radius = sceneExtent * 0.55;
+        const center = besideMesh(source, radius);
+        const image = gaussImage(source, { radius, center });
+        meshes.push(image);
+        // Reported as a ratio, which is the one number that means something: the image's area over
+        // the surface's is the average |K|, and equals it exactly in the limit.
+        const imageArea = meshArea(image) / (radius * radius);
+        reports.push({
+          rowId: item.rowId,
+          info: `Gauss image area ${imageArea.toFixed(3)} = ∫|K| dA`,
+        });
+      }
+    }
     const clamp = (value: number, min: number, max: number) =>
       Math.min(max, Math.max(min, value));
     const uMid = overlay.start

@@ -862,3 +862,99 @@ describe("extending geodesics over the whole surface", () => {
     expect(points).toBeLessThan(40000);
   });
 });
+
+describe("the Gauss map beside the surface", () => {
+  function gaussScene(source: string, u: DomainRange, v: DomainRange) {
+    const document = createDocument([source]);
+    const rowId = document.rows()[0]!.id;
+    const withMap = (gaussMap: boolean) =>
+      buildScene({
+        items: [...document.resolution().items.values()],
+        parameters: new Map(),
+        domains: new Map([[rowId, [u, v]]]),
+        resolution: 40,
+        overlays: new Map([
+          [rowId, { geodesics: 0, geodesicLength: 1, curvatureLines: false, gaussMap }],
+        ]),
+      });
+    return { off: withMap(false), on: withMap(true), rowId };
+  }
+
+  const SPHERE = "X(u,v) = (sin u cos v, sin u sin v, cos u)";
+  const sphereU: DomainRange = { min: 0.01, max: Math.PI - 0.01 };
+  const sphereV: DomainRange = { min: 0, max: 2 * Math.PI };
+
+  it("adds a second body to the scene only when asked", () => {
+    const { off, on } = gaussScene(SPHERE, sphereU, sphereV);
+    expect(on.mesh!.vertexCount).toBeGreaterThan(off.mesh!.vertexCount);
+    // Same source mesh twice over, so exactly double.
+    expect(on.mesh!.vertexCount).toBe(off.mesh!.vertexCount * 2);
+  });
+
+  it("places the image clear of the surface rather than inside it", () => {
+    /**
+     * The whole point of drawing it beside rather than in its own viewport is that one camera frames
+     * both, so the two must not overlap. Checked as a gap in x between the surface's vertices and
+     * the image's.
+     */
+    const { off, on } = gaussScene(SPHERE, sphereU, sphereV);
+    const half = off.mesh!.vertexCount;
+    let surfaceMaxX = -Infinity;
+    for (let k = 0; k < half; k++) {
+      surfaceMaxX = Math.max(surfaceMaxX, on.mesh!.positions[k * 3]!);
+    }
+    let imageMinX = Infinity;
+    for (let k = half; k < on.mesh!.vertexCount; k++) {
+      const x = on.mesh!.positions[k * 3]!;
+      const y = on.mesh!.positions[k * 3 + 1]!;
+      const z = on.mesh!.positions[k * 3 + 2]!;
+      // Degenerate vertices carry no normal and sit at the sphere's centre; they are unreferenced.
+      if (x === 0 && y === 0 && z === 0) continue;
+      imageMinX = Math.min(imageMinX, x);
+    }
+    expect(imageMinX).toBeGreaterThan(surfaceMaxX);
+  });
+
+  it("reports the image's area, which is the total curvature", () => {
+    // ∫|K| dA = 4π for a sphere, so the readout is a statement the user can check against the
+    // theorem rather than an unlabelled number.
+    const { on } = gaussScene(SPHERE, sphereU, sphereV);
+    const info = on.reports.flatMap((r) => r.info).join(" ");
+    expect(info).toContain("Gauss image area");
+    const match = /Gauss image area ([0-9.]+)/.exec(info);
+    expect(match).not.toBeNull();
+    expect(Number(match![1])).toBeCloseTo(4 * Math.PI, 0);
+  });
+
+  it("names the source row on the image's vertices, so a click on it reports the preimage", () => {
+    /**
+     * A happy consequence of sharing the source's id and chart arrays: picking on the Gauss sphere
+     * comes back with the row and the (u, v) whose normal lands there. Clicking the image is
+     * therefore a way to ask "which point of the surface points this way".
+     */
+    const { off, on, rowId } = gaussScene(SPHERE, sphereU, sphereV);
+    for (let k = off.mesh!.vertexCount; k < on.mesh!.vertexCount; k++) {
+      expect(on.mesh!.ids[k]).toBe(rowId);
+    }
+  });
+
+  it("flattens a cylinder's image to a circle", () => {
+    // K = 0 means the image has no area. Visible directly: every image vertex shares one z.
+    const { off, on } = gaussScene(
+      "X(u,v) = (cos v, sin v, u)",
+      { min: 0, max: 2 },
+      { min: 0, max: 2 * Math.PI },
+    );
+    const half = off.mesh!.vertexCount;
+    const zs: number[] = [];
+    for (let k = half; k < on.mesh!.vertexCount; k++) {
+      const x = on.mesh!.positions[k * 3]!;
+      const y = on.mesh!.positions[k * 3 + 1]!;
+      const z = on.mesh!.positions[k * 3 + 2]!;
+      if (x === 0 && y === 0 && z === 0) continue;
+      zs.push(z);
+    }
+    expect(zs.length).toBeGreaterThan(100);
+    expect(Math.max(...zs) - Math.min(...zs)).toBeLessThan(1e-4);
+  });
+});

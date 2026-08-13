@@ -146,8 +146,23 @@ JS↔GLSL agreement cannot run under Vitest's node environment; it is checked by
 ## Milestones
 
 M0 scaffold + lit torus ✅ · M1 CAS + jets + vertical slice ✅ · M2 signal store + expression list +
-curves ✅ · M3 curvature lines, geodesics, picking ✅ (Gauss map and parallel transport still open) ·
+curves ✅ · M3 curvature lines, geodesics, picking, Gauss map ✅ (parallel transport still open) ·
 M4 implicit surfaces · M5 book scaffolding. One commit per milestone.
+
+## The Gauss map is a swap, not a computation
+
+`mesh/gaussMap.ts` builds the Gauss image by **exchanging positions and normals** on an existing
+tessellation. That works because the mesh already stores the unit normal per vertex, and because the
+outward normal of a unit sphere at N is N itself — so the swap is self-consistent and nothing is
+re-evaluated. Colours, curvature, chart coordinates and ids are *shared by reference*, which is what
+makes the two meshes readable side by side and, as a free consequence, makes a click on the Gauss
+sphere report the (u, v) of its preimage.
+
+The verification worth keeping: the Gauss map's area distortion is exactly |K| (do Carmo §3-3), so
+`meshArea(gaussImage(m))` must equal `totalAbsoluteCurvature(m)`. It is a **per-triangle** identity,
+so it holds even where the map is not injective — a torus is 2-to-1 over part of the sphere and the
+areas still agree. That one line checks the normals against the curvatures, and it is the test most
+likely to catch a normal-orientation bug.
 
 ## Picking, and what is not verified in node
 

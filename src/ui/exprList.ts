@@ -86,7 +86,7 @@ export interface ExprListOptions {
   readonly inChart: Set<RowId>;
   /** Drives play / pause / rewind on any slider. */
   readonly animator: Animator;
-  /** Per-surface overlays: geodesic sprays and lines of curvature. */
+  /** Per-surface overlays: geodesic sprays, lines of curvature, the Gauss map. */
   readonly overlays: Map<RowId, SurfaceOverlay>;
 }
 
@@ -511,10 +511,10 @@ export function createExprList(options: ExprListOptions): ExprList {
   };
 
   /**
-   * Geodesics and lines of curvature, on surface rows.
+   * Geodesics, lines of curvature and the Gauss map, on surface rows.
    *
-   * Both shoot from the centre of the domain, because picking a point needs the id-buffer pass
-   * that does not exist yet. The centre is a defined, reproducible place to start from, and
+   * The curves shoot from `start` when a click has set one, and from the centre of the domain
+   * otherwise. The centre is a defined, reproducible place to start from, and
    * moving to click-to-shoot later changes only where the start comes from.
    */
   const syncOverlayControl = (view: RowView, item: Item | null) => {
@@ -538,9 +538,10 @@ export function createExprList(options: ExprListOptions): ExprList {
     let geodesics = state.geodesics;
     let geodesicLength = state.geodesicLength;
     let curvatureLines = state.curvatureLines;
+    let gaussMap = state.gaussMap ?? false;
 
     const commit = () => {
-      if (geodesics === 0 && !curvatureLines) {
+      if (geodesics === 0 && !curvatureLines && !gaussMap) {
         // Nothing is drawn, so there is no start point to remember either.
         options.overlays.delete(view.id);
       } else {
@@ -552,7 +553,13 @@ export function createExprList(options: ExprListOptions): ExprList {
          * domain centre the next time any slider here moved.
          */
         const start = options.overlays.get(view.id)?.start;
-        options.overlays.set(view.id, { geodesics, geodesicLength, curvatureLines, start });
+        options.overlays.set(view.id, {
+          geodesics,
+          geodesicLength,
+          curvatureLines,
+          gaussMap,
+          start,
+        });
       }
       options.onEdit(false);
     };
@@ -604,6 +611,15 @@ export function createExprList(options: ExprListOptions): ExprList {
       commit();
     });
 
+    const gauss = el("input", {
+      type: "checkbox",
+      checked: gaussMap,
+    }) as HTMLInputElement;
+    gauss.addEventListener("change", () => {
+      gaussMap = gauss.checked;
+      commit();
+    });
+
     replace(view.overlayHost, [
       el("div", { class: "slider" }, [
         el("label", { class: "slider__label" }, [
@@ -631,6 +647,14 @@ export function createExprList(options: ExprListOptions): ExprList {
           el("span", { class: "curvature-key__2", text: "k\u2082" }),
         ]),
       ]),
+      el("label", { class: "toggle toggle--tight" }, [
+        gauss,
+        el("span", { text: "Gauss map" }),
+      ]),
+      el("div", {
+        class: "overlay__hint",
+        text: "N: S \u2192 S\u00b2 drawn beside the surface, same colours \u2014 the image folds where K = 0",
+      }),
     ]);
   };
 
