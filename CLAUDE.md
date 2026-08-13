@@ -118,6 +118,20 @@ JS↔GLSL agreement cannot run under Vitest's node environment; it is checked by
 
 ## Milestones
 
-M0 scaffold + lit torus ✅ · M1 CAS + jets + vertical slice · M2 signal store + expression list +
-curves · M3 Gauss map, curvature lines, geodesics · M4 implicit surfaces · M5 book scaffolding.
-One commit per milestone.
+M0 scaffold + lit torus ✅ · M1 CAS + jets + vertical slice ✅ · M2 signal store + expression list +
+curves ✅ · M3 curvature lines, geodesics, picking ✅ (Gauss map and parallel transport still open) ·
+M4 implicit surfaces · M5 book scaffolding. One commit per milestone.
+
+## Picking, and what is not verified in node
+
+`gl/passes/pick.ts` renders `(rowId, u, v)` to an RGBA32F target and reads one pixel back, so a
+click recovers chart coordinates exactly. **The GPU half of this cannot run under Vitest** — no
+context in a node environment — so what the suite covers is the mesh half: that `mesh.ids` names
+the owning row per vertex, and that ids and `chart` stay aligned through `concatenate`. That
+alignment is the whole correctness claim; if it drifts, a click on one surface reports a point on
+another and no amount of shader review would show it. The shader itself is verified by eye until
+the `verify:glsl` page exists (M4).
+
+Every vertex carries its **real** (u, v), not normalized [0,1] coordinates — the precedent
+normalized and un-normalized around a raycast, and carrying the true values removes that
+conversion and survives a restricted domain.

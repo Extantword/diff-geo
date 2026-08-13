@@ -42,6 +42,7 @@ const EMPTY_MESH = {
   normals: new Float32Array(0),
   colors: new Float32Array(0),
   chart: new Float32Array(0),
+  ids: new Float32Array(0),
   curvature: new Float64Array(0),
   indices: new Uint32Array(0),
   vertexCount: 0,
@@ -82,6 +83,8 @@ function main() {
   const rowSliders = new Map<RowId, SliderSpec>();
   const inChart = new Set<RowId>();
   const overlays = new Map<RowId, SurfaceOverlay>();
+  /** Chart coordinates of the last successful pick, for the diagnostics readout. */
+  let pickedAt: { u: number; v: number } | null = null;
   const animator = createAnimator();
 
   const legendLabels = el("div", { class: "legend-labels" });
@@ -129,6 +132,7 @@ function main() {
       el("span", { text: scene.curvatureScale.toPrecision(3) }),
     ]);
 
+    const picking = renderer.pickAvailable();
     const surfaces = scene.mesh ? scene.mesh.triangleCount.toLocaleString() : "0";
     const curveCount = scene.lines.reduce((n, group) => n + group.polylines.length, 0);
     const gl = renderer.lineStats();
@@ -152,6 +156,16 @@ function main() {
             text: `shader attributes not found: ${missing.join(", ")}`,
           })
         : null,
+      // Where the last click landed, in chart coordinates — the readout that shows the pick is
+      // exact rather than approximately the nearest vertex.
+      pickedAt
+        ? el("div", {
+            text: `picked     u = ${pickedAt.u.toFixed(4)}, v = ${pickedAt.v.toFixed(4)}`,
+          })
+        : null,
+      picking.available
+        ? null
+        : el("div", { class: "diag diag--warning", text: picking.reason }),
     ]);
 
     // A parameter change cannot alter any row's text or structure, so it only needs the
@@ -221,6 +235,59 @@ function main() {
   // A playing slider redraws through the same throttled path as a drag: one draft render per
   // animation frame, with the full-resolution pass arriving once it settles.
   animator.setOnTick(() => onParameterChange());
+
+  /**
+   * Click a surface to move where its geodesics and curvature lines start from.
+   *
+   * ## Telling a click from an orbit
+   *
+   * The camera owns its own drag listeners on the same canvas, so both gestures begin with a
+   * pointerdown in the same place. Rather than suspending the camera behind a flag — the
+   * precedent's `aiming` boolean, which gets "started on the background, dragged onto the
+   * surface" wrong in both directions — this decides *after the fact*: a pointerup that stayed
+   * within a few pixels of its pointerdown was a click, and anything else was an orbit. A
+   * stationary drag rotates the camera by nothing, so no gesture is stolen either way.
+   */
+  let pressX = 0;
+  let pressY = 0;
+  let pressed = false;
+  /** How far the pointer may travel and still count as a click, in CSS pixels. */
+  const CLICK_SLOP = 4;
+
+  canvas.addEventListener("pointerdown", (event: PointerEvent) => {
+    pressed = true;
+    pressX = event.clientX;
+    pressY = event.clientY;
+  });
+
+  canvas.addEventListener("pointerup", (event: PointerEvent) => {
+    if (!pressed) return;
+    pressed = false;
+    const travelled = Math.hypot(event.clientX - pressX, event.clientY - pressY);
+    if (travelled > CLICK_SLOP) return;
+
+    // Only rows already showing an overlay respond. Clicking a bare surface should do nothing
+    // rather than silently arming a feature the user has not asked for.
+    const armed = [...overlays.entries()].filter(
+      ([, overlay]) => overlay.geodesics > 0 || overlay.curvatureLines,
+    );
+    if (armed.length === 0) return;
+
+    const rect = canvas.getBoundingClientRect();
+    const hit = renderer.pick(event.clientX - rect.left, event.clientY - rect.top);
+    if (!hit) return;
+
+    const overlay = overlays.get(hit.rowId);
+    if (!overlay || (overlay.geodesics === 0 && !overlay.curvatureLines)) return;
+
+    overlays.set(hit.rowId, { ...overlay, start: [hit.u, hit.v] });
+    pickedAt = { u: hit.u, v: hit.v };
+    onEdit(false);
+  });
+
+  canvas.addEventListener("pointercancel", () => {
+    pressed = false;
+  });
 
   const chartToggle = el("input", {
     type: "checkbox",

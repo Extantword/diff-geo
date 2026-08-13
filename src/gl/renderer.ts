@@ -7,6 +7,7 @@ import {
   type LineStats,
   type LinesPass,
 } from "./passes/lines.ts";
+import { createPickPass, type PickPass, type PickResult } from "./passes/pick.ts";
 import { createSurfacePass, type SurfacePass } from "./passes/surface.ts";
 import { multiply, orthographic } from "./mat4.ts";
 
@@ -40,6 +41,15 @@ export interface Renderer {
   invalidate(): void;
   /** What each line pass did last frame, for the on-screen diagnostics. */
   lineStats(): { main: LineStats; chart: LineStats };
+  /**
+   * What surface lies under a point in CSS pixels, with the origin at the canvas's top left —
+   * matching a pointer event, since that is the only caller.
+   *
+   * Returns null over empty space, and also when float render targets are unavailable; use
+   * `pickAvailable()` to tell those two apart.
+   */
+  pick(cssX: number, cssY: number): PickResult | null;
+  pickAvailable(): { available: boolean; reason: string };
   start(): void;
   stop(): void;
   dispose(): void;
@@ -55,6 +65,7 @@ export function createRenderer(device: Device): Renderer {
   const surfacePass: SurfacePass = createSurfacePass(gl);
   const linesPass: LinesPass = createLinesPass(gl);
   const chartLinesPass: LinesPass = createLinesPass(gl);
+  const pickPass: PickPass = createPickPass(gl);
 
   let dirty = true;
   let running = false;
@@ -136,8 +147,35 @@ export function createRenderer(device: Device): Renderer {
   return {
     camera,
 
+    pick(cssX, cssY) {
+      if (!pickPass.available) return null;
+      /**
+       * Two conversions, both easy to get wrong and silently off by a factor.
+       *
+       * The device pixel ratio scales CSS pixels to the framebuffer's, and the y axis flips:
+       * pointer events measure down from the top, GL measures up from the bottom.
+       */
+      const scale = device.width / Math.max(1, device.canvas.clientWidth);
+      const x = cssX * scale;
+      const y = device.height - cssY * scale;
+      if (x < 0 || y < 0 || x >= device.width || y >= device.height) return null;
+
+      const aspect = device.width / Math.max(1, device.height);
+      const viewProjection = multiply(camera.projection(aspect), camera.view());
+      const hit = pickPass.pick(x, y, viewProjection, device.width, device.height);
+      // The pick pass leaves its own framebuffer bound to null but rebinds nothing else, so
+      // the next frame has to reissue its own state. Marking dirty is what guarantees that.
+      invalidate();
+      return hit;
+    },
+
+    pickAvailable() {
+      return { available: pickPass.available, reason: pickPass.unavailableReason };
+    },
+
     setSurfaceMesh(mesh) {
       surfacePass.setMesh(mesh);
+      pickPass.setMesh(mesh);
       invalidate();
     },
 
@@ -187,6 +225,7 @@ export function createRenderer(device: Device): Renderer {
     },
 
     dispose() {
+      pickPass.dispose();
       this.stop();
       surfacePass.dispose();
       linesPass.dispose();

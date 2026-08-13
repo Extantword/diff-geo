@@ -540,8 +540,20 @@ export function createExprList(options: ExprListOptions): ExprList {
     let curvatureLines = state.curvatureLines;
 
     const commit = () => {
-      if (geodesics === 0 && !curvatureLines) options.overlays.delete(view.id);
-      else options.overlays.set(view.id, { geodesics, geodesicLength, curvatureLines });
+      if (geodesics === 0 && !curvatureLines) {
+        // Nothing is drawn, so there is no start point to remember either.
+        options.overlays.delete(view.id);
+      } else {
+        /**
+         * `start` is read back from the map rather than captured in a local.
+         *
+         * It is owned by the click handler on the canvas, not by these controls, so building a
+         * fresh object from the local state alone would silently reset the picked point to the
+         * domain centre the next time any slider here moved.
+         */
+        const start = options.overlays.get(view.id)?.start;
+        options.overlays.set(view.id, { geodesics, geodesicLength, curvatureLines, start });
+      }
       options.onEdit(false);
     };
 
@@ -595,6 +607,10 @@ export function createExprList(options: ExprListOptions): ExprList {
         ]),
         count,
       ]),
+      el("div", {
+        class: "overlay__hint",
+        text: "click the surface to move where these start",
+      }),
       el("div", { class: "slider" }, [
         el("label", { class: "slider__label" }, [
           el("span", { text: "arc length" }),

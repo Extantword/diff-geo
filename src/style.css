@@ -170,6 +170,13 @@ body {
   line-height: 1.4;
 }
 
+.overlay__hint {
+  margin: 2px 0 6px;
+  color: #6f7f92;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
 .diag--error {
   background: #2a1416;
   color: #ff9b9b;

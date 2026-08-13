@@ -31,6 +31,14 @@ export interface TessellatedSurface {
   normals: Float32Array;
   /** 2 floats per vertex: actual (u, v), for picking and the chart grid */
   chart: Float32Array;
+  /**
+   * 1 float per vertex: which object this vertex belongs to, for the pick pass.
+   *
+   * A float rather than an integer attribute so it rides alongside the others with no separate
+   * buffer format; every integer below 2^24 is exact in float32, which is far beyond any
+   * plausible row count.
+   */
+  ids: Float32Array;
   /** 3 floats per vertex, from the diverging curvature colormap */
   colors: Float32Array;
   /** Gaussian curvature per vertex, for readouts and the legend */
@@ -49,6 +57,8 @@ export interface TessellateOptions {
   resV?: number;
   /** reuse a scale computed earlier, e.g. to keep colours stable while a slider moves */
   range?: CurvatureRange;
+  /** stamped on every vertex so the pick pass can name what was clicked */
+  objectId?: number;
 }
 
 export function tessellate(
@@ -56,7 +66,7 @@ export function tessellate(
   params: ArrayLike<number>,
   options: TessellateOptions = {},
 ): TessellatedSurface {
-  const { resU = 128, resV = 128 } = options;
+  const { resU = 128, resV = 128, objectId = 0 } = options;
   const range = options.range ?? sampleCurvatureRange(surface, params);
 
   const [u0, u1] = sampleBounds(surface.u);
@@ -70,6 +80,7 @@ export function tessellate(
   const positions = new Float32Array(vertexCount * 3);
   const normals = new Float32Array(vertexCount * 3);
   const chart = new Float32Array(vertexCount * 2);
+  const ids = new Float32Array(vertexCount).fill(objectId);
   const colors = new Float32Array(vertexCount * 3);
   const curvature = new Float64Array(vertexCount);
   const valid = new Uint8Array(vertexCount);
@@ -176,6 +187,7 @@ export function tessellate(
     positions,
     normals,
     chart,
+    ids,
     colors,
     curvature,
     indices: new Uint32Array(indices),

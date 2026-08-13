@@ -430,3 +430,118 @@ describe("surface overlays", () => {
     expect(report?.warnings.join(" ")).toContain("no tangent plane");
   });
 });
+
+describe("picking: the mesh side", () => {
+  /**
+   * The pick pass itself needs a GPU, so what is verified here is everything it depends on:
+   * that each vertex carries the row that owns it and the chart coordinates that belong to it,
+   * and that concatenating several surfaces into one buffer keeps those two aligned.
+   *
+   * That alignment is the whole correctness claim of id-buffer picking. If it holds, reading a
+   * pixel yields a real (row, u, v); if it silently drifts, a click on one surface reports a
+   * point on another, and no amount of shader review would show it.
+   */
+
+  it("stamps every vertex with the row that owns it", () => {
+    const { document, scene } = sceneOf(["X(u,v) = (u, v, 0)"]);
+    const rowId = document.rows()[0]!.id;
+    expect(scene.mesh!.ids).toHaveLength(scene.mesh!.vertexCount);
+    for (let k = 0; k < scene.mesh!.vertexCount; k++) {
+      expect(scene.mesh!.ids[k]).toBe(rowId);
+    }
+  });
+
+  it("keeps ids and chart coordinates aligned across concatenation", () => {
+    // Two surfaces in one buffer, deliberately given DIFFERENT parametrizations so a mix-up
+    // cannot pass: reading vertex k's id, then evaluating that row's own formula at vertex k's
+    // (u, v), must land back on vertex k's position.
+    const { document, scene } = sceneOf([
+      "X(u,v) = (u, v, 0)",
+      "Y(u,v) = (2 v, u, 5)",
+    ]);
+    const rows = document.rows();
+    const mesh = scene.mesh!;
+    expect(new Set(mesh.ids)).toEqual(new Set([rows[0]!.id, rows[1]!.id]));
+
+    for (let k = 0; k < mesh.vertexCount; k += 37) {
+      const id = mesh.ids[k]!;
+      const u = mesh.chart[k * 2]!;
+      const v = mesh.chart[k * 2 + 1]!;
+      const x = mesh.positions[k * 3]!;
+      const y = mesh.positions[k * 3 + 1]!;
+      const z = mesh.positions[k * 3 + 2]!;
+
+      if (id === rows[0]!.id) {
+        closeRel(x, u, 1e-5);
+        closeRel(y, v, 1e-5);
+        expect(z).toBeCloseTo(0, 5);
+      } else {
+        closeRel(x, 2 * v, 1e-5);
+        closeRel(y, u, 1e-5);
+        expect(z).toBeCloseTo(5, 5);
+      }
+    }
+  });
+
+  it("carries real (u, v), not normalized coordinates", () => {
+    // The improvement over the precedent, which baked chart coords into `uv` in [0,1] and had to
+    // un-normalize a hit afterwards. On a domain of [1, 3] a normalized attribute would show 0
+    // and 1 at the ends.
+    const document = createDocument(["X(u,v) = (u, v, 0)"]);
+    const rowId = document.rows()[0]!.id;
+    const scene = buildScene({
+      items: [...document.resolution().items.values()],
+      parameters: new Map(),
+      domains: new Map([[rowId, [{ min: 1, max: 3 }, { min: -2, max: 2 }]]]),
+      resolution: 8,
+    });
+    let minU = Infinity;
+    let maxU = -Infinity;
+    for (let k = 0; k < scene.mesh!.vertexCount; k++) {
+      const u = scene.mesh!.chart[k * 2]!;
+      if (u < minU) minU = u;
+      if (u > maxU) maxU = u;
+    }
+    closeRel(minU, 1, 1e-5);
+    closeRel(maxU, 3, 1e-5);
+  });
+});
+
+describe("a picked start point", () => {
+  function sprayFrom(start: readonly [number, number] | undefined) {
+    const document = createDocument(["X(u,v) = (u, v, 0)"]);
+    const rowId = document.rows()[0]!.id;
+    const scene = buildScene({
+      items: [...document.resolution().items.values()],
+      parameters: new Map(),
+      domains: new Map([[rowId, [{ min: 0, max: 4 }, { min: 0, max: 4 }]]]),
+      resolution: 16,
+      overlays: new Map([
+        [rowId, { geodesics: 4, geodesicLength: 0.5, curvatureLines: false, start }],
+      ]),
+    });
+    // The plane's geodesics are straight lines, so every ray begins at the start point.
+    const first = scene.lines[0]!.polylines[0]!;
+    return { x: first.points[0]!, y: first.points[1]! };
+  }
+
+  it("defaults to the centre of the domain", () => {
+    const { x, y } = sprayFrom(undefined);
+    closeRel(x, 2, 1e-4);
+    closeRel(y, 2, 1e-4);
+  });
+
+  it("moves the origin of the spray", () => {
+    const { x, y } = sprayFrom([1, 3]);
+    closeRel(x, 1, 1e-4);
+    closeRel(y, 3, 1e-4);
+  });
+
+  it("clamps a start point outside the domain instead of producing nothing", () => {
+    // A pick lands on a triangle, and the interpolated (u, v) at its edge can sit a hair past
+    // the last sample row. Rejecting that would make the surface's own boundary unclickable.
+    const { x, y } = sprayFrom([-10, 99]);
+    closeRel(x, 0, 1e-4);
+    closeRel(y, 4, 1e-4);
+  });
+});

@@ -85,17 +85,25 @@ export interface SceneRequest {
 /**
  * Intrinsic and extrinsic curves drawn on a surface.
  *
- * Both start from the centre of the domain rather than from a click, because picking needs the
- * id-buffer pass that does not exist yet. The centre is at least a defined, reproducible place
- * to shoot from, and moving to click-to-shoot later changes only where `start` comes from.
+ * Both start from `start` if given and from the centre of the domain otherwise. The centre is
+ * the honest default rather than a placeholder: it needs no interaction, so a surface shows its
+ * geodesics the moment the overlay is switched on, and a figure in the eventual book is
+ * reproducible from its formula alone. A click supplies `start` and nothing else changes.
  */
 export interface SurfaceOverlay {
-  /** fan this many geodesics from the domain centre; 0 for none */
+  /** fan this many geodesics from the start point; 0 for none */
   readonly geodesics: number;
   /** arc length of each geodesic, as a fraction of the surface's extent */
   readonly geodesicLength: number;
-  /** draw the two lines of curvature through the domain centre */
+  /** draw the two lines of curvature through the start point */
   readonly curvatureLines: boolean;
+  /**
+   * Where both start, in chart coordinates. Defaults to the centre of the domain.
+   *
+   * Clamped to the sampled domain rather than rejected when outside it, because a pick lands on
+   * a triangle whose interpolated (u, v) can sit a hair past the last sample row.
+   */
+  readonly start?: readonly [number, number];
 }
 
 /** One note about a row, before notes are merged per row. */
@@ -287,6 +295,8 @@ export function buildScene(request: SceneRequest): Scene {
           maxK: Number.NaN,
           invalidFraction: 0,
         },
+        // The row id travels into the mesh so a pick can name the row it landed on.
+        objectId: item.rowId,
       });
       meshes.push(mesh);
 
@@ -319,8 +329,14 @@ export function buildScene(request: SceneRequest): Scene {
   for (const { item, surface, params } of compiledSurfaces) {
     const overlay = overlays.get(item.rowId);
     if (!overlay) continue;
-    const uMid = (surface.u.min + surface.u.max) / 2;
-    const vMid = (surface.v.min + surface.v.max) / 2;
+    const clamp = (value: number, min: number, max: number) =>
+      Math.min(max, Math.max(min, value));
+    const uMid = overlay.start
+      ? clamp(overlay.start[0], surface.u.min, surface.u.max)
+      : (surface.u.min + surface.u.max) / 2;
+    const vMid = overlay.start
+      ? clamp(overlay.start[1], surface.v.min, surface.v.max)
+      : (surface.v.min + surface.v.max) / 2;
 
     try {
       if (overlay.geodesics > 0) {
@@ -840,6 +856,7 @@ function concatenate(meshes: readonly TessellatedSurface[]): TessellatedSurface 
   const normals = new Float32Array(vertexCount * 3);
   const colors = new Float32Array(vertexCount * 3);
   const chart = new Float32Array(vertexCount * 2);
+  const ids = new Float32Array(vertexCount);
   const curvature = new Float64Array(vertexCount);
   const indices = new Uint32Array(indexCount);
 
@@ -850,6 +867,7 @@ function concatenate(meshes: readonly TessellatedSurface[]): TessellatedSurface 
     normals.set(mesh.normals, vertexOffset * 3);
     colors.set(mesh.colors, vertexOffset * 3);
     chart.set(mesh.chart, vertexOffset * 2);
+    ids.set(mesh.ids, vertexOffset);
     curvature.set(mesh.curvature, vertexOffset);
     for (let i = 0; i < mesh.indices.length; i++) {
       indices[indexOffset + i] = mesh.indices[i]! + vertexOffset;
@@ -863,6 +881,7 @@ function concatenate(meshes: readonly TessellatedSurface[]): TessellatedSurface 
     normals,
     colors,
     chart,
+    ids,
     curvature,
     indices,
     vertexCount,
