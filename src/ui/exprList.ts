@@ -710,62 +710,178 @@ export function createExprList(options: ExprListOptions): ExprList {
     replace(view.paramHost, names.map((name) => sliderRow(name, options.sliders.get(name)!)));
   };
 
-  function sliderRow(name: string, spec: SliderSpec): HTMLElement {
-    const readout = el("span", { class: "slider__value", text: spec.value.toFixed(2) });
+  interface MovingSliderOptions {
+    readonly min: number;
+    readonly max: number;
+    readonly step: number;
+    readonly value: number;
+    /** How the bubble renders the number. */
+    readonly format?: (value: number) => string;
+    readonly title?: string;
+    /** Continuous, while dragging. */
+    readonly onInput: (value: number) => void;
+  }
 
-    const range = el("input", {
+  interface MovingSlider {
+    readonly root: HTMLElement;
+    readonly input: HTMLInputElement;
+    /** Push a value in from outside — the animator, or a reformat. */
+    set(value: number): void;
+  }
+
+  /**
+   * A slider whose value rides above the thumb, with no number box beside it.
+   *
+   * Two things bought at once. The readout used to sit in a fixed column and the exact-value box
+   * in another, so on a toolbar the TRACK — the only part you actually manipulate — got whatever
+   * was left, which was almost nothing. Putting the number on the thumb and dropping the box
+   * gives the track the full width.
+   *
+   * Exact entry survives as double-click: the bubble becomes a field, and a value outside the
+   * current range WIDENS it rather than being refused, which is what the bounds boxes were for.
+   */
+  const movingSlider = (config: MovingSliderOptions): MovingSlider => {
+    const format = config.format ?? ((value: number) => formatValue(value));
+    let min = config.min;
+    let max = config.max;
+
+    const bubble = el("span", { class: "vslider__bubble", text: format(config.value) });
+    const input = el("input", {
       type: "range",
-      class: "slider__input",
+      class: "vslider__input",
+      min,
+      max,
+      step: config.step,
+      value: config.value,
+      title: config.title,
+    }) as HTMLInputElement;
+
+    /**
+     * Where the label sits.
+     *
+     * At rest it rides the thumb, so a glance reads the value. While the pointer is on the
+     * control it follows the POINTER instead — it is a tag on the cursor, which is where the
+     * eye already is during a drag, and the thumb can lag the cursor at the ends of the track
+     * where a value is most often being aimed at precisely.
+     *
+     * The correction term is for the thumb case: a thumb's centre travels from half a
+     * thumb-width in to half a thumb-width from the end, so a straight percentage drifts off it,
+     * worst at exactly those extremes.
+     */
+    const THUMB = 15;
+    const atThumb = (value: number) => {
+      const span = max - min;
+      const fraction = span > 0 ? (value - min) / span : 0.5;
+      const clamped = Math.min(1, Math.max(0, fraction));
+      return `calc(${clamped * 100}% + ${(0.5 - clamped) * THUMB}px)`;
+    };
+    let pointerAt: number | null = null;
+    const place = (value: number) => {
+      bubble.style.left = pointerAt === null ? atThumb(value) : `${pointerAt}px`;
+    };
+    place(config.value);
+
+    const followPointer = (event: PointerEvent) => {
+      const box = input.getBoundingClientRect();
+      // Clamped to the track: past its ends the value has stopped changing, so a label that kept
+      // travelling would point at nothing.
+      pointerAt = Math.min(box.width, Math.max(0, event.clientX - box.left));
+      place(Number(input.value));
+    };
+    input.addEventListener("pointermove", followPointer);
+    input.addEventListener("pointerdown", followPointer);
+    input.addEventListener("pointerleave", () => {
+      pointerAt = null;
+      place(Number(input.value));
+    });
+
+    input.addEventListener("input", () => {
+      const value = Number(input.value);
+      bubble.textContent = format(value);
+      place(value);
+      config.onInput(value);
+    });
+
+    const root = el("div", { class: "vslider" }, [bubble, input]);
+
+    /** Double-click to type an exact value, in place of the box this replaced. */
+    root.addEventListener("dblclick", (event: Event) => {
+      event.preventDefault();
+      const field = el("input", {
+        type: "number",
+        class: "vslider__exact",
+        value: Number(input.value),
+        step: "any",
+      }) as HTMLInputElement;
+      field.style.left = bubble.style.left;
+      bubble.replaceWith(field);
+      field.focus();
+      field.select();
+
+      const finish = (accept: boolean) => {
+        const typed = Number(field.value);
+        field.replaceWith(bubble);
+        if (!accept || !Number.isFinite(typed)) return;
+        // Typing past an end WIDENS the track. Refusing a value the user asked for is exactly
+        // what the removed bounds boxes existed to prevent.
+        if (typed < min) min = typed - Math.abs(typed) * 0.2 - 1e-9;
+        if (typed > max) max = typed + Math.abs(typed) * 0.2 + 1e-9;
+        input.min = String(min);
+        input.max = String(max);
+        input.value = String(typed);
+        bubble.textContent = format(typed);
+        place(typed);
+        config.onInput(typed);
+      };
+      field.addEventListener("blur", () => finish(true));
+      field.addEventListener("keydown", (keyEvent: KeyboardEvent) => {
+        if (keyEvent.key === "Enter") finish(true);
+        else if (keyEvent.key === "Escape") finish(false);
+      });
+    });
+
+    return {
+      root,
+      input,
+      set(value) {
+        input.value = String(value);
+        bubble.textContent = format(value);
+        place(value);
+      },
+    };
+  };
+  function sliderRow(name: string, spec: SliderSpec): HTMLElement {
+    const slider = movingSlider({
       min: spec.min,
       max: spec.max,
       step: spec.step,
       value: spec.value,
-      onInput: () => {
-        spec.value = Number(range.value);
-        readout.textContent = spec.value.toFixed(2);
-        store.setParameter(name, spec.value);
+      title: `${name} \u2014 drag, or double-click to type an exact value`,
+      onInput: (value) => {
+        spec.value = value;
+        // A track widened by typing has to be recorded, or the next rebuild narrows it back.
+        spec.min = Math.min(spec.min, Number(slider.input.min));
+        spec.max = Math.max(spec.max, Number(slider.input.max));
+        store.setParameter(name, value);
         // Parameters are compiled as slots, so this recompiles nothing.
         options.onParameterChange();
       },
-    }) as HTMLInputElement;
-
-    const bound = (which: "min" | "max") =>
-      el("input", {
-        type: "number",
-        class: "field field--tiny",
-        value: spec[which],
-        step: "any",
-        title: `${which} of the slider range`,
-        onChange: (event: Event) => {
-          const next = Number((event.target as HTMLInputElement).value);
-          if (!Number.isFinite(next)) return;
-          spec[which] = next;
-          range.min = String(spec.min);
-          range.max = String(spec.max);
-        },
-      });
+    });
 
     store.setParameter(name, spec.value);
 
     // Registered so the animator can drive this slider's DOM directly.
     options.animator.register(`param:${name}`, spec, (value) => {
-      range.value = String(value);
-      readout.textContent = formatValue(value);
+      slider.set(value);
       store.setParameter(name, value);
     });
 
     return el("div", { class: "slider" }, [
-      el("label", { class: "slider__label" }, [
+      el("span", { class: "slider__name" }, [
         tex(name.length === 1 ? name : `\\mathrm{${name}}`),
-        readout,
       ]),
-      range,
-      el("div", { class: "slider__bounds" }, [
-        bound("min"),
-        el("span", { text: "…" }),
-        bound("max"),
-        transport(`param:${name}`),
-      ]),
+      slider.root,
+      transport(`param:${name}`),
     ]);
   }
 
@@ -809,77 +925,40 @@ export function createExprList(options: ExprListOptions): ExprList {
          * Slider bounds, derived from the interval the row starts with.
          *
          * A domain bound has no natural range of its own — it could be anything — so the track
-         * spans twice the current width either side of it. Wide enough to explore, tight enough
-         * that a drag still resolves finely.
+         * spans twice the current width either side of it. Wide enough to explore, and
+         * double-clicking types a value past the ends when that is not enough.
          */
         const span = Math.abs(entry.max - entry.min) || 1;
         const centre = (entry.min + entry.max) / 2;
         const lo = centre - span * 2;
         const hi = centre + span * 2;
 
-        const number = (which: "min" | "max") =>
-          el("input", {
-            type: "number",
-            class: "field field--tiny",
-            value: Number(entry[which].toFixed(4)),
-            step: "any",
-          }) as HTMLInputElement;
-
-        const slider = (which: "min" | "max") =>
-          el("input", {
-            type: "range",
-            class: "slider__input slider__input--tight",
-            min: lo,
-            max: hi,
-            step: (hi - lo) / 400,
-            value: entry[which],
-          }) as HTMLInputElement;
-
-        const minNumber = number("min");
-        const maxNumber = number("max");
-        const minSlider = slider("min");
-        const maxSlider = slider("max");
-
-        /**
-         * The two controls are kept in step by hand rather than one driving the other, because
-         * they are two views of one number and whichever the user touched must not be written
-         * back to — assigning to an input the user is dragging or typing in fights them.
-         */
         /**
          * Committed through the PARAMETER path, not the edit path.
          *
          * A domain bound changes nothing about the formula — no reparse, no recompile, only a
-         * different sampling interval — so it belongs on the throttled route that runs one draft
-         * render per animation frame and upgrades to full resolution once the drag settles.
-         * `onEdit` debounces, and a debounce waits for quiet: a held slider produced nothing at
-         * all until release and then jumped, which is exactly the jank a throttle exists to
-         * prevent. The same mistake was made once already, on the parameter sliders.
+         * different sampling interval — so it belongs on the throttled route that renders once
+         * per animation frame and upgrades to full resolution when the drag settles. `onEdit`
+         * debounces, and a debounce waits for quiet: a held slider produced nothing at all until
+         * release and then jumped.
          */
-        const commit = (which: "min" | "max", value: number, source: "slider" | "number") => {
-          if (!Number.isFinite(value)) return;
-          entry[which] = value;
-          const numberField = which === "min" ? minNumber : maxNumber;
-          const sliderField = which === "min" ? minSlider : maxSlider;
-          if (source === "slider") numberField.value = String(Number(value.toFixed(4)));
-          else sliderField.value = String(value);
-          options.onParameterChange();
-        };
-
-        minSlider.addEventListener("input", () => commit("min", Number(minSlider.value), "slider"));
-        maxSlider.addEventListener("input", () => commit("max", Number(maxSlider.value), "slider"));
-        minNumber.addEventListener("change", () => commit("min", Number(minNumber.value), "number"));
-        maxNumber.addEventListener("change", () => commit("max", Number(maxNumber.value), "number"));
+        const track = (which: "min" | "max") =>
+          movingSlider({
+            min: lo,
+            max: hi,
+            step: (hi - lo) / 400,
+            value: entry[which],
+            title: `${name} ${which} \u2014 drag, or double-click to type an exact value`,
+            onInput: (value) => {
+              entry[which] = value;
+              options.onParameterChange();
+            },
+          }).root;
 
         return el("div", { class: "domain" }, [
-          el("div", { class: "domain__head" }, [
-            el("span", { class: "domain__var" }, [tex(name)]),
-            el("span", { class: "domain__in", text: "∈" }),
-            minNumber,
-            el("span", { text: "…" }),
-            maxNumber,
-          ]),
-          minSlider,
-          maxSlider,
+          el("span", { class: "domain__var" }, [tex(name)]),
+          track("min"),
+          track("max"),
         ]);
       }),
     );
@@ -1257,115 +1336,74 @@ export function createExprList(options: ExprListOptions): ExprList {
     spec.value = current;
     store.setParameter(name, current);
 
-    const readout = el("span", { class: "slider__value", text: format(current) });
     let lastTypeset = format(current);
-    const range = el("input", {
-      type: "range",
-      class: "slider__input",
+
+    const slider = movingSlider({
       min: spec.min,
       max: spec.max,
       step: spec.step,
       value: spec.value,
+      format,
+      title: `${name} \u2014 drag, or double-click to type an exact value`,
       /**
-       * While dragging, only the parameter *value* moves — never the row text.
+       * While dragging, only the parameter *value* moves — never the row's text.
        *
-       * The row declares a number, and that number compiles to a **slot**, so changing it
-       * leaves every expression in the document byte-identical and the compiled jet is reused
-       * straight from cache. Rewriting `R = 2` to `R = 2.01` on each frame instead would build
-       * a whole new interned tree and re-differentiate the surface sixty times a second, which
-       * is exactly the jank this replaced.
+       * The row declares a number, and that number compiles to a **slot**, so changing it leaves
+       * every expression in the document byte-identical and the compiled jet is reused straight
+       * from cache. Rewriting `R = 2` to `R = 2.01` on each frame would build a whole new
+       * interned tree and re-differentiate the surface sixty times a second, which is exactly
+       * the jank this replaced. The text is reconciled once, when the drag ends.
        */
-      onInput: () => {
-        const next = Number(range.value);
+      onInput: (next) => {
         spec!.value = next;
-        const shown = format(next);
-        readout.textContent = shown;
+        spec!.min = Math.min(spec!.min, Number(slider.input.min));
+        spec!.max = Math.max(spec!.max, Number(slider.input.max));
         store.setParameter(name, next);
-        /**
-         * Keep the typeset view honest while dragging.
-         *
-         * The row's TEXT is deliberately not rewritten until release, so without this the cell
-         * reads `R = 2` while its slider reads 1.95 — the definition disagreeing with the object
-         * on screen. Re-typesetting is guarded on the displayed string actually changing, so a
-         * drag that moves within one rounding step costs nothing, and a numeric row's echo is a
-         * few characters rather than a parametrization.
-         */
+        const shown = format(next);
+        // Keep the typeset view honest while dragging: without this the cell reads `R = 2`
+        // while its slider reads 1.95. Guarded on the displayed string, so a move within one
+        // rounding step costs no typesetting.
         if (shown !== lastTypeset) {
           lastTypeset = shown;
           refreshEcho(views.get(view.id));
         }
         options.onParameterChange();
       },
-      /**
-       * On release, reconcile the row's text with where the slider ended up, so the document
-       * still says what it means. Once per drag, not once per frame.
-       */
-      onChange: () => {
-        const next = Number(range.value);
-        const row = store.rows().find((candidate) => candidate.id === view.id);
-        if (!row) return;
-        const text = `${name} = ${format(next)}`;
-        view.input.value = text;
-        row.source.set(text);
-        refreshEcho(view);
-        options.onEdit(false);
-      },
-    }) as HTMLInputElement;
+    });
 
-    const bound = (which: "min" | "max") =>
-      el("input", {
-        type: "number",
-        class: "field field--tiny",
-        value: Number(spec![which].toFixed(4)),
-        step: "any",
-        title: `${which} of the slider range`,
-        onChange: (event: Event) => {
-          const next = Number((event.target as HTMLInputElement).value);
-          if (!Number.isFinite(next)) return;
-          spec![which] = next;
-          range.min = String(spec!.min);
-          range.max = String(spec!.max);
-        },
-      });
+    slider.input.addEventListener("change", () => {
+      // On release, reconcile the row's text with where the slider ended up, so the document
+      // still says what it means. Once per drag, not once per frame.
+      const next = Number(slider.input.value);
+      const row = store.rows().find((candidate) => candidate.id === view.id);
+      if (!row) return;
+      row.source.set(`${name} = ${format(next)}`);
+      refreshEcho(views.get(view.id));
+      options.onEdit(false);
+    });
 
-    /**
-     * The animator moves the parameter slot every frame but rewrites the row's text only on
-     * pause. Rewriting it per frame would rebuild the whole interned expression tree sixty
-     * times a second — the same trap that made dragging janky before parameters became slots.
-     */
     options.animator.register(
       `row:${view.id}`,
       spec,
-      (next) => {
-        range.value = String(next);
-        readout.textContent = format(next);
-        store.setParameter(name, next);
+      (value) => {
+        slider.set(value);
+        store.setParameter(name, value);
       },
-      (next) => {
+      (value) => {
         const row = store.rows().find((candidate) => candidate.id === view.id);
-        if (!row) return;
-        const text = `${name} = ${format(next)}`;
-        view.input.value = text;
-        row.source.set(text);
+        if (row) row.source.set(`${name} = ${format(value)}`);
         options.onEdit(false);
       },
     );
 
     replace(view.valueHost, [
       el("div", { class: "slider" }, [
-        el("label", { class: "slider__label" }, [
-          el("span", { text: "value" }),
-          readout,
-        ]),
-        range,
-        el("div", { class: "slider__bounds" }, [
-          bound("min"),
-          el("span", { text: "…" }),
-          bound("max"),
-          transport(`row:${view.id}`),
-        ]),
+        el("span", { class: "slider__name" }, [tex(name.length === 1 ? name : `\\mathrm{${name}}`)]),
+        slider.root,
+        transport(`row:${view.id}`),
       ]),
     ]);
+
   };
 
   /** Re-typeset one row's echo. KaTeX is the expensive part, so this is called sparingly. */

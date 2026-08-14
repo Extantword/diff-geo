@@ -143,7 +143,7 @@ describe("the toolbar's contents", () => {
     document.body.append(list.root, list.card);
     list.refresh([]);
     void store;
-    expect(list.root.querySelector(".row__value .slider__input")).not.toBeNull();
+    expect(list.root.querySelector(".row__value .vslider__input")).not.toBeNull();
   });
 });
 
@@ -166,7 +166,7 @@ describe("a numeric cell's typeset view", () => {
     const echo = list.root.querySelector(".formula__echo")!;
     expect(echo.textContent).toContain("2");
 
-    const range = list.root.querySelector<HTMLInputElement>(".row__value .slider__input")!;
+    const range = list.root.querySelector<HTMLInputElement>(".row__value .vslider__input")!;
     range.value = "3.5";
     range.dispatchEvent(new Event("input"));
 
@@ -239,5 +239,63 @@ describe("the toolbar is compact", () => {
     const info = list.card.querySelector<HTMLElement>(".row__info")!;
     expect(info.title).toContain("Gaussian curvature");
     expect(info.title).toContain("mean curvature");
+  });
+});
+
+describe("sliders with a moving label", () => {
+  beforeEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  it("drops the number boxes so the track gets the width", () => {
+    /**
+     * The whole reason for the redesign: the readout and the exact-value box each held a fixed
+     * column, so on a toolbar the track — the only part you manipulate — got what was left.
+     */
+    const { store, list } = makeList(["X(u,v) = (u, v, 0)"]);
+    document.body.append(list.root, list.card);
+    list.refresh([]);
+    list.select(store.rows()[0]!.id);
+
+    const domain = list.card.querySelector(".row__domain")!;
+    expect(domain.querySelectorAll(".vslider__input").length).toBeGreaterThanOrEqual(2);
+    // No number inputs left beside the tracks.
+    expect(domain.querySelectorAll('input[type="number"]')).toHaveLength(0);
+  });
+
+  it("shows the value on a label rather than in a field", () => {
+    const { list } = makeList(["R = 2"]);
+    document.body.append(list.root);
+    list.refresh([]);
+    const bubble = list.root.querySelector(".vslider__bubble")!;
+    expect(bubble.textContent).toContain("2");
+  });
+
+  it("opens an exact-value field on double-click, and widens the track for a value past its end", () => {
+    /**
+     * Removing the bounds boxes must not remove the ability to reach a value outside the track.
+     * Typing past an end widens it instead of clamping — refusing a number the user explicitly
+     * asked for is precisely what those boxes existed to prevent.
+     */
+    const { list } = makeList(["R = 2"]);
+    document.body.append(list.root);
+    list.refresh([]);
+
+    const slider = list.root.querySelector<HTMLElement>(".row__value .vslider")!;
+    const range = slider.querySelector<HTMLInputElement>(".vslider__input")!;
+    const before = Number(range.max);
+
+    slider.dispatchEvent(new Event("dblclick", { bubbles: true }));
+    const field = slider.querySelector<HTMLInputElement>(".vslider__exact")!;
+    expect(field).not.toBeNull();
+
+    field.value = String(before + 50);
+    field.dispatchEvent(new Event("blur"));
+
+    expect(Number(range.max)).toBeGreaterThan(before);
+    expect(Number(range.value)).toBeCloseTo(before + 50, 6);
+    // And the field is gone again, replaced by the label.
+    expect(slider.querySelector(".vslider__exact")).toBeNull();
+    expect(slider.querySelector(".vslider__bubble")).not.toBeNull();
   });
 });

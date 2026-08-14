@@ -706,9 +706,8 @@ option {
   font-size: 11px;
 }
 
-.props .slider__input {
-  width: 88px;
-  margin: 0;
+.props .vslider {
+  min-width: 150px;
 }
 
 .props .slider__value {
@@ -733,8 +732,8 @@ option {
   margin: 0;
 }
 
-.props .slider__input--tight {
-  width: 56px;
+.props .domain .vslider {
+  min-width: 96px;
 }
 
 .props .field--tiny {
@@ -766,6 +765,62 @@ option {
 
 .props .props__button {
   padding: 1px 6px;
+}
+
+/*
+ * A slider whose number rides above its thumb.
+ *
+ * The point is width: with the readout and the exact-value box each holding a fixed column, the
+ * track got whatever was left over, which on a toolbar was almost nothing. Both are gone — the
+ * value sits on the thumb and an exact one is typed by double-clicking — so the track can have
+ * the room.
+ */
+.vslider {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 120px;
+  /* Head room for the bubble, which is positioned above the track. */
+  padding-top: 13px;
+}
+
+.vslider__input {
+  display: block;
+  width: 100%;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.vslider__bubble,
+.vslider__exact {
+  position: absolute;
+  top: 0;
+  /* `left` is set from the value; this centres the label on that point. */
+  transform: translateX(-50%);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 10.5px;
+  line-height: 1.1;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.vslider__bubble {
+  color: var(--text);
+}
+
+.vslider__exact {
+  width: 66px;
+  padding: 0 3px;
+  background: var(--field);
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  color: var(--text);
+  pointer-events: auto;
+  text-align: center;
+}
+
+.slider__name {
+  flex: 0 0 auto;
+  font-size: 11px;
 }
 
 /*
