@@ -1252,6 +1252,7 @@ export function createExprList(options: ExprListOptions): ExprList {
     store.setParameter(name, current);
 
     const readout = el("span", { class: "slider__value", text: format(current) });
+    let lastTypeset = format(current);
     const range = el("input", {
       type: "range",
       class: "slider__input",
@@ -1271,8 +1272,22 @@ export function createExprList(options: ExprListOptions): ExprList {
       onInput: () => {
         const next = Number(range.value);
         spec!.value = next;
-        readout.textContent = format(next);
+        const shown = format(next);
+        readout.textContent = shown;
         store.setParameter(name, next);
+        /**
+         * Keep the typeset view honest while dragging.
+         *
+         * The row's TEXT is deliberately not rewritten until release, so without this the cell
+         * reads `R = 2` while its slider reads 1.95 — the definition disagreeing with the object
+         * on screen. Re-typesetting is guarded on the displayed string actually changing, so a
+         * drag that moves within one rounding step costs nothing, and a numeric row's echo is a
+         * few characters rather than a parametrization.
+         */
+        if (shown !== lastTypeset) {
+          lastTypeset = shown;
+          refreshEcho(views.get(view.id));
+        }
         options.onParameterChange();
       },
       /**
@@ -1368,7 +1383,21 @@ export function createExprList(options: ExprListOptions): ExprList {
     if (!view) return;
     const row = store.rows().find((candidate) => candidate.id === view.id);
     if (!row) return;
-    replace(view.echo, [echoFor(row.source())]);
+    replace(view.echo, [echoFor(row.source(), liveValueOf(view.id))]);
+  };
+
+  /**
+   * What a numeric cell is worth RIGHT NOW, if it is being dragged away from what it says.
+   *
+   * A row like `R = 2` is a definition and a control at once, and dragging its slider deliberately
+   * does not rewrite the text — rebuilding the interned tree on every frame is what made the whole
+   * thing janky once. The consequence is that the cell can read `R = 2` while its slider reads
+   * 1.95, which is the definition disagreeing with the object on screen. The typeset view shows
+   * the live number instead; the text is reconciled when the drag ends.
+   */
+  const liveValueOf = (id: RowId): number | null => {
+    const spec = options.rowSliders.get(id);
+    return spec ? spec.value : null;
   };
 
   /** The per-row notes: diagnostics, compile errors, readouts. Cheap; no typesetting. */
@@ -1598,14 +1627,18 @@ function diagnosticNode(diagnostic: Diagnostic): HTMLElement {
  * side; a bare expression is echoed directly. An unparseable row shows a dash rather than
  * clearing, so the panel does not flicker mid-word.
  */
-function echoFor(source: string): HTMLElement {
+function echoFor(source: string, liveValue: number | null = null): HTMLElement {
   if (source.trim() === "") return el("span", { class: "echo-empty", text: " " });
 
   const { row } = parseRow(source);
   if (row) {
     switch (row.kind) {
       case "value":
-        return tex(`${nameTex(row.name)} = ${toLatex(row.body)}`);
+        return tex(
+          `${nameTex(row.name)} = ${
+            liveValue === null ? toLatex(row.body) : formatValue(liveValue)
+          }`,
+        );
       case "function":
         return tex(
           `${nameTex(row.name)}\\left(${row.args.map(nameTex).join(", ")}\\right) = ${toLatex(row.body)}`,

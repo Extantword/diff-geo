@@ -146,3 +146,30 @@ describe("the toolbar's contents", () => {
     expect(list.root.querySelector(".row__value .slider__input")).not.toBeNull();
   });
 });
+
+describe("a numeric cell's typeset view", () => {
+  beforeEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  it("shows the live slider value, not the text it was typed with", () => {
+    /**
+     * `R = 2` is a definition and a control at once. Dragging deliberately does not rewrite the
+     * text until release — rebuilding the interned tree every frame is what made this janky once — so
+     * without a live echo the cell reads `R = 2` while its slider reads 1.95, and the definition
+     * disagrees with the object on screen.
+     */
+    const { list } = makeList(["R = 2"]);
+    document.body.append(list.root, list.card);
+    list.refresh([]);
+
+    const echo = list.root.querySelector(".formula__echo")!;
+    expect(echo.textContent).toContain("2");
+
+    const range = list.root.querySelector<HTMLInputElement>(".row__value .slider__input")!;
+    range.value = "3.5";
+    range.dispatchEvent(new Event("input"));
+
+    expect(echo.textContent).toContain("3.5");
+  });
+});
