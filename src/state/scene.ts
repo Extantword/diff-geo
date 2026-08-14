@@ -115,6 +115,14 @@ export interface SurfaceOverlay {
   /** draw the two lines of curvature through the start point */
   readonly curvatureLines: boolean;
   /**
+   * The aim tool: while set, dragging on this surface shoots a geodesic instead of orbiting.
+   *
+   * Per surface rather than global, so the gesture is only stolen on the object the user armed —
+   * dragging anywhere else still moves the camera, which is what keeps the tool from feeling
+   * like a mode you get trapped in.
+   */
+  readonly aiming?: boolean;
+  /**
    * Draw the Gauss image on a sphere beside the surface.
    *
    * Side by side rather than in its own viewport: the two meshes share a colour scale and a vertex
@@ -130,6 +138,21 @@ export interface SurfaceOverlay {
    * a triangle whose interpolated (u, v) can sit a hair past the last sample row.
    */
   readonly start?: readonly [number, number];
+  /**
+   * Individually aimed geodesics, each with its own start and initial direction.
+   *
+   * Distinct from `geodesics`, which fans a symmetric spray from one point. A spray answers "what
+   * do the geodesics through here look like"; these answer "what happens if I go THAT way", which
+   * is the question you ask by dragging. They accumulate, so a surface can be explored one
+   * direction at a time.
+   */
+  readonly shots?: readonly GeodesicShot[];
+}
+
+/** One aimed geodesic: where it starts and which way it leaves, both in chart coordinates. */
+export interface GeodesicShot {
+  readonly start: readonly [number, number];
+  readonly direction: readonly [number, number];
 }
 
 /**
@@ -214,6 +237,13 @@ export interface Scene {
   readonly bounds: { center: Vec3; radius: number } | null;
   /** the shared colour scale, for the legend */
   readonly curvatureScale: number;
+  /**
+   * Where a surface's chart point sits in space, or null if that row is not a surface.
+   *
+   * Exists so an interaction can turn a picked (u, v) back into a 3D position without rebuilding
+   * the scene — aiming a geodesic needs a point per pointer move, and a rebuild is ~150 ms.
+   */
+  positionOf(rowId: RowId, u: number, v: number): Vec3 | null;
 }
 
 /** Distinct colours for curves, cycled by row order. */
@@ -285,7 +315,7 @@ const B_COLOR: Vec3 = [0.80, 0.15, 0.15];
 const POINT_COLOR: Vec3 = [0.85, 0.45, 0.0];
 
 /** A two-point polyline standing in for one frame vector. */
-function arrow(from: Vec3, direction: Vec3, length: number, color: Vec3): Polyline {
+export function arrow(from: Vec3, direction: Vec3, length: number, color: Vec3): Polyline {
   return {
     points: new Float64Array([
       from[0],
@@ -552,6 +582,46 @@ export function buildScene(request: SceneRequest): Scene {
               .join(", ")}`,
           });
         }
+      }
+
+      /**
+       * Aimed geodesics, one per drag.
+       *
+       * Each carries its own start, so they are integrated independently of the spray's centre
+       * and of each other — dragging somewhere else does not disturb the ones already shot.
+       */
+      const shots = overlay.shots ?? [];
+      if (shots.length > 0) {
+        const aimed: Polyline[] = [];
+        const shotStops = new Map<string, number>();
+        for (const shot of shots) {
+          const geodesic = integrateGeodesic(
+            surface,
+            params,
+            [shot.start[0], shot.start[1]],
+            [shot.direction[0], shot.direction[1]],
+            sceneExtent * overlay.geodesicLength,
+            { bounds, maxStepArc },
+          );
+          shotStops.set(geodesic.stop, (shotStops.get(geodesic.stop) ?? 0) + 1);
+          if (geodesic.chart.length < 2) continue;
+          aimed.push(
+            liftedPolyline(
+              surface,
+              params,
+              geodesic.chart,
+              overlayLift,
+              colorOf(item.rowId, GEODESIC_COLOR),
+            ),
+          );
+        }
+        if (aimed.length > 0) lines.push({ polylines: aimed, style: { widthPx: 3.0 } });
+        reports.push({
+          rowId: item.rowId,
+          info: `${aimed.length} aimed · ${[...shotStops]
+            .map(([reason, count]) => `${count} ${reason}`)
+            .join(", ")}`,
+        });
       }
 
       if (overlay.curvatureLines) {
@@ -867,6 +937,15 @@ export function buildScene(request: SceneRequest): Scene {
     reports: mergeReports(reports),
     bounds,
     curvatureScale,
+    positionOf(rowId, u, v) {
+      const found = compiledSurfaces.find((entry) => entry.item.rowId === rowId);
+      if (!found) return null;
+      const out: Vec3 = [0, 0, 0];
+      found.surface.position(u, v, found.params, out);
+      return Number.isFinite(out[0]) && Number.isFinite(out[1]) && Number.isFinite(out[2])
+        ? out
+        : null;
+    },
   };
 }
 

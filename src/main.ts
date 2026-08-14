@@ -13,6 +13,8 @@ import { createAnimator } from "./ui/animate.ts";
 import { createExprList, type SliderSpec } from "./ui/exprList.ts";
 import { createTemplatePicker } from "./ui/templates.ts";
 import type { Vec3 } from "./core/geom/types.ts";
+import type { LineGroup } from "./gl/passes/lines.ts";
+import { arrow, type Scene } from "./state/scene.ts";
 import { el, replace } from "./ui/dom.ts";
 
 /**
@@ -121,7 +123,9 @@ function main() {
     });
 
     renderer.setSurfaceMesh(scene.mesh ?? EMPTY_MESH);
-    renderer.setLines(scene.lines);
+    lastScene = scene;
+    sceneLines = scene.lines;
+    paintLines();
     renderer.setChartLines(scene.chartLines);
     renderer.setChartBounds(chartVisible ? scene.chartBounds : null);
 
@@ -245,65 +249,182 @@ function main() {
   animator.setOnTick(() => onParameterChange());
 
   /**
-   * Click a surface to move where its geodesics and curvature lines start from.
+   * Pointer gestures on the canvas: orbit, select, and aim a geodesic.
    *
-   * ## Telling a click from an orbit
+   * ## A tool state machine, not a flag
    *
-   * The camera owns its own drag listeners on the same canvas, so both gestures begin with a
-   * pointerdown in the same place. Rather than suspending the camera behind a flag — the
-   * precedent's `aiming` boolean, which gets "started on the background, dragged onto the
-   * surface" wrong in both directions — this decides *after the fact*: a pointerup that stayed
-   * within a few pixels of its pointerdown was a click, and anything else was an orbit. A
-   * stationary drag rotates the camera by nothing, so no gesture is stolen either way.
+   * The camera owns its own drag listeners on the same canvas, so every gesture — orbiting,
+   * selecting, aiming — begins with an identical pointerdown. The precedent resolved this with an
+   * `aiming` boolean, which gets "started on the background, dragged across the surface" wrong in
+   * both directions: it has to be set before anyone knows what the drag will turn out to be.
+   *
+   * So the OWNER IS DECIDED ON POINTERDOWN AND FIXED FOR THE WHOLE DRAG. A press that lands on a
+   * surface whose aim tool is armed becomes an aim and stays one wherever the cursor wanders;
+   * anything else is left to the camera. The listeners run in the CAPTURE phase so this decision
+   * is made before the camera's own handler sees the event and starts orbiting.
    */
-  let pressX = 0;
-  let pressY = 0;
-  let pressed = false;
+  type Gesture =
+    | { readonly kind: "idle" }
+    | { readonly kind: "camera"; readonly x: number; readonly y: number }
+    | {
+        readonly kind: "aim";
+        readonly rowId: RowId;
+        readonly u: number;
+        readonly v: number;
+        readonly origin: Vec3;
+      };
+
+  let gesture: Gesture = { kind: "idle" };
+  /** The aiming arrow's colour: the geodesic amber, so the preview names what it will become. */
+  const AIM_COLOR: Vec3 = [0.85, 0.55, 0.0];
+  /** The direction being aimed, in CHART coordinates — what the integrator actually needs. */
+  let aimChart: [number, number] = [0, 0];
+  /** The scene as last built, for turning a picked (u, v) back into a point without rebuilding. */
+  let lastScene: Scene | null = null;
+  const surfacePointAt = (rowId: RowId, u: number, v: number): Vec3 | null =>
+    lastScene?.positionOf(rowId, u, v) ?? null;
   /** How far the pointer may travel and still count as a click, in CSS pixels. */
   const CLICK_SLOP = 4;
+  /** Lines from the last built scene, so a preview can be drawn without rebuilding it. */
+  let sceneLines: readonly LineGroup[] = [];
+  /** The live aiming arrow, drawn on top of the scene during a drag. */
+  let previewLines: LineGroup[] = [];
 
-  canvas.addEventListener("pointerdown", (event: PointerEvent) => {
-    pressed = true;
-    pressX = event.clientX;
-    pressY = event.clientY;
-  });
+  const paintLines = () => {
+    renderer.setLines(previewLines.length === 0 ? sceneLines : [...sceneLines, ...previewLines]);
+  };
 
-  canvas.addEventListener("pointerup", (event: PointerEvent) => {
-    if (!pressed) return;
-    pressed = false;
-    const travelled = Math.hypot(event.clientX - pressX, event.clientY - pressY);
-    if (travelled > CLICK_SLOP) return;
-
+  const pickAt = (event: PointerEvent) => {
     const rect = canvas.getBoundingClientRect();
-    const hit = renderer.pick(event.clientX - rect.left, event.clientY - rect.top);
+    return renderer.pick(event.clientX - rect.left, event.clientY - rect.top);
+  };
 
-    // Clicking empty space deselects, which is the only way to dismiss the card without
-    // reaching for its close button.
-    if (!hit) {
-      list.select(null);
-      return;
-    }
+  canvas.addEventListener(
+    "pointerdown",
+    (event: PointerEvent) => {
+      const hit = pickAt(event);
+      const overlay = hit ? overlays.get(hit.rowId) : undefined;
 
-    // Selecting an object opens its properties. This is the same act as clicking its row, and
-    // both land in the list so the highlight and the card can never disagree.
-    list.select(hit.rowId);
-    pickedAt = { u: hit.u, v: hit.v };
+      if (hit && overlay?.aiming) {
+        /**
+         * Aiming owns this drag. The camera is suspended for its duration rather than for as
+         * long as the tool is armed, so orbiting still works by dragging anywhere off the
+         * surface even while the tool is on.
+         */
+        const origin = surfacePointAt(hit.rowId, hit.u, hit.v);
+        if (origin) {
+          gesture = { kind: "aim", rowId: hit.rowId, u: hit.u, v: hit.v, origin };
+          renderer.camera.setAiming(true);
+          canvas.setPointerCapture(event.pointerId);
+          event.stopPropagation();
+          event.preventDefault();
+          return;
+        }
+      }
+      gesture = { kind: "camera", x: event.clientX, y: event.clientY };
+    },
+    { capture: true },
+  );
 
-    /**
-     * A click on an armed surface also moves where its curves start.
-     *
-     * Only rows already showing an overlay respond: clicking a bare surface should select it and
-     * nothing more, rather than silently arming a feature the user has not asked for.
-     */
-    const overlay = overlays.get(hit.rowId);
-    if (overlay && (overlay.geodesics > 0 || overlay.curvatureLines)) {
-      overlays.set(hit.rowId, { ...overlay, start: [hit.u, hit.v] });
-    }
-    onEdit(false);
-  });
+  canvas.addEventListener(
+    "pointermove",
+    (event: PointerEvent) => {
+      if (gesture.kind !== "aim") return;
+      const hit = pickAt(event);
+      // Off the surface: keep the last arrow rather than dropping it, so a cursor that strays
+      // past the silhouette mid-drag does not make the preview flicker.
+      if (!hit || hit.rowId !== gesture.rowId) return;
+
+      const target = surfacePointAt(gesture.rowId, hit.u, hit.v);
+      if (!target) return;
+      const direction: Vec3 = [
+        target[0] - gesture.origin[0],
+        target[1] - gesture.origin[1],
+        target[2] - gesture.origin[2],
+      ];
+      const length = Math.hypot(direction[0], direction[1], direction[2]);
+      if (length < 1e-9) return;
+
+      aimChart = [hit.u - gesture.u, hit.v - gesture.v];
+      previewLines = [
+        {
+          polylines: [arrow(gesture.origin, direction, length, AIM_COLOR)],
+          style: { widthPx: 3.4 },
+        },
+      ];
+      paintLines();
+      renderer.invalidate();
+      event.stopPropagation();
+    },
+    { capture: true },
+  );
+
+  canvas.addEventListener(
+    "pointerup",
+    (event: PointerEvent) => {
+      const finished = gesture;
+      gesture = { kind: "idle" };
+      previewLines = [];
+
+      if (finished.kind === "aim") {
+        renderer.camera.setAiming(false);
+        paintLines();
+        const overlay = overlays.get(finished.rowId);
+        const [du, dv] = aimChart;
+        aimChart = [0, 0];
+        // A drag that never left its start has no direction to shoot along.
+        if (overlay && (du !== 0 || dv !== 0)) {
+          overlays.set(finished.rowId, {
+            ...overlay,
+            shots: [
+              ...(overlay.shots ?? []),
+              { start: [finished.u, finished.v], direction: [du, dv] },
+            ],
+          });
+          onEdit(false);
+        }
+        return;
+      }
+
+      if (finished.kind !== "camera") return;
+      const travelled = Math.hypot(event.clientX - finished.x, event.clientY - finished.y);
+      if (travelled > CLICK_SLOP) return;
+
+      const hit = pickAt(event);
+
+      // Clicking empty space deselects, which is the only way to dismiss the card without
+      // reaching for its close button.
+      if (!hit) {
+        list.select(null);
+        return;
+      }
+
+      // Selecting an object opens its properties. This is the same act as clicking its row, and
+      // both land in the list so the highlight and the card can never disagree.
+      list.select(hit.rowId);
+      pickedAt = { u: hit.u, v: hit.v };
+
+      /**
+       * A click on an armed surface also moves where its spray and curvature lines start.
+       *
+       * Only rows already showing one respond: clicking a bare surface should select it and
+       * nothing more, rather than silently arming a feature the user has not asked for.
+       */
+      const overlay = overlays.get(hit.rowId);
+      if (overlay && (overlay.geodesics > 0 || overlay.curvatureLines)) {
+        overlays.set(hit.rowId, { ...overlay, start: [hit.u, hit.v] });
+      }
+      onEdit(false);
+    },
+    { capture: true },
+  );
 
   canvas.addEventListener("pointercancel", () => {
-    pressed = false;
+    if (gesture.kind === "aim") renderer.camera.setAiming(false);
+    gesture = { kind: "idle" };
+    previewLines = [];
+    aimChart = [0, 0];
+    paintLines();
   });
 
   const chartToggle = el("input", {
@@ -322,40 +443,48 @@ function main() {
       renderer.setCurvatureMix((event.target as HTMLInputElement).checked ? 1 : 0),
   });
 
+  /**
+   * Scene-wide controls, in a card of their own on the stage.
+   *
+   * The expression bar is only cells now, so everything that is about the SCENE rather than about
+   * one object had to go somewhere. Bottom left keeps it clear of the properties card (top right)
+   * and of the chart inset (bottom right, drawn into the canvas itself). It starts collapsed so
+   * the default view is the geometry and a column of cells, and nothing else.
+   */
+  const sceneBody = el("div", { class: "scene-card__body" }, [
+    templates,
+    el("section", { class: "panel-section" }, [
+      el("h2", { class: "section-title", text: "Gaussian curvature" }),
+      el("label", { class: "toggle" }, [curvatureToggle, el("span", { text: "paint K" })]),
+      el("div", { class: "legend", style: `background:${legendGradient()}` }),
+      legendLabels,
+    ]),
+    el("section", { class: "panel-section" }, [
+      el("h2", { class: "section-title", text: "Chart" }),
+      el("label", { class: "toggle" }, [
+        chartToggle,
+        el("span", { text: "show the (u, v) plane" }),
+      ]),
+    ]),
+    el("section", { class: "panel-section" }, [
+      el("h2", { class: "section-title", text: "Scene" }),
+      stats,
+    ]),
+  ]);
+  sceneBody.classList.add("scene-card__body--hidden");
+
+  const sceneToggle = el("button", {
+    class: "scene-card__toggle",
+    title: "scene settings",
+    text: "\u2699 scene",
+    onClick: () => sceneBody.classList.toggle("scene-card__body--hidden"),
+  });
+  const sceneCard = el("div", { class: "scene-card" }, [sceneToggle, sceneBody]);
+  canvas.parentElement?.append(sceneCard);
+
   const panel = document.querySelector<HTMLElement>(".panel");
-  if (panel) {
-    replace(panel, [
-      el("header", { class: "panel-header" }, [
-        el("h1", { text: "DiffGeo" }),
-        el("p", { text: "Curves and surfaces in R³, after do Carmo." }),
-      ]),
-      templates,
-      list.root,
-      el("section", { class: "panel-section" }, [
-        el("h2", { class: "section-title", text: "Gaussian curvature" }),
-        el("label", { class: "toggle" }, [curvatureToggle, el("span", { text: "paint K" })]),
-        el("div", { class: "legend", style: `background:${legendGradient()}` }),
-        legendLabels,
-      ]),
-      el("section", { class: "panel-section" }, [
-        el("h2", { class: "section-title", text: "Chart" }),
-        el("label", { class: "toggle" }, [
-          chartToggle,
-          el("span", { text: "show the (u, v) plane" }),
-        ]),
-        el("p", {
-          class: "blurb",
-          text:
-            "The domain of the first surface, drawn flat. Tick “read as (u, v)” on a " +
-            "two-component curve to draw it here and on the surface at once.",
-        }),
-      ]),
-      el("section", { class: "panel-section" }, [
-        el("h2", { class: "section-title", text: "Scene" }),
-        stats,
-      ]),
-    ]);
-  }
+  // Only the cells. Everything else lives on the stage, next to what it affects.
+  if (panel) replace(panel, [list.root]);
 
   render(FULL_RESOLUTION, true, true);
 }

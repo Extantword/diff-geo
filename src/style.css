@@ -670,6 +670,93 @@ option {
   cursor: pointer;
 }
 
+/* ---- scene settings, floating bottom left ---- */
+
+.scene-card {
+  position: absolute;
+  left: 14px;
+  bottom: 14px;
+  max-width: 300px;
+  /* Clear of the stage hint along the bottom and of the chart inset on the right. */
+  max-height: calc(100% - 60px);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.scene-card__toggle {
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 5px 10px;
+}
+
+.scene-card__toggle:hover {
+  color: var(--text);
+}
+
+.scene-card__body {
+  order: -1;
+  overflow-y: auto;
+  margin-bottom: 8px;
+  padding: 4px 14px 14px;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  box-shadow: 0 6px 24px rgba(20, 30, 45, 0.12);
+}
+
+.scene-card__body--hidden {
+  display: none;
+}
+
+/* ---- the cell bar ---- */
+
+/*
+ * Nothing but cells. No headings, no add button, no parameter list — a new cell appears as the
+ * last one is used, and everything about an object lives in its card.
+ */
+.cells {
+  padding: 4px 0;
+}
+
+.row__tools {
+  display: flex;
+  justify-content: flex-end;
+  gap: 2px;
+  margin-top: 4px;
+  /* Hidden until the row is hovered or holds the caret, so the resting bar has no chrome. */
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.row:hover .row__tools,
+.row:focus-within .row__tools {
+  opacity: 1;
+}
+
+.row__params:not(:empty) {
+  margin-bottom: 6px;
+}
+
+.props__button {
+  background: transparent;
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 2px 8px;
+}
+
+.props__button:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
 /* ---- rows, now inputs only ---- */
 
 /* The selected row and its card are the same object seen twice, so the list has to say which

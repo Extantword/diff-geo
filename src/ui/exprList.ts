@@ -149,6 +149,10 @@ interface RowView {
   readonly details: HTMLElement;
   readonly colorSwatch: HTMLInputElement;
   readonly detailsTitle: HTMLElement;
+  /** sliders for the free parameters THIS row uses */
+  readonly paramHost: HTMLElement;
+  /** the parameter names those sliders were built for */
+  paramNames: string;
   overlayBuilt: boolean;
   /** the name the inline slider was built for, or "" if there is none */
   valueName: string;
@@ -200,11 +204,6 @@ export function createExprList(options: ExprListOptions): ExprList {
     }
     card.classList.toggle("props--hidden", id === null || !views.has(id));
   };
-  const sliderHost = el("div", { class: "sliders" });
-  const sliderEmpty = el("p", {
-    class: "blurb",
-    text: "Any symbol you use without defining it becomes a slider here.",
-  });
 
   const views = new Map<RowId, RowView>();
   /** the parameter list the sliders were built for */
@@ -212,24 +211,55 @@ export function createExprList(options: ExprListOptions): ExprList {
   /** Rows whose chart default has already been applied, so a later edit does not re-apply it. */
   const seenChartRows = new Set<RowId>();
 
-  const addButton = el("button", {
-    class: "add-row",
-    text: "+ add expression",
-    onClick: () => {
-      store.addRow("");
-      syncRows();
-      options.onEdit(false);
-      const last = [...views.values()].at(-1);
-      last?.input.focus();
-    },
-  });
 
   /**
    * Create and destroy row elements to match the document, leaving existing rows' DOM
    * untouched. This is the keyed-list reconciliation the design notes insisted on writing
    * before any feature UI: without it, editing row 1 rebuilds row 2 and steals its focus.
    */
+  /**
+   * Keep exactly one empty cell at the end.
+   *
+   * Typing into the last cell immediately opens another below it, so there is always somewhere to
+   * write and never an "add" button to find. Trailing empties beyond the first are collapsed, so
+   * the bar cannot grow a tail of blanks.
+   */
+  const ensureTrailingCell = () => {
+    const rows = store.rows();
+    const trailing: RowId[] = [];
+    for (let i = rows.length - 1; i >= 0; i--) {
+      if (rows[i]!.source().trim() !== "") break;
+      trailing.push(rows[i]!.id);
+    }
+    if (trailing.length === 0) {
+      store.addRow("");
+      return true;
+    }
+    let changed = false;
+    // Keep the LAST empty cell rather than the first, so the one the user is looking at survives.
+    for (const id of trailing.slice(1)) {
+      /**
+       * Never collapse the cell the caret is in.
+       *
+       * Without this, CLEARING a cell just above the trailing blank makes it a trailing blank
+       * too — and it would be deleted mid-keystroke, out from under the user. Emptying a cell
+       * has to be a survivable state, because it is on the way to retyping it.
+       */
+      if (views.get(id)?.input === globalThis.document.activeElement) continue;
+      store.removeRow(id);
+      views.get(id)?.root.remove();
+      views.get(id)?.details.remove();
+      views.delete(id);
+      if (selectedId === id) select(null);
+      changed = true;
+    }
+    return changed;
+  };
+
   const syncRows = () => {
+    // Before laying anything out, so the new blank cell is created in the same pass and the list
+    // is only walked once.
+    ensureTrailingCell();
     const rows = store.rows();
     const seen = new Set<RowId>();
 
@@ -287,6 +317,9 @@ export function createExprList(options: ExprListOptions): ExprList {
         // Re-rendering every row's KaTeX on each keystroke was a measurable cost for text
         // that did not move.
         refreshEcho(views.get(id));
+        // Typing into the last cell opens the next one. `syncRows` is only called when that
+        // actually changed something, so an ordinary keystroke costs nothing extra.
+        if (ensureTrailingCell()) syncRows();
         options.onEdit(false);
       },
     }) as HTMLInputElement;
@@ -330,20 +363,27 @@ export function createExprList(options: ExprListOptions): ExprList {
         },
       });
 
+    /**
+     * A cell is the input and its typeset echo, nothing else.
+     *
+     * The kind label and the diagnostics used to sit here; both moved to the card, so the bar
+     * reads as a column of cells rather than as a stack of little reports. The echo stays,
+     * because it is the only thing that shows how a formula was PARSED — implicit multiplication
+     * and precedence stop being frightening exactly when you can see them resolved.
+     *
+     * The row tools appear on hover, so the resting state of the bar has no chrome at all.
+     */
     const root = el("div", {
       class: "row",
       onClick: () => select(id),
     }, [
-      el("div", { class: "row__head" }, [
-        badge,
-        el("span", { class: "row__spacer" }),
+      input,
+      echo,
+      el("div", { class: "row__tools" }, [
         shift(-1, "\u2191", "move up"),
         shift(1, "\u2193", "move down"),
         remove,
       ]),
-      input,
-      echo,
-      notes,
     ]);
 
     /**
@@ -365,11 +405,15 @@ export function createExprList(options: ExprListOptions): ExprList {
 
     const detailsTitle = el("span", { class: "props__kind", text: "expression" });
 
+    const paramHost = el("div", { class: "row__params" });
+
     const details = el("div", { class: "props__body" }, [
+      notes,
       el("label", { class: "props__row" }, [
         el("span", { text: "colour" }),
         colorSwatch,
       ]),
+      paramHost,
       valueHost,
       chartHost,
       domainHost,
@@ -392,7 +436,9 @@ export function createExprList(options: ExprListOptions): ExprList {
       details,
       colorSwatch,
       detailsTitle,
+      paramHost,
       overlayBuilt: false,
+      paramNames: "\u0000",
       domainVars: "",
       valueName: "",
     };
@@ -460,12 +506,25 @@ export function createExprList(options: ExprListOptions): ExprList {
     if (signature === renderedSliders) return;
     renderedSliders = signature;
 
-    replace(
-      sliderHost,
-      names.length > 0
-        ? names.map((name) => sliderRow(name, options.sliders.get(name)!))
-        : [sliderEmpty],
-    );
+  };
+
+  /**
+   * The sliders for the parameters ONE row uses, in that row's card.
+   *
+   * A parameter shared by two rows appears in both cards and drives the same value, which is the
+   * honest presentation: it really is one number, and seeing it from either object that depends
+   * on it is more useful than hiding it in a list far from both.
+   */
+  const syncRowParams = (view: RowView, item: Item | null) => {
+    const names = item
+      ? [...item.params].filter((name) => options.sliders.has(name)).sort()
+      : [];
+    const signature = names.join(",");
+    // Rebuilt only when the set changes, or a refresh mid-drag would replace the very range
+    // input being dragged.
+    if (signature === view.paramNames) return;
+    view.paramNames = signature;
+    replace(view.paramHost, names.map((name) => sliderRow(name, options.sliders.get(name)!)));
   };
 
   function sliderRow(name: string, spec: SliderSpec): HTMLElement {
@@ -712,9 +771,10 @@ export function createExprList(options: ExprListOptions): ExprList {
     let geodesicLength = state.geodesicLength;
     let curvatureLines = state.curvatureLines;
     let gaussMap = state.gaussMap ?? false;
+    let aiming = state.aiming ?? false;
 
     const commit = () => {
-      if (geodesics === 0 && !curvatureLines && !gaussMap) {
+      if (geodesics === 0 && !curvatureLines && !gaussMap && !aiming && shotCount() === 0) {
         // Nothing is drawn, so there is no start point to remember either.
         options.overlays.delete(view.id);
       } else {
@@ -731,7 +791,10 @@ export function createExprList(options: ExprListOptions): ExprList {
           geodesicLength,
           curvatureLines,
           gaussMap,
+          aiming,
           start,
+          // Owned by the canvas, like `start`, so read back rather than captured.
+          shots: options.overlays.get(view.id)?.shots,
         });
       }
       options.onEdit(false);
@@ -793,6 +856,37 @@ export function createExprList(options: ExprListOptions): ExprList {
       commit();
     });
 
+    const shotCount = () => options.overlays.get(view.id)?.shots?.length ?? 0;
+
+    /**
+     * The aim tool.
+     *
+     * While armed, a drag on THIS surface shoots a geodesic along the direction dragged instead
+     * of orbiting. Armed per surface rather than globally so the gesture is only taken on the
+     * object the user pointed at — dragging anywhere else still moves the camera, which is what
+     * keeps this from being a mode you get stuck in.
+     */
+    const aim = el("input", {
+      type: "checkbox",
+      checked: aiming,
+    }) as HTMLInputElement;
+    aim.addEventListener("change", () => {
+      aiming = aim.checked;
+      commit();
+    });
+
+    const clearShots = el("button", {
+      class: "props__button",
+      text: "clear",
+      title: "remove every aimed geodesic",
+      onClick: () => {
+        const overlay = options.overlays.get(view.id);
+        if (!overlay?.shots?.length) return;
+        options.overlays.set(view.id, { ...overlay, shots: [] });
+        options.onEdit(false);
+      },
+    });
+
     replace(view.overlayHost, [
       el("div", { class: "slider" }, [
         el("label", { class: "slider__label" }, [
@@ -819,6 +913,14 @@ export function createExprList(options: ExprListOptions): ExprList {
           el("span", { class: "frame-key__b", text: "k\u2081" }),
           el("span", { class: "curvature-key__2", text: "k\u2082" }),
         ]),
+      ]),
+      el("label", { class: "toggle toggle--tight" }, [
+        aim,
+        el("span", { text: "drag to aim a geodesic" }),
+      ]),
+      el("div", { class: "props__row" }, [
+        el("span", { class: "overlay__hint", text: "drag on the surface to shoot" }),
+        clearShots,
       ]),
       el("label", { class: "toggle toggle--tight" }, [
         gauss,
@@ -1106,6 +1208,7 @@ export function createExprList(options: ExprListOptions): ExprList {
       syncOverlayControl(view, item);
       syncDomain(view, item);
       syncFrameControl(view, item);
+      syncRowParams(view, item);
 
       renderNotes(view, reportById.get(id));
     }
@@ -1115,17 +1218,14 @@ export function createExprList(options: ExprListOptions): ExprList {
     );
   };
 
-  const root = el("div", {}, [
-    el("section", { class: "panel-section" }, [
-      el("h2", { class: "section-title", text: "Expressions" }),
-      rowHost,
-      addButton,
-    ]),
-    el("section", { class: "panel-section" }, [
-      el("h2", { class: "section-title", text: "Parameters" }),
-      sliderHost,
-    ]),
-  ]);
+  /**
+   * The bar is nothing but cells.
+   *
+   * No headings, no add button, no parameter section — a new cell appears as soon as the last one
+   * is used, and everything about an object lives in its card. What is left is the one thing the
+   * bar is for.
+   */
+  const root = el("div", { class: "cells" }, [rowHost]);
 
   syncRows();
 
