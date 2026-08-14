@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "description": "An interactive differential geometry engine for curves and surfaces in R\u00b3 (after do Carmo)",
+  "description": "An interactive differential geometry engine for curves and surfaces in R³ (after do Carmo)",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
@@ -18,6 +18,7 @@
   },
   "devDependencies": {
     "@types/katex": "^0.16.8",
+    "happy-dom": "^20.11.2",
     "typescript": "^7.0.2",
     "vite": "^8.2.1",
     "vite-node": "^6.0.0",

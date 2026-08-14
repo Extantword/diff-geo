@@ -242,7 +242,7 @@ function main() {
    * It spans the full width of the grid's first row, so it has to live in `.app`; nested inside
    * the stage it could only ever have been an overlay on top of the geometry.
    */
-  document.querySelector(".app")?.append(list.card);
+  document.querySelector(".app__props")?.append(list.card);
   const templates = createTemplatePicker({
     document: store,
     sliders,

@@ -53,37 +53,38 @@ body {
 }
 
 /*
- * Cells down the left, properties across the top, stage taking the rest.
+ * Properties across the top, then cells down the left with the stage taking the rest.
  *
  * Two panels on OPPOSITE SIDES was the problem: the cell bar and the properties card each took a
- * bite out of the viewport and left the geometry in a shrinking column between them. Moving
- * properties to a full-width strip along the top costs height only while something is selected —
- * the row collapses to nothing when it is empty — and gives the stage back its right-hand edge.
+ * bite out of the viewport and left the geometry in a shrinking column between them. A full-width
+ * strip along the top costs height only while something is selected, and gives the stage back its
+ * right-hand edge.
+ *
+ * Nested flexbox rather than a single grid with explicit placement. Grid areas depend on rules
+ * matching the right elements, and a mounted-at-runtime child that misses its rule lands wherever
+ * auto-placement puts it — invisible in the markup and hard to see in the result. Nesting makes
+ * the position structural: the strip is where it is because of where it lives.
  */
 .app {
-  display: grid;
-  grid-template-columns: 300px 1fr;
-  grid-template-rows: auto 1fr;
+  display: flex;
+  flex-direction: column;
   height: 100vh;
 }
 
-.app > .props {
-  grid-column: 1 / -1;
-  grid-row: 1;
+.app__body {
+  display: flex;
+  flex: 1;
+  /* Without this a tall panel refuses to shrink and pushes the stage off the bottom. */
+  min-height: 0;
 }
 
-.app > .panel {
-  grid-column: 1;
-  grid-row: 2;
-}
-
-.app > .stage {
-  grid-column: 2;
-  grid-row: 2;
+.app__props {
+  flex: 0 0 auto;
 }
 
 .stage {
   position: relative;
+  flex: 1;
   min-width: 0;
 }
 
@@ -105,6 +106,7 @@ body {
 }
 
 .panel {
+  flex: 0 0 300px;
   background: var(--panel);
   border-right: 1px solid var(--panel-border);
   overflow-y: auto;

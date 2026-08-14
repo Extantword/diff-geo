@@ -7,11 +7,16 @@
   </head>
   <body>
     <div class="app">
-      <aside class="panel"></aside>
-      <main class="stage">
-        <canvas id="stage-canvas"></canvas>
-        <div class="stage-hint">drag to rotate · scroll to zoom · shift-drag to pan</div>
-      </main>
+      <!-- The properties strip mounts here, so its place in the layout is structural rather
+           than something a stylesheet has to be talked into. -->
+      <div class="app__props"></div>
+      <div class="app__body">
+        <aside class="panel"></aside>
+        <main class="stage">
+          <canvas id="stage-canvas"></canvas>
+          <div class="stage-hint">drag to rotate · scroll to zoom · shift-drag to pan</div>
+        </main>
+      </div>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
