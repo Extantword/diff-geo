@@ -1087,6 +1087,34 @@ option {
   background: #157a42;
 }
 
+/*
+ * The roadmap note, down the right-hand edge.
+ *
+ * Placed clear of the tools above it and the chart inset below, and made unclickable so it can
+ * never intercept a drag meant for the scene behind it.
+ */
+.roadmap {
+  position: absolute;
+  top: 62px;
+  right: 14px;
+  max-width: 190px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--text-faint);
+  font-size: 11px;
+  line-height: 1.45;
+  text-align: right;
+  pointer-events: none;
+}
+
+.roadmap__label {
+  color: var(--accent);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
 /* ---- right-click menu ---- */
 
 .context-menu {

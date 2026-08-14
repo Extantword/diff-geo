@@ -868,6 +868,22 @@ function main() {
     el("div", { class: "stage-tools" }, [templatesButton, templatesPanel]),
   );
 
+  /**
+   * What is coming, on the stage rather than in a file.
+   *
+   * Kept where the work is visible so the direction stays in view while using the thing, rather
+   * than living only in a plan nobody has open.
+   */
+  canvas.parentElement?.append(
+    el("aside", { class: "roadmap" }, [
+      el("span", { class: "roadmap__label", text: "A continuación" }),
+      el("span", {
+        class: "roadmap__items",
+        text: "Campos vectoriales · métricas · piezas ensamblables",
+      }),
+    ]),
+  );
+
   const sceneBody = el("div", { class: "scene-card__body" }, [
     el("section", { class: "panel-section" }, [
       el("h2", { class: "section-title", text: "Gaussian curvature" }),
