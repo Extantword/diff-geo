@@ -314,20 +314,20 @@ describe("parameter values in the typeset view", () => {
     document.body.innerHTML = "";
   });
 
-  it("substitutes a declared parameter's value into a surface", () => {
+  it("shows a parameter's value under its symbol, keeping both", () => {
     /**
-     * The typeset view is meant to show what is ON SCREEN, and what is on screen is a torus of
-     * some particular size — so a bare `R` is a promise the reader has to go elsewhere to
-     * redeem. Substituting keeps the formula and the object in agreement.
+     * Replacing `R` by 2 showed the value and destroyed the structure: `(R cos u, R sin u, v)`
+     * says what the surface IS, and `(2 cos u, 2 sin u, v)` says what one instance measures. Both
+     * are wanted, and they do not compete for the same space — the symbol keeps its place and the
+     * number sits beneath it.
      */
     const { list } = makeList(["R = 2", "X(u,v) = (R cos u, R sin u, v)"]);
     document.body.append(list.root, list.card);
     list.refresh([]);
 
-    const echoes = [...list.root.querySelectorAll(".formula__echo")];
-    const surface = echoes[1]!;
+    const surface = [...list.root.querySelectorAll(".formula__echo")][1]!;
     expect(surface.textContent).toContain("2");
-    expect(surface.textContent).not.toContain("R");
+    expect(surface.textContent).toContain("R");
   });
 
   it("leaves the chart coordinates symbolic", () => {
@@ -456,5 +456,35 @@ describe("the window in cursor placement", () => {
     expect(panel.querySelector(".row__domain")).not.toBeNull();
     expect(panel.querySelector(".chip")).toBeNull();
     expect(tray.querySelectorAll(".chip").length).toBeGreaterThan(0);
+  });
+});
+
+describe("only the selected row's panel is on screen", () => {
+  beforeEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  it("shows exactly one body, however many rows exist", () => {
+    /**
+     * Every row's details live in the card at once and only the selected one is shown, so a
+     * layout rule with higher specificity than the hiding rule reveals ALL of them — which is
+     * precisely what happened: two surfaces stacked their sliders on top of each other. The
+     * property is worth pinning because the failure looks like a rendering glitch rather than a
+     * cascade problem.
+     */
+    const { store, list } = makeList([
+      "X(u,v) = (u, v, 0)",
+      "Y(u,v) = (v, u, 1)",
+      "Z(u,v) = (u, u, v)",
+    ]);
+    document.body.append(list.root, list.card);
+    list.refresh([]);
+    list.setPlacement("cursor");
+
+    for (const row of store.rows()) {
+      list.select(row.id, true);
+      const visible = list.card.querySelectorAll(".props__body:not(.props__body--hidden)");
+      expect(visible, `row ${row.id}`).toHaveLength(1);
+    }
   });
 });

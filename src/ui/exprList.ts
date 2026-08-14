@@ -8,7 +8,6 @@ import {
 import { toLatex } from "../core/expr/latex.ts";
 import { parse, parseRow } from "../core/expr/parse.ts";
 import { toSource } from "../core/expr/print.ts";
-import { ctx, type Expr } from "../core/expr/ast.ts";
 import type { DocumentStore, Item, RowId } from "../state/graph.ts";
 import {
   DEFAULT_DOMAIN,
@@ -642,6 +641,14 @@ export function createExprList(options: ExprListOptions): ExprList {
      * The sliders are what you reach for constantly and what needs room; the chips and menus are
      * occasional and already carry their own outlines, so they read as buttons without a panel
      * around them. Keeping them out of the box is what lets the box be small.
+     */
+    /**
+     * Split in two, and in the window only the first half is shown.
+     *
+     * The domain is what you reach for constantly and what needs room. Everything else — the
+     * readouts, the colour, the overlay tools — is occasional, and crowding it around two sliders
+     * made the window worse at the one job it has. The tray still exists and is still built, so
+     * the top-bar placement keeps every control; the window is deliberately the minimal form.
      */
     const details = el("div", { class: "props__body" }, [
       el("div", { class: "props__panel-body" }, [domainHost]),
@@ -1788,45 +1795,25 @@ const CURVATURE_TOOLTIP =
   "flips sign with it; H = 0 everywhere means a minimal surface.";
 
 /**
- * Replace named parameters by their current values.
+ * Typeset a parameter as its symbol with the current value tucked underneath.
  *
- * The typeset view is meant to show what is ON SCREEN, and what is on screen is a torus of some
- * particular size — so `R` there is a promise the reader has to go and look up. Substituting keeps
- * the formula and the object in agreement.
+ * Substituting the number outright — which is what this replaced — showed the value but destroyed
+ * the structure that makes a parametrization readable as a map: `((R + r cos u) cos v, …)` says
+ * what a torus IS, and `((1.95 + 0.9 cos u) cos v, …)` says what one particular torus measures.
+ * Both are wanted, and they do not compete for the same space: the symbol keeps its place in the
+ * formula and the number sits below it, small.
  *
- * Only variables with a known value are touched: the chart coordinates u and v, and anything
- * undefined, stay symbolic, because those are what the map is a function OF. Rebuilt through the
- * interned constructors, so constant folding applies on the way and `1 · cos u` never appears.
+ * Rounded to six significant figures, because a slider step of 0.0001 lands on values like
+ * 1.0487039999999947 and printing that trades one unreadable thing for another. Display only; the
+ * scene is built from the unrounded parameter.
  */
-function substituteValues(expr: Expr, values: ReadonlyMap<string, number>): Expr {
-  switch (expr.kind) {
-    case "num":
-      return expr;
-    case "var": {
-      const value = values.get(expr.name);
-      if (value === undefined) return expr;
-      /**
-       * Rounded, because this tree is only ever read.
-       *
-       * A slider step of 0.0001 lands on values like 1.0487039999999947, and printing that in
-       * place of `c` trades one unreadable thing for another. Six significant figures is far more
-       * than the geometry can be seen to depend on. Nothing computed uses this tree — the scene is
-       * built from the unrounded parameter — so the rounding cannot reach the mathematics.
-       */
-      return ctx.num(Number(value.toPrecision(6)));
-    }
-    case "add":
-      return ctx.add(...expr.terms.map((term) => substituteValues(term, values)));
-    case "mul":
-      return ctx.mul(...expr.factors.map((factor) => substituteValues(factor, values)));
-    case "pow":
-      return ctx.pow(
-        substituteValues(expr.base, values),
-        substituteValues(expr.exp, values),
-      );
-    case "call":
-      return ctx.call(expr.fn, ...expr.args.map((arg) => substituteValues(arg, values)));
-  }
+function annotatedVariable(values: ReadonlyMap<string, number>) {
+  return (name: string): string | undefined => {
+    const value = values.get(name);
+    if (value === undefined) return undefined;
+    const shown = String(Number(value.toPrecision(6)));
+    return `\\underset{\\scriptsize ${shown}}{${name.length === 1 ? name : `\\mathrm{${name}}`}}`;
+  };
 }
 
 /** Coordinate names for the components of a map into R³, in order. */
@@ -1892,10 +1879,11 @@ function echoFor(
         );
       case "vectorFunction": {
         const head = `${nameTex(row.name)}\\left(${row.args.map(nameTex).join(", ")}\\right)`;
-        // The map's own arguments stay symbolic; everything with a value takes it.
+        // The map's own arguments carry no annotation: u and v are what it is a function OF,
+        // and a number under them would suggest they had been evaluated at a point.
         const bound = new Map(values);
         for (const arg of row.args) bound.delete(arg);
-        const comps = row.comps.map((comp) => substituteValues(comp, bound));
+        const variable = annotatedVariable(bound);
         /**
          * A surface is typeset the way it is written: stacked, one named coordinate per line.
          *
@@ -1908,12 +1896,14 @@ function echoFor(
          * two never disagree about which rows get the treatment.
          */
         if (row.args.length === 2 && row.comps.length === COMPONENT_NAMES.length) {
-          const rows = comps
-            .map((c, index) => `${COMPONENT_NAMES[index]} &= ${toLatex(c)}`)
+          const rows = row.comps
+            .map((c, index) => `${COMPONENT_NAMES[index]} &= ${toLatex(c, { variable })}`)
             .join(" \\\\ ");
           return tex(`${head} = \\left(\\begin{aligned} ${rows} \\end{aligned}\\right)`);
         }
-        return tex(`${head} = \\left(${comps.map((c) => toLatex(c)).join(",\\; ")}\\right)`);
+        return tex(
+          `${head} = \\left(${row.comps.map((c) => toLatex(c, { variable })).join(",\\; ")}\\right)`,
+        );
       }
       case "equation":
         return tex(`${toLatex(row.lhs)} = ${toLatex(row.rhs)}`);

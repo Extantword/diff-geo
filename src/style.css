@@ -930,6 +930,9 @@ option {
   color: var(--text);
 }
 
+/* Marked important-by-specificity rather than by `!important`: it is the rule that decides
+   whether a row is on screen at all, and it must outrank any layout rule for the same element. */
+.props .props__body--hidden,
 .props__body--hidden {
   display: none;
 }
@@ -990,15 +993,21 @@ option {
     rgba(255, 255, 255, 0.82),
     rgba(238, 244, 250, 0.62)
   );
-  backdrop-filter: blur(18px) saturate(150%);
-  -webkit-backdrop-filter: blur(18px) saturate(150%);
+  /* Heavier than a typical frosted pane: what is behind this window is the surface being
+     edited, so the blur has to be deep enough that the controls stay legible over any part of
+     it, however busy. */
+  backdrop-filter: blur(30px) saturate(165%);
+  -webkit-backdrop-filter: blur(30px) saturate(165%);
   border: 1px solid rgba(255, 255, 255, 0.85);
   box-shadow:
     0 10px 30px rgba(20, 40, 70, 0.22),
     inset 0 1px 0 rgba(255, 255, 255, 0.95);
 }
 
+/* Only the close button remains in the header, so it collapses to a thin cap on the pane. */
 .props--at-cursor .props__head {
+  justify-content: flex-end;
+  min-height: 0;
   border-radius: 10px 10px 0 0;
   border-bottom: none;
   padding: 6px 10px 4px;
@@ -1014,18 +1023,28 @@ option {
   padding: 6px 10px 9px;
 }
 
-/* The tray: no panel at all. Each chip already carries its own outline, so they read as floating
-   buttons rather than as a second box. */
-.props--at-cursor .props__tray {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 5px;
-  padding: 0 2px;
+/*
+ * In the window: the sliders and nothing else.
+ *
+ * The readouts, the colour, the colour map and the overlay tools are all still built and all
+ * still reachable — the top-bar placement shows every one of them. They are hidden HERE because
+ * a window that opens on a surface should do one thing well, and two sliders surrounded by
+ * chips did that job worse than two sliders alone.
+ */
+.props--at-cursor .props__tray,
+.props--at-cursor .props__title,
+.props--at-cursor .props__placeholder {
+  display: none;
 }
 
-/* A window has room to wrap, so the controls stack instead of scrolling sideways. */
-.props--at-cursor .props__body {
+/*
+ * A window has room to wrap, so the controls stack instead of scrolling sideways.
+ *
+ * `:not(.props__body--hidden)` is not decoration: every row's details live in the card at once
+ * and only the selected one is shown, and this selector has two classes to the hiding rule's one
+ * — so without the guard it wins the cascade and EVERY row's panel appears at the same time.
+ */
+.props--at-cursor .props__body:not(.props__body--hidden) {
   display: flex;
   flex-direction: column;
   align-items: stretch;
@@ -1416,6 +1435,23 @@ option {
   position: absolute;
   inset: 0;
   padding-top: 13px;
+}
+
+/*
+ * The two ends' labels sit on different lines.
+ *
+ * Both thumbs can be anywhere on the track, including on top of each other, and two numbers at the
+ * same height then overprint into something unreadable — which is exactly when you most need to
+ * see them, since it is where the interval is about to collapse.
+ */
+.domain__range .vslider:first-child .vslider__bubble,
+.domain__range .vslider:first-child .vslider__exact {
+  top: -11px;
+}
+
+.domain__range {
+  height: 38px;
+  padding-top: 11px;
 }
 
 .domain__range .vslider__input {

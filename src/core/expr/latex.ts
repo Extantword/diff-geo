@@ -128,7 +128,19 @@ interface Signed {
   readonly text: string;
 }
 
-export function toLatex(e: Expr): string {
+export interface LatexOptions {
+  /**
+   * Override how a variable is typeset, by name.
+   *
+   * Exists so a caller can annotate a symbol — showing a parameter's current value beneath it —
+   * without replacing the symbol in the tree. Substituting the number instead would be simpler
+   * and would destroy the structure that makes a parametrization readable as a map, which is the
+   * whole reason to print it symbolically.
+   */
+  readonly variable?: (name: string) => string | undefined;
+}
+
+export function toLatex(e: Expr, options: LatexOptions = {}): string {
   const signed = (node: Expr): Signed => {
     if (node.kind === "num") {
       return { negative: node.value < 0, text: numberLatex(Math.abs(node.value)) };
@@ -209,7 +221,7 @@ export function toLatex(e: Expr): string {
       }
 
       case "var":
-        return variableLatex(node.name);
+        return options.variable?.(node.name) ?? variableLatex(node.name);
 
       case "add": {
         let out = "";
