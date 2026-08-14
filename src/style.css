@@ -345,6 +345,7 @@ body {
 }
 
 .row {
+  position: relative;
   padding: 8px;
   background: var(--field);
   border: 1px solid var(--panel-border);
@@ -725,6 +726,11 @@ option {
 
 .row--editing .row__input {
   display: block;
+  /* Grown to fit by `autoSize`; resizing by hand would fight it. */
+  resize: none;
+  overflow: hidden;
+  line-height: 1.45;
+  min-height: 0;
 }
 
 .row--editing .formula__echo {
@@ -770,23 +776,38 @@ option {
   padding: 4px 0;
 }
 
+/*
+ * Taken OUT OF THE FLOW entirely.
+ *
+ * Two things pull in opposite directions here: a transparent toolbar still occupies its line, so
+ * every cell carried a band of empty space; but revealing one that occupies a line makes the cell
+ * grow under the cursor. Absolute positioning satisfies both — no space when hidden, no reflow
+ * when shown — at the cost of overlapping the cell's top right corner, which is the emptiest part
+ * of it.
+ */
 .row__tools {
-  display: flex;
-  justify-content: flex-end;
+  position: absolute;
+  top: 4px;
+  right: 4px;
   gap: 2px;
-  margin-top: 4px;
-  /* Hidden until the row is hovered or holds the caret, so the resting bar has no chrome. */
-  opacity: 0;
-  transition: opacity 0.12s ease;
+  display: none;
 }
 
 .row:hover .row__tools,
 .row:focus-within .row__tools {
-  opacity: 1;
+  display: flex;
 }
 
-.row__params:not(:empty) {
-  margin-bottom: 6px;
+/* Empty hosts must collapse. A cell holds slots for a value slider and for the parameters it
+   uses, and most cells fill neither; left in the flow they pad every row with nothing. */
+.row__params:empty,
+.row__value:empty {
+  display: none;
+}
+
+.row__params:not(:empty),
+.row__value:not(:empty) {
+  margin-top: 6px;
 }
 
 .props__button {

@@ -198,3 +198,32 @@ describe("controls", () => {
     expect(onTick).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("animation speed", () => {
+  it("scales how far a sweep travels in a given time", () => {
+    const make = (speed: number) => {
+      const animator = createAnimator();
+      const spec = { value: 0, min: 0, max: 4, step: 0.01 };
+      animator.register("k", spec, (value) => (spec.value = value));
+      animator.play("k");
+      animator.setSpeed(speed);
+      animator.step(0.02);
+      return spec.value;
+    };
+    // Twice the speed covers twice the ground in the same frame.
+    expect(make(2)).toBeCloseTo(make(1) * 2, 9);
+    expect(make(0.5)).toBeCloseTo(make(1) / 2, 9);
+  });
+
+  it("clamps a speed that would stall or reverse the sweep", () => {
+    // Direction is owned by the ping-pong; letting speed go negative would give two things
+    // authority over it, and zero would look like a bug rather than a setting.
+    const animator = createAnimator();
+    animator.setSpeed(0);
+    expect(animator.speed()).toBeGreaterThan(0);
+    animator.setSpeed(-3);
+    expect(animator.speed()).toBeGreaterThan(0);
+    animator.setSpeed(1e6);
+    expect(animator.speed()).toBeLessThanOrEqual(20);
+  });
+});

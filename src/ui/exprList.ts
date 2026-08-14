@@ -7,6 +7,7 @@ import {
 } from "../core/geom/colormaps.ts";
 import { toLatex } from "../core/expr/latex.ts";
 import { parse, parseRow } from "../core/expr/parse.ts";
+import { toSource } from "../core/expr/print.ts";
 import type { DocumentStore, Item, RowId } from "../state/graph.ts";
 import {
   DEFAULT_DOMAIN,
@@ -129,7 +130,7 @@ export interface ExprList {
 interface RowView {
   readonly id: RowId;
   readonly root: HTMLElement;
-  readonly input: HTMLInputElement;
+  readonly input: HTMLTextAreaElement;
   readonly echo: HTMLElement;
   readonly badge: HTMLElement;
   readonly notes: HTMLElement;
@@ -311,10 +312,18 @@ export function createExprList(options: ExprListOptions): ExprList {
   function createRowView(id: RowId): RowView {
     const row = store.rows().find((candidate) => candidate.id === id)!;
 
-    const input = el("input", {
+    /**
+     * A textarea, not an input, so a formula can be laid out over several lines.
+     *
+     * The lexer already skips newlines, so multi-line text was always parseable — the only thing
+     * standing in the way was a single-line field to type it into. Enter therefore inserts a line
+     * break rather than committing; Escape leaves the cell.
+     */
+    const input = el("textarea", {
       class: "field field--mono row__input",
       value: row.source(),
       spellcheck: "false",
+      rows: 1,
       placeholder: "X(u,v) = (…, …, …)",
       onInput: () => {
         row.source.set(input.value);
@@ -325,9 +334,10 @@ export function createExprList(options: ExprListOptions): ExprList {
         // Typing into the last cell opens the next one. `syncRows` is only called when that
         // actually changed something, so an ordinary keystroke costs nothing extra.
         if (ensureTrailingCell()) syncRows();
+        autoSize(input);
         options.onEdit(false);
       },
-    }) as HTMLInputElement;
+    }) as HTMLTextAreaElement;
 
     const echo = el("div", { class: "formula__echo" });
     const badge = el("span", { class: "row__badge" });
@@ -390,6 +400,7 @@ export function createExprList(options: ExprListOptions): ExprList {
 
     const enterEdit = () => {
       root.classList.add("row--editing");
+      autoSize(input);
       input.focus();
     };
 
@@ -407,8 +418,27 @@ export function createExprList(options: ExprListOptions): ExprList {
     const isControl = (target: EventTarget | null) =>
       target instanceof Element &&
       target.closest("input, button, select, textarea, label, .slider, .transport") !== null;
+    input.addEventListener("keydown", (event: KeyboardEvent) => {
+      if (event.key === "Escape") input.blur();
+    });
+
     input.addEventListener("blur", () => {
       root.classList.remove("row--editing");
+      /**
+       * Reformat on leaving the cell, never while typing.
+       *
+       * Rewriting the text under a caret would be hostile — the same reason the smart
+       * constructors preserve term order rather than sorting. Blur is the moment the user has
+       * finished saying what they meant, so it is the only safe place to say it back to them.
+       */
+      const formatted = formatSurfaceSource(input.value);
+      if (formatted !== null && formatted !== input.value) {
+        input.value = formatted;
+        row.source.set(formatted);
+        refreshEcho(views.get(id));
+        options.onEdit(false);
+      }
+      autoSize(input);
       // An empty cell has no typeset form to fall back to, so it keeps showing its input.
       syncEditing(views.get(id));
     });
@@ -1080,9 +1110,17 @@ export function createExprList(options: ExprListOptions): ExprList {
    * everything else here is: replacing an input the user is holding is what steals focus.
    */
   const syncValueSlider = (view: RowView, item: Item | null) => {
+    /**
+     * A plain number gets a slider under its cell.
+     *
+     * The kind to test is `parameter`, not `scalar`: `R = 2` is classified as a parameter
+     * precisely BECAUSE it is a bare number the user will want to drag — keeping it symbolic
+     * downstream is what makes dragging it free. Testing for `scalar` here meant the one kind of
+     * row that exists to be dragged was the one kind that never got a slider.
+     */
     const numeric =
       item !== null &&
-      item.kind === "scalar" &&
+      item.kind === "parameter" &&
       item.name !== null &&
       item.comps[0]?.kind === "num";
 
@@ -1406,6 +1444,45 @@ export function fromHex(hex: string): Vec3 {
   const n = Number.parseInt(hex.replace("#", ""), 16);
   if (!Number.isFinite(n)) return [0.5, 0.5, 0.5];
   return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
+}
+
+/**
+ * Grow a cell to fit its text.
+ *
+ * Height is reset to `auto` first: `scrollHeight` reports the content height only when the box is
+ * not already constraining it, so measuring without the reset makes a cell that can grow but
+ * never shrink.
+ */
+function autoSize(field: HTMLTextAreaElement): void {
+  field.style.height = "auto";
+  field.style.height = `${field.scrollHeight}px`;
+}
+
+/** Coordinate names for the components of a map into R³, in order. */
+const COMPONENT_NAMES = ["x", "y", "z"];
+
+/**
+ * Lay a surface definition out over several lines, one named coordinate each.
+ *
+ * `X(u,v) = ((R + r cos u) cos v, (R + r cos u) sin v, r sin u)` is a single line in which the
+ * three components have to be told apart by counting commas through nested parentheses. Naming
+ * them and putting them on their own lines is how the same map is written on paper, and it is
+ * what makes the third component editable without first working out where it starts.
+ *
+ * Returns null when the row is not a surface, so the caller leaves everything else alone. The
+ * labels are dropped again on the way back in — they restate the position — so this is purely a
+ * presentation of the same expression, and reformatting an already-formatted cell is a no-op.
+ */
+export function formatSurfaceSource(source: string): string | null {
+  if (source.trim() === "") return null;
+  const { row } = parseRow(source);
+  if (!row || row.kind !== "vectorFunction") return null;
+  if (row.args.length !== 2 || row.comps.length !== COMPONENT_NAMES.length) return null;
+
+  const body = row.comps
+    .map((comp, index) => `  ${COMPONENT_NAMES[index]} = ${toSource(comp)}`)
+    .join(",\n");
+  return `${row.name}(${row.args.join(", ")}) = (\n${body}\n)`;
 }
 
 function diagnosticNode(diagnostic: Diagnostic): HTMLElement {

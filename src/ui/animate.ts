@@ -19,7 +19,7 @@ import type { SliderSpec } from "./exprList.ts";
  * a display; the rAF loop only supplies `dt`.
  */
 
-/** Seconds for one traversal of a slider's range. */
+/** Seconds for one traversal of a slider's range, at speed 1. */
 const DEFAULT_PERIOD_SECONDS = 4;
 
 /**
@@ -60,6 +60,15 @@ export interface Animator {
   /** Jump back to the start of the range, leaving play state alone. */
   rewind(key: string): void;
   playing(key: string): boolean;
+  /**
+   * How fast a sweep runs, as a multiple of one traversal every four seconds.
+   *
+   * Global rather than per slider: when two are playing at once the interesting thing is their
+   * relative rates, and a single control changes the tempo of the whole animation without
+   * disturbing that. Values below 1 slow it down, above 1 speed it up.
+   */
+  setSpeed(multiplier: number): void;
+  speed(): number;
   /** Advance every playing slider. Exposed for tests; the loop calls it with real deltas. */
   step(seconds: number): boolean;
   /** Called once per frame after values advance, to trigger a redraw. */
@@ -89,6 +98,7 @@ export function createAnimator(): Animator {
   let frame = 0;
   let previous = 0;
   let onTick: (() => void) | null = null;
+  let speed = 1;
 
   const anyPlaying = () => {
     for (const entry of entries.values()) if (entry.playing) return true;
@@ -109,7 +119,8 @@ export function createAnimator(): Animator {
       // A degenerate or inverted range has nothing to sweep; leave it rather than divide by it.
       if (!(span > 0)) continue;
 
-      let next = entry.spec.value + entry.direction * (span / DEFAULT_PERIOD_SECONDS) * dt;
+      let next =
+        entry.spec.value + entry.direction * (span / DEFAULT_PERIOD_SECONDS) * speed * dt;
 
       /**
        * Reflect the overshoot rather than clamping to the end.
@@ -202,6 +213,14 @@ export function createAnimator(): Animator {
     playing(key) {
       return entries.get(key)?.playing ?? false;
     },
+
+    setSpeed(multiplier) {
+      // Zero or negative would stall or reverse the sweep, which the direction flag already owns;
+      // clamped rather than rejected so a slider bound to this cannot wedge the animation.
+      speed = Math.min(20, Math.max(0.05, multiplier));
+    },
+
+    speed: () => speed,
 
     step,
 

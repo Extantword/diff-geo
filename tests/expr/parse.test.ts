@@ -340,3 +340,38 @@ describe("rows", () => {
     }
   });
 });
+
+describe("labelled tuple components", () => {
+  /**
+   * `X(u,v) = (x = …, y = …, z = …)` names each coordinate. The label restates what the position
+   * already says, so it is dropped — which means the labelled and unlabelled forms must parse to
+   * exactly the same tree, or the two ways of writing a surface would be different surfaces.
+   */
+  it("parses to the same tree as the unlabelled form", () => {
+    const labelled = parseRow("X(u,v) = (x = cos u, y = sin u, z = v)");
+    const plain = parseRow("X(u,v) = (cos u, sin u, v)");
+    expect(labelled.row?.kind).toBe("vectorFunction");
+    expect(plain.row?.kind).toBe("vectorFunction");
+    const a = labelled.row as { comps: readonly unknown[] };
+    const b = plain.row as { comps: readonly unknown[] };
+    // Interned nodes, so identical structure is identical identity.
+    expect(a.comps).toEqual(b.comps);
+  });
+
+  it("accepts newlines anywhere, so a formula can be laid out over several lines", () => {
+    const multi = parseRow("X(u,v) = (\n  x = cos u,\n  y = sin u,\n  z = v\n)");
+    const single = parseRow("X(u,v) = (cos u, sin u, v)");
+    expect((multi.row as { comps: readonly unknown[] }).comps).toEqual(
+      (single.row as { comps: readonly unknown[] }).comps,
+    );
+    expect(multi.diags.filter((d) => d.severity === "error")).toEqual([]);
+  });
+
+  it("still reads an unlabelled component that begins with a name", () => {
+    // `u` alone must not be mistaken for a label waiting for its `=`.
+    const row = parseRow("X(u,v) = (u, v, u v)");
+    expect(row.row?.kind).toBe("vectorFunction");
+    expect((row.row as { comps: readonly unknown[] }).comps).toHaveLength(3);
+    expect(row.diags.filter((d) => d.severity === "error")).toEqual([]);
+  });
+});

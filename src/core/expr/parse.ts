@@ -367,14 +367,33 @@ class Parser {
     return this.peek();
   }
 
-  /** Consume a comma-separated list of expressions, for a tuple right-hand side. */
+  /**
+   * Consume a comma-separated list of expressions, for a tuple right-hand side.
+   *
+   * A component may carry a **label**: `X(u,v) = (x = R cos u, y = R sin u, z = v)`. The label is
+   * the coordinate the component defines, which is information the reader already has from the
+   * position — so it is dropped rather than stored. It exists because a three-line surface with
+   * its coordinates named is far easier to read and edit than three anonymous expressions
+   * separated by commas, and because that is how such a map is written on paper.
+   */
   parseCommaList(): Expr[] {
-    const parts: Expr[] = [this.parseExpression(0)];
+    const parts: Expr[] = [this.parseComponent()];
     while (this.at("comma")) {
       this.next();
-      parts.push(this.parseExpression(0));
+      parts.push(this.parseComponent());
     }
     return parts;
+  }
+
+  /** One tuple component, with an optional `name =` label in front of it. */
+  private parseComponent(): Expr {
+    // Only `identifier =` counts as a label. Anything else beginning with an identifier is an
+    // ordinary expression, and `x == y` is not a thing here, so one token of lookahead is enough.
+    if (this.peek().kind === "name" && this.tokens[this.pos + 1]?.kind === "equals") {
+      this.next();
+      this.next();
+    }
+    return this.parseExpression(0);
   }
 
   /** Index of the `)` matching the `(` at `open`, or −1 if unbalanced. */
