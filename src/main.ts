@@ -320,15 +320,34 @@ function main() {
   let aimChart: [number, number] = [0, 0];
   /** The scene as last built, for turning a picked (u, v) back into a point without rebuilding. */
   let lastScene: Scene | null = null;
-  const surfacePointAt = (rowId: RowId, u: number, v: number): Vec3 | null =>
-    lastScene?.positionOf(rowId, u, v) ?? null;
+  /**
+   * A picked chart point, in the place the object is actually drawn.
+   *
+   * `positionOf` evaluates the parametrization, which knows nothing about arrangement — so for a
+   * surface that has been moved it answers where the formula puts it rather than where it is. The
+   * translation has to be added back, or aiming and dragging both work against a phantom sitting
+   * at the origin.
+   */
+  const surfacePointAt = (rowId: RowId, u: number, v: number): Vec3 | null => {
+    const base = lastScene?.positionOf(rowId, u, v);
+    if (!base) return null;
+    const offset = translations.get(rowId);
+    if (!offset) return base;
+    return [base[0] + offset[0], base[1] + offset[1], base[2] + offset[2]];
+  };
   /** Preview at the arc length the committed geodesic will use, so the drag does not mislead. */
   const previewLength = (rowId: RowId) => {
     const extent = lastScene?.bounds?.radius ?? 1;
     return extent * (overlays.get(rowId)?.geodesicLength ?? 1.5);
   };
-  /** How far the pointer may travel and still count as a click, in CSS pixels. */
-  const CLICK_SLOP = 4;
+  /**
+   * How far the pointer may travel and still count as a click, in CSS pixels.
+   *
+   * Generous, because every press on an object now begins a drag: too tight and an ordinary click
+   * with a hand tremor in it becomes a one-pixel move, and the selection it was meant to make
+   * never happens.
+   */
+  const CLICK_SLOP = 6;
   /** Lines from the last built scene, so a preview can be drawn without rebuilding it. */
   let sceneLines: readonly LineGroup[] = [];
   /** The live aiming arrow, drawn on top of the scene during a drag. */

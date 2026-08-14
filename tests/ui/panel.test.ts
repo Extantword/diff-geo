@@ -347,7 +347,11 @@ describe("duplicating a cell", () => {
     document.body.innerHTML = "";
   });
 
-  it("copies the text into a new cell directly below", () => {
+  it("copies the surface under a name of its own", () => {
+    /**
+     * A copy that kept its name would look like a copy and behave like a typo: two rows declaring
+     * `X` is one definition overwritten, not two objects.
+     */
     const { store, list } = makeList(["X(u,v) = (u, v, 0)"]);
     document.body.append(list.root, list.card);
     list.refresh([]);
@@ -358,7 +362,9 @@ describe("duplicating a cell", () => {
 
     const sources = store.rows().map((row) => row.source());
     expect(sources[0]).toBe("X(u,v) = (u, v, 0)");
-    expect(sources[1]).toBe("X(u,v) = (u, v, 0)");
+    expect(sources[1]!.startsWith("Y(")).toBe(true);
+    // Same surface, different name.
+    expect(sources[1]).toContain("u, v, 0");
   });
 });
 
@@ -577,5 +583,34 @@ describe("dragging past a slider's end", () => {
     // No pointerdown: the pointer is merely passing over the control.
     move(input, "pointermove", 400);
     expect(Number(input.max)).toBeCloseTo(before, 9);
+  });
+});
+
+describe("what the floating form actually shows", () => {
+  beforeEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  it("puts real domain sliders on screen when a surface is revealed", () => {
+    /**
+     * Reported as "I click the surface and see no sliders". The pointer path cannot be exercised
+     * here — it needs a GPU pick — so this pins the half that can be: once a row is revealed in
+     * the cursor placement, the sliders are present, visible, and in the visible body rather than
+     * a hidden one.
+     */
+    const { store, list } = makeList(["X(u,v) = (u, v, 0)"]);
+    document.body.append(list.root, list.card);
+    list.refresh([]);
+    list.setPlacement("cursor");
+    list.placeAt(600, 300);
+    list.select(store.rows()[0]!.id, true);
+
+    expect(list.card.classList.contains("props--empty")).toBe(false);
+    const body = list.card.querySelector(".props__body:not(.props__body--hidden)")!;
+    expect(body).not.toBeNull();
+    expect(body.querySelectorAll(".domain")).toHaveLength(2);
+    expect(body.querySelectorAll(".vslider__input").length).toBe(4);
+    // And the colour control travelled with them.
+    expect(body.querySelector(".props__color")).not.toBeNull();
   });
 });
