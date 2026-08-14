@@ -725,6 +725,34 @@ option {
   display: none;
 }
 
+.templates .section-title {
+  margin: 2px 0 6px;
+}
+
+/* The whole catalog, listed. Two columns so fifteen entries stay in view without scrolling. */
+.templates__grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+
+.template {
+  padding: 6px 8px;
+  background: var(--field);
+  border: 1px solid var(--panel-border);
+  border-radius: 5px;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 12px;
+  text-align: left;
+}
+
+.template:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 /* ---- scene settings, floating bottom left ---- */
 
 .scene-card {

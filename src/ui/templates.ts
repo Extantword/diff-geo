@@ -57,19 +57,6 @@ function curveRow(spec: CurveSpec): string {
 export function createTemplatePicker(options: TemplateOptions): HTMLElement {
   const { document: store } = options;
 
-  const picker = el("select", { class: "field" }) as HTMLSelectElement;
-  picker.append(el("option", { value: "", text: "load a template…" }));
-
-  const surfaceGroup = el("optgroup", { label: "Surfaces" });
-  for (const spec of CATALOG) {
-    surfaceGroup.append(el("option", { value: `surface:${spec.id}`, text: spec.name }));
-  }
-  const curveGroup = el("optgroup", { label: "Curves" });
-  for (const spec of CURVE_CATALOG) {
-    curveGroup.append(el("option", { value: `curve:${spec.id}`, text: spec.name }));
-  }
-  picker.append(surfaceGroup, curveGroup);
-
   const blurb = el("p", { class: "blurb" });
 
   const loadSurface = (spec: SurfaceSpec) => {
@@ -116,27 +103,33 @@ export function createTemplatePicker(options: TemplateOptions): HTMLElement {
     options.requestRender(true);
   };
 
-  picker.addEventListener("change", () => {
-    const value = picker.value;
-    if (value === "") return;
-    const [kind, id] = value.split(":");
 
-    if (kind === "surface") {
-      const spec = CATALOG.find((entry) => entry.id === id);
-      if (spec) loadSurface(spec);
-    } else if (kind === "curve") {
-      const spec = CURVE_CATALOG.find((entry) => entry.id === id);
-      if (spec) loadCurve(spec);
-    }
+  /**
+   * Every template listed at once, rather than behind a menu.
+   *
+   * The gallery exists so nobody faces an empty formula box, and a dropdown inside a popover put
+   * two clicks and a hidden list between the user and that. Fifteen entries fit comfortably in a
+   * column, so showing them is both simpler and faster than any menu could be.
+   */
+  const entry = (name: string, blurbText: string, load: () => void) =>
+    el("button", {
+      class: "template",
+      title: blurbText,
+      onClick: () => {
+        load();
+        blurb.textContent = blurbText;
+      },
+    }, [
+      el("span", { class: "template__name", text: name }),
+    ]);
 
-    // Back to the prompt, so choosing the same template twice reloads it — useful after
-    // editing a row into something broken.
-    picker.value = "";
-  });
-
-  return el("section", { class: "panel-section panel-section--first" }, [
-    el("h2", { class: "section-title", text: "Templates" }),
-    picker,
+  return el("div", { class: "templates" }, [
+    el("h2", { class: "section-title", text: "Surfaces" }),
+    el("div", { class: "templates__grid" },
+      CATALOG.map((spec) => entry(spec.name, spec.blurb, () => loadSurface(spec)))),
+    el("h2", { class: "section-title", text: "Curves" }),
+    el("div", { class: "templates__grid" },
+      CURVE_CATALOG.map((spec) => entry(spec.name, spec.blurb, () => loadCurve(spec)))),
     blurb,
   ]);
 }
