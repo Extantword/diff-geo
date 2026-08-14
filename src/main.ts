@@ -236,8 +236,13 @@ function main() {
     overlays,
     colors,
   });
-  // The card floats over the scene rather than sitting in the panel, so the list stays a list.
-  canvas.parentElement?.append(list.card);
+  /**
+   * The properties strip is a sibling of the panel and the stage, not a child of either.
+   *
+   * It spans the full width of the grid's first row, so it has to live in `.app`; nested inside
+   * the stage it could only ever have been an overlay on top of the geometry.
+   */
+  document.querySelector(".app")?.append(list.card);
   const templates = createTemplatePicker({
     document: store,
     sliders,

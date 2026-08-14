@@ -53,17 +53,33 @@ body {
 }
 
 /*
- * The cells run along the TOP, not down a side.
+ * Cells down the left, properties across the top, stage taking the rest.
  *
- * A side panel plus the properties card took two bites out of the viewport from opposite edges,
- * leaving the geometry — the thing the whole application exists to show — in a shrinking column
- * between them. Along the top it competes with nothing, and the stage keeps its full width.
+ * Two panels on OPPOSITE SIDES was the problem: the cell bar and the properties card each took a
+ * bite out of the viewport and left the geometry in a shrinking column between them. Moving
+ * properties to a full-width strip along the top costs height only while something is selected —
+ * the row collapses to nothing when it is empty — and gives the stage back its right-hand edge.
  */
 .app {
   display: grid;
-  grid-template-columns: 1fr;
+  grid-template-columns: 300px 1fr;
   grid-template-rows: auto 1fr;
   height: 100vh;
+}
+
+.app > .props {
+  grid-column: 1 / -1;
+  grid-row: 1;
+}
+
+.app > .panel {
+  grid-column: 1;
+  grid-row: 2;
+}
+
+.app > .stage {
+  grid-column: 2;
+  grid-row: 2;
 }
 
 .stage {
@@ -90,11 +106,9 @@ body {
 
 .panel {
   background: var(--panel);
-  border-bottom: 1px solid var(--panel-border);
-  /* Bounded so a tall formula cannot eat the view; past that the strip scrolls. */
-  max-height: 36vh;
-  overflow: auto;
-  padding: 8px 10px;
+  border-right: 1px solid var(--panel-border);
+  overflow-y: auto;
+  padding: 10px;
 }
 
 .panel-header h1 {
@@ -342,10 +356,6 @@ body {
 
 .row {
   position: relative;
-  /* Wide enough for a parametrization, narrow enough that several are visible at once. */
-  flex: 0 0 auto;
-  min-width: 230px;
-  max-width: 340px;
   padding: 8px;
   background: var(--field);
   border: 1px solid var(--panel-border);
@@ -604,23 +614,67 @@ option {
  * inset is drawn into the bottom-right of the canvas, so the card is kept off the bottom to leave
  * that corner clear — the two are the only things competing for that side.
  */
+/*
+ * A strip along the top rather than a card over the scene.
+ *
+ * Hidden it occupies no row at all, so an unselected scene is full height; shown it spans the
+ * whole width, which is what lets the controls sit side by side instead of stacking into a
+ * column that has to be scrolled.
+ */
 .props {
-  position: absolute;
-  /* Below the stage tools, which own the top right corner. */
-  top: 62px;
-  right: 14px;
-  width: 268px;
-  max-height: calc(100% - 28px);
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  max-height: 30vh;
   overflow-y: auto;
   background: var(--panel);
-  border: 1px solid var(--panel-border);
-  border-radius: 8px;
-  box-shadow: 0 6px 24px rgba(20, 30, 45, 0.12);
-  padding: 10px 12px 14px;
+  border-bottom: 1px solid var(--panel-border);
+  padding: 8px 12px;
+}
+
+/* Every control laid out in a row. The hosts are wrapping flex rows themselves, so a surface's
+   domain, sliders and toggles flow across the strip rather than down it. */
+.props__body {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px 16px;
+  flex: 1;
+  min-width: 0;
+}
+
+.props__body > * {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+}
+
+.props__body .slider {
+  min-width: 180px;
+}
+
+.props__body .domain {
+  min-width: 210px;
+}
+
+/* The strip's label and its close button, held to a fixed width so the controls beside them
+   start at the same place whatever the object is called. */
+.props__head {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  width: 118px;
+  margin-bottom: 0;
 }
 
 .props--hidden {
   display: none;
+}
+
+.props__row {
+  flex-wrap: nowrap;
 }
 
 .props__head {
@@ -820,11 +874,10 @@ option {
 }
 
 .cells__action {
-  flex: 0 0 auto;
-  align-self: stretch;
-  width: auto;
-  padding: 6px 12px;
-  white-space: nowrap;
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  padding: 6px;
   background: transparent;
   border: 1px dashed var(--panel-border);
   border-radius: 6px;
@@ -869,13 +922,11 @@ option {
  * Nothing but cells. No headings, no add button, no parameter list — a new cell appears as the
  * last one is used, and everything about an object lives in its card.
  */
-/* Cells side by side, scrolling sideways when there are more than fit. */
+/* A column of cells, as narrow as a parametrization allows. */
 .cells {
   display: flex;
-  flex-direction: row;
-  align-items: flex-start;
+  flex-direction: column;
   gap: 8px;
-  padding: 0;
 }
 
 /*
