@@ -3,6 +3,7 @@ import { buildDiffMap, type DiffMap } from "../core/jets/compile.ts";
 import { bishopFrames, createSpaceCurve, makeFrenetFrame } from "../core/geom/curve.ts";
 import { createParametricSurface } from "../core/geom/parametric.ts";
 import { detectPeriodicity, detectPoles, type ChartPoles } from "../core/geom/periodic.ts";
+import type { ColormapName } from "../core/geom/colormaps.ts";
 import {
   integrateCurvatureLine,
   integrateGeodesic,
@@ -122,6 +123,8 @@ export interface SurfaceOverlay {
    * like a mode you get trapped in.
    */
   readonly aiming?: boolean;
+  /** which colour map paints K on this surface; "solid" shows its own colour instead */
+  readonly colormap?: ColormapName;
   /**
    * Draw the Gauss image on a sphere beside the surface.
    *
@@ -175,6 +178,32 @@ const SEGMENTS_PER_EXTENT = 220;
  * when the alternative is a frozen UI.
  */
 const MAX_SPRAY_SEGMENTS = 26000;
+
+/**
+ * The domain overlay curves may integrate through, widened across coordinate poles.
+ *
+ * Shared by the drawn curves and by the live preview, so an aimed geodesic cannot behave one way
+ * while being dragged and another once released.
+ */
+function integrationBounds(
+  surface: ReturnType<typeof createParametricSurface>,
+  poles: ChartPoles,
+) {
+  const uWidth = surface.u.max - surface.u.min;
+  const vWidth = surface.v.max - surface.v.min;
+  const [uLo, uHi] = sampleBounds(surface.u);
+  const [vLo, vHi] = sampleBounds(surface.v);
+  return {
+    u: [
+      poles.uMin ? surface.u.min - uWidth : uLo,
+      poles.uMax ? surface.u.max + uWidth : uHi,
+    ] as const,
+    v: [
+      poles.vMin ? surface.v.min - vWidth : vLo,
+      poles.vMax ? surface.v.max + vWidth : vHi,
+    ] as const,
+  };
+}
 
 /**
  * Where to put a Gauss image sphere so it sits clear of the surface it belongs to.
@@ -244,6 +273,19 @@ export interface Scene {
    * the scene — aiming a geodesic needs a point per pointer move, and a rebuild is ~150 ms.
    */
   positionOf(rowId: RowId, u: number, v: number): Vec3 | null;
+  /**
+   * Integrate one geodesic on a surface already compiled for this scene.
+   *
+   * For the live preview while aiming: rebuilding the scene costs ~150 ms and integrating a
+   * single curve costs a few, so the drag can show the ACTUAL geodesic rather than a straight
+   * arrow standing in for its initial velocity.
+   */
+  geodesicFrom(
+    rowId: RowId,
+    start: readonly [number, number],
+    direction: readonly [number, number],
+    length: number,
+  ): Polyline | null;
 }
 
 /** Distinct colours for curves, cycled by row order. */
@@ -439,6 +481,7 @@ export function buildScene(request: SceneRequest): Scene {
         // The row id travels into the mesh so a pick can name the row it landed on.
         objectId: item.rowId,
         baseColor: rowColors.get(item.rowId),
+        colormap: overlays.get(item.rowId)?.colormap,
       });
       meshes.push(mesh);
       entry.mesh = mesh;
@@ -485,20 +528,7 @@ export function buildScene(request: SceneRequest): Scene {
      * A REGULAR boundary is left alone: a cylinder's rim really is where the surface ends, and a
      * geodesic must stop with it rather than run off into the analytic continuation.
      */
-    const uWidth = surface.u.max - surface.u.min;
-    const vWidth = surface.v.max - surface.v.min;
-    const [uLo, uHi] = sampleBounds(surface.u);
-    const [vLo, vHi] = sampleBounds(surface.v);
-    const bounds = {
-      u: [
-        poles.uMin ? surface.u.min - uWidth : uLo,
-        poles.uMax ? surface.u.max + uWidth : uHi,
-      ] as const,
-      v: [
-        poles.vMin ? surface.v.min - vWidth : vLo,
-        poles.vMax ? surface.v.max + vWidth : vHi,
-      ] as const,
-    };
+    const bounds = integrationBounds(surface, poles);
 
     /**
      * Cap the step so density is geometric, not a fixed sample count.
@@ -937,6 +967,30 @@ export function buildScene(request: SceneRequest): Scene {
     reports: mergeReports(reports),
     bounds,
     curvatureScale,
+    geodesicFrom(rowId, start, direction, length) {
+      const found = compiledSurfaces.find((entry) => entry.item.rowId === rowId);
+      if (!found) return null;
+      const geodesic = integrateGeodesic(
+        found.surface,
+        found.params,
+        [start[0], start[1]],
+        [direction[0], direction[1]],
+        length,
+        {
+          bounds: integrationBounds(found.surface, found.poles),
+          maxStepArc: sceneExtent / SEGMENTS_PER_EXTENT,
+        },
+      );
+      if (geodesic.chart.length < 2) return null;
+      return liftedPolyline(
+        found.surface,
+        found.params,
+        geodesic.chart,
+        chartLift(sceneExtent, resolution, curvatureScale),
+        colorOf(rowId, GEODESIC_COLOR),
+      );
+    },
+
     positionOf(rowId, u, v) {
       const found = compiledSurfaces.find((entry) => entry.item.rowId === rowId);
       if (!found) return null;

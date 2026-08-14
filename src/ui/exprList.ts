@@ -1,5 +1,10 @@
 import type { Diagnostic } from "../core/expr/diagnostics.ts";
 import type { Vec3 } from "../core/geom/types.ts";
+import {
+  COLORMAP_LABEL,
+  COLORMAP_NAMES,
+  type ColormapName,
+} from "../core/geom/colormaps.ts";
 import { toLatex } from "../core/expr/latex.ts";
 import { parse, parseRow } from "../core/expr/parse.ts";
 import type { DocumentStore, Item, RowId } from "../state/graph.ts";
@@ -373,9 +378,33 @@ export function createExprList(options: ExprListOptions): ExprList {
      *
      * The row tools appear on hover, so the resting state of the bar has no chrome at all.
      */
+    /**
+     * A cell shows its TYPESET form, and swaps to the raw text only while being edited.
+     *
+     * Showing both at once said everything twice. Which one is visible is driven by an explicit
+     * class rather than by `:focus-within`, because CSS alone cannot work here: an input hidden
+     * with `display: none` cannot be focused, so the click handler has to reveal it *before*
+     * calling focus.
+     */
+    const paramHost = el("div", { class: "row__params" });
+
+    const enterEdit = () => {
+      root.classList.add("row--editing");
+      input.focus();
+      input.select();
+    };
+    input.addEventListener("blur", () => {
+      root.classList.remove("row--editing");
+      // An empty cell has no typeset form to fall back to, so it keeps showing its input.
+      syncEditing(views.get(id));
+    });
+
     const root = el("div", {
-      class: "row",
-      onClick: () => select(id),
+      class: "row row--editing",
+      onClick: () => {
+        select(id);
+        if (!root.classList.contains("row--editing")) enterEdit();
+      },
     }, [
       input,
       echo,
@@ -384,6 +413,9 @@ export function createExprList(options: ExprListOptions): ExprList {
         shift(1, "\u2193", "move down"),
         remove,
       ]),
+      // Sliders belong to the cell that introduced them, directly beneath it.
+      valueHost,
+      paramHost,
     ]);
 
     /**
@@ -405,16 +437,12 @@ export function createExprList(options: ExprListOptions): ExprList {
 
     const detailsTitle = el("span", { class: "props__kind", text: "expression" });
 
-    const paramHost = el("div", { class: "row__params" });
-
     const details = el("div", { class: "props__body" }, [
       notes,
       el("label", { class: "props__row" }, [
         el("span", { text: "colour" }),
         colorSwatch,
       ]),
-      paramHost,
-      valueHost,
       chartHost,
       domainHost,
       overlayHost,
@@ -772,9 +800,17 @@ export function createExprList(options: ExprListOptions): ExprList {
     let curvatureLines = state.curvatureLines;
     let gaussMap = state.gaussMap ?? false;
     let aiming = state.aiming ?? false;
+    let colormap: ColormapName = state.colormap ?? "curvature";
 
     const commit = () => {
-      if (geodesics === 0 && !curvatureLines && !gaussMap && !aiming && shotCount() === 0) {
+      if (
+        geodesics === 0 &&
+        !curvatureLines &&
+        !gaussMap &&
+        !aiming &&
+        colormap === "curvature" &&
+        shotCount() === 0
+      ) {
         // Nothing is drawn, so there is no start point to remember either.
         options.overlays.delete(view.id);
       } else {
@@ -792,6 +828,7 @@ export function createExprList(options: ExprListOptions): ExprList {
           curvatureLines,
           gaussMap,
           aiming,
+          colormap,
           start,
           // Owned by the canvas, like `start`, so read back rather than captured.
           shots: options.overlays.get(view.id)?.shots,
@@ -859,6 +896,24 @@ export function createExprList(options: ExprListOptions): ExprList {
     const shotCount = () => options.overlays.get(view.id)?.shots?.length ?? 0;
 
     /**
+     * Which colour map paints K on this surface.
+     *
+     * Per surface rather than global, because two surfaces in one scene can be asked different
+     * questions — one showing the sign of K, another its magnitude — while still sharing the one
+     * robust scale that makes their colours comparable.
+     */
+    const colormapSelect = el("select", { class: "props__select" }) as HTMLSelectElement;
+    for (const name of COLORMAP_NAMES) {
+      colormapSelect.append(
+        el("option", { value: name, text: COLORMAP_LABEL[name], selected: name === colormap }),
+      );
+    }
+    colormapSelect.addEventListener("change", () => {
+      colormap = colormapSelect.value as ColormapName;
+      commit();
+    });
+
+    /**
      * The aim tool.
      *
      * While armed, a drag on THIS surface shoots a geodesic along the direction dragged instead
@@ -888,6 +943,10 @@ export function createExprList(options: ExprListOptions): ExprList {
     });
 
     replace(view.overlayHost, [
+      el("label", { class: "props__row" }, [
+        el("span", { text: "colour map" }),
+        colormapSelect,
+      ]),
       el("div", { class: "slider" }, [
         el("label", { class: "slider__label" }, [
           el("span", { text: "geodesic spray" }),
@@ -1135,6 +1194,22 @@ export function createExprList(options: ExprListOptions): ExprList {
   };
 
   /** Re-typeset one row's echo. KaTeX is the expensive part, so this is called sparingly. */
+  /**
+   * Decide whether a cell shows its typeset form or its raw text.
+   *
+   * An empty or unparseable cell has no typeset form worth showing, so it stays in edit mode —
+   * otherwise a mistyped formula would vanish behind a dash with no way to see what was typed.
+   */
+  const syncEditing = (view: RowView | undefined) => {
+    if (!view) return;
+    if (globalThis.document.activeElement === view.input) return;
+    const source = store.rows().find((row) => row.id === view.id)?.source() ?? "";
+    // parseRow, not parse: a declaration like `X(u,v) = (…)` is not a bare expression, and
+    // testing it with the wrong parser would leave every surface cell stuck in edit mode.
+    const typeset = source.trim() !== "" && parseRow(source).row !== null;
+    view.root.classList.toggle("row--editing", !typeset);
+  };
+
   const refreshEcho = (view: RowView | undefined) => {
     if (!view) return;
     const row = store.rows().find((candidate) => candidate.id === view.id);
@@ -1209,6 +1284,7 @@ export function createExprList(options: ExprListOptions): ExprList {
       syncDomain(view, item);
       syncFrameControl(view, item);
       syncRowParams(view, item);
+      syncEditing(view);
 
       renderNotes(view, reportById.get(id));
     }
@@ -1225,7 +1301,34 @@ export function createExprList(options: ExprListOptions): ExprList {
    * is used, and everything about an object lives in its card. What is left is the one thing the
    * bar is for.
    */
-  const root = el("div", { class: "cells" }, [rowHost]);
+  /**
+   * Make a new slider: a numeric cell, which renders its own slider directly beneath itself.
+   *
+   * A slider IS a row here — `a = 1` is a definition and a control at once — so this needs no
+   * separate concept, only an unused name. Walking the alphabet skips anything the document
+   * already uses, so pressing it twice gives two independent sliders rather than a collision.
+   */
+  const createSlider = el("button", {
+    class: "cells__action",
+    text: "+ slider",
+    title: "add a named value with a slider",
+    onClick: () => {
+      const used = new Set<string>();
+      for (const row of store.rows()) {
+        const parsed = parseRow(row.source());
+        if (parsed.row && "name" in parsed.row) used.add(parsed.row.name);
+      }
+      // u, v, t, x, y and z name coordinates rather than values, so they are never offered.
+      const candidates = "abcdefghijklmnopqrsw".split("").filter((name) => !used.has(name));
+      const name = candidates[0] ?? `a${store.rows().length}`;
+      const row = store.addRow(`${name} = 1`);
+      syncRows();
+      options.onEdit(false);
+      select(row.id);
+    },
+  });
+
+  const root = el("div", { class: "cells" }, [rowHost, createSlider]);
 
   syncRows();
 

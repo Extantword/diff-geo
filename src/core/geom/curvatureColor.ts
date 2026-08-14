@@ -1,3 +1,8 @@
+import {
+  colormapColor,
+  colormapGradient,
+  type ColormapName,
+} from "./colormaps.ts";
 import type { ParametricSurface } from "./parametric.ts";
 import { makeSurfacePoint, sampleBounds, type Vec3 } from "./types.ts";
 
@@ -20,19 +25,6 @@ import { makeSurfacePoint, sampleBounds, type Vec3 } from "./types.ts";
  * gradient, so the two can never drift apart.
  */
 
-/** K < 0 — hyperbolic, saddle-like. */
-const NEGATIVE: Vec3 = [0.10, 0.38, 0.88];
-/**
- * K ≈ 0 — flat.
- *
- * Light, but deliberately NOT near-white: on a white background the neutral end of the scale is
- * the one that can disappear into the page, and a plane reading as a hole in the canvas is the
- * worst failure this colormap can have. Kept dark enough that the shading multiplier, which tops
- * out at 1, always leaves it visibly below the background.
- */
-const ZERO: Vec3 = [0.86, 0.88, 0.90];
-/** K > 0 — elliptic, dome-like. */
-const POSITIVE: Vec3 = [0.86, 0.20, 0.14];
 
 /**
  * Distinct grey for a point where curvature is not defined — a chart pole, a cone
@@ -41,7 +33,13 @@ const POSITIVE: Vec3 = [0.86, 0.20, 0.14];
  */
 export const INVALID_COLOR: Vec3 = [0.42, 0.44, 0.47];
 
-/** Diverging blue → light → red for `t` in [−1, 1]; values outside saturate. */
+/**
+ * Diverging blue → light → red for `t` in [−1, 1]; values outside saturate.
+ *
+ * Kept as its own export because it is the DEFAULT map and the one the ground-truth tests pin,
+ * but the table now lives in `colormaps.ts` alongside the others so a surface can be painted with
+ * a different one without two copies of the curvature palette drifting apart.
+ */
 export function divergingColor(t: number, out: Vec3 = [0, 0, 0]): Vec3 {
   if (!Number.isFinite(t)) {
     out[0] = INVALID_COLOR[0];
@@ -49,13 +47,7 @@ export function divergingColor(t: number, out: Vec3 = [0, 0, 0]): Vec3 {
     out[2] = INVALID_COLOR[2];
     return out;
   }
-  const clamped = Math.max(-1, Math.min(1, t));
-  const from = clamped < 0 ? NEGATIVE : POSITIVE;
-  const amount = 1 - Math.abs(clamped);
-  out[0] = from[0] + (ZERO[0] - from[0]) * amount;
-  out[1] = from[1] + (ZERO[1] - from[1]) * amount;
-  out[2] = from[2] + (ZERO[2] - from[2]) * amount;
-  return out;
+  return colormapColor("curvature", t, out, INVALID_COLOR);
 }
 
 /** Smallest scale worth using; below this the colours are numerical noise. */
@@ -134,14 +126,6 @@ export function sampleCurvatureRange(
 }
 
 /** CSS gradient for the legend, built from the same palette as the mesh colours. */
-export function legendGradient(steps = 24): string {
-  const stops: string[] = [];
-  const rgb: Vec3 = [0, 0, 0];
-  for (let i = 0; i <= steps; i++) {
-    const t = -1 + (2 * i) / steps;
-    divergingColor(t, rgb);
-    const to255 = (x: number) => Math.round(x * 255);
-    stops.push(`rgb(${to255(rgb[0])}, ${to255(rgb[1])}, ${to255(rgb[2])}) ${(i / steps) * 100}%`);
-  }
-  return `linear-gradient(90deg, ${stops.join(", ")})`;
+export function legendGradient(name: ColormapName = "curvature", steps = 24): string {
+  return colormapGradient(name, steps);
 }

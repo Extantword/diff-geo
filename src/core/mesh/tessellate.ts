@@ -1,5 +1,5 @@
+import { colormapColor, type ColormapName } from "../geom/colormaps.ts";
 import {
-  divergingColor,
   INVALID_COLOR,
   sampleCurvatureRange,
   type CurvatureRange,
@@ -73,6 +73,8 @@ export interface TessellateOptions {
   objectId?: number;
   /** the surface's own colour, for the uncoloured view */
   baseColor?: Vec3;
+  /** which colour map paints K; "solid" paints the surface's own colour instead */
+  colormap?: ColormapName;
 }
 
 export function tessellate(
@@ -80,7 +82,13 @@ export function tessellate(
   params: ArrayLike<number>,
   options: TessellateOptions = {},
 ): TessellatedSurface {
-  const { resU = 128, resV = 128, objectId = 0, baseColor = DEFAULT_BASE_COLOR } = options;
+  const {
+    resU = 128,
+    resV = 128,
+    objectId = 0,
+    baseColor = DEFAULT_BASE_COLOR,
+    colormap = "curvature",
+  } = options;
   const range = options.range ?? sampleCurvatureRange(surface, params);
 
   const [u0, u1] = sampleBounds(surface.u);
@@ -158,7 +166,7 @@ export function tessellate(
       normals[k * 3 + 2] = point.N[2];
       curvature[k] = point.K;
 
-      divergingColor(point.K / range.scale, rgb);
+      colormapColor(colormap, point.K / range.scale, rgb, baseColor);
       colors[k * 3] = rgb[0];
       colors[k * 3 + 1] = rgb[1];
       colors[k * 3 + 2] = rgb[2];

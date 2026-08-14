@@ -413,10 +413,14 @@ body {
   margin-top: 6px;
 }
 
+/* The interval's two ends read as one control: a heading row with both numbers, and the two
+   tracks stacked beneath it. Laid out as a column, or the tracks squeeze in beside the numbers
+   and end up a few pixels wide. */
 .domain {
   display: flex;
-  align-items: center;
-  gap: 4px;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 8px;
   font-size: 11px;
   color: var(--text-dim);
 }
@@ -711,6 +715,49 @@ option {
 
 .scene-card__body--hidden {
   display: none;
+}
+
+/* ---- a cell shows its typeset form, and its raw text only while edited ---- */
+
+.row .row__input {
+  display: none;
+}
+
+.row--editing .row__input {
+  display: block;
+}
+
+.row--editing .formula__echo {
+  display: none;
+}
+
+.cells__action {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  padding: 6px;
+  background: transparent;
+  border: 1px dashed var(--panel-border);
+  border-radius: 6px;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.cells__action:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.props__select {
+  flex: 1;
+  min-width: 0;
+  background: var(--field);
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 11px;
+  padding: 2px 4px;
 }
 
 /* ---- the cell bar ---- */

@@ -1,5 +1,6 @@
 import "./style.css";
 import { legendGradient } from "./core/geom/curvatureColor.ts";
+import type { ColormapName } from "./core/geom/colormaps.ts";
 import { createDocument, type RowId } from "./state/graph.ts";
 import {
   buildScene,
@@ -141,6 +142,7 @@ function main() {
       el("span", { text: scene.curvatureScale.toPrecision(3) }),
     ]);
 
+    syncLegend();
     const picking = renderer.pickAvailable();
     const surfaces = scene.mesh ? scene.mesh.triangleCount.toLocaleString() : "0";
     const curveCount = scene.lines.reduce((n, group) => n + group.polylines.length, 0);
@@ -283,6 +285,11 @@ function main() {
   let lastScene: Scene | null = null;
   const surfacePointAt = (rowId: RowId, u: number, v: number): Vec3 | null =>
     lastScene?.positionOf(rowId, u, v) ?? null;
+  /** Preview at the arc length the committed geodesic will use, so the drag does not mislead. */
+  const previewLength = (rowId: RowId) => {
+    const extent = lastScene?.bounds?.radius ?? 1;
+    return extent * (overlays.get(rowId)?.geodesicLength ?? 1.5);
+  };
   /** How far the pointer may travel and still count as a click, in CSS pixels. */
   const CLICK_SLOP = 4;
   /** Lines from the last built scene, so a preview can be drawn without rebuilding it. */
@@ -346,12 +353,32 @@ function main() {
       if (length < 1e-9) return;
 
       aimChart = [hit.u - gesture.u, hit.v - gesture.v];
-      previewLines = [
-        {
-          polylines: [arrow(gesture.origin, direction, length, AIM_COLOR)],
-          style: { widthPx: 3.4 },
-        },
-      ];
+
+      /**
+       * The preview is the geodesic itself, lying on the surface.
+       *
+       * A straight arrow through space would be cheaper and would faithfully show the initial
+       * VELOCITY, but it says nothing about where the curve goes — and on a curved surface those
+       * differ immediately, which is the whole point of the thing being aimed. Integrating one
+       * curve costs a few milliseconds against the ~150 ms of a scene rebuild, so the real curve
+       * is affordable as long as the scene is not rebuilt: `geodesicFrom` reuses the surface
+       * already compiled for this frame.
+       */
+      const preview = lastScene?.geodesicFrom(
+        gesture.rowId,
+        [gesture.u, gesture.v],
+        aimChart,
+        previewLength(gesture.rowId),
+      );
+
+      previewLines = preview
+        ? [{ polylines: [preview], style: { widthPx: 3.4 } }]
+        : // Falling back to the straight arrow when the geodesic cannot be integrated — at a pole,
+          // say — keeps the drag legible instead of silently showing nothing.
+          [{
+            polylines: [arrow(gesture.origin, direction, length, AIM_COLOR)],
+            style: { widthPx: 3.4 },
+          }];
       paintLines();
       renderer.invalidate();
       event.stopPropagation();
@@ -451,12 +478,32 @@ function main() {
    * and of the chart inset (bottom right, drawn into the canvas itself). It starts collapsed so
    * the default view is the geometry and a column of cells, and nothing else.
    */
+  /**
+   * The legend follows whichever map the surfaces are painted with.
+   *
+   * Colour maps are chosen per surface but the scale is shared, so the legend can only honestly
+   * label one map: it takes the first surface that has chosen one. A legend showing a different
+   * ramp from the surface beside it would be worse than none.
+   */
+  const legendBar = el("div", { class: "legend" });
+  const syncLegend = () => {
+    let name: ColormapName = "curvature";
+    for (const [, overlay] of overlays) {
+      if (overlay.colormap && overlay.colormap !== "solid") {
+        name = overlay.colormap;
+        break;
+      }
+    }
+    legendBar.style.background = legendGradient(name);
+  };
+  syncLegend();
+
   const sceneBody = el("div", { class: "scene-card__body" }, [
     templates,
     el("section", { class: "panel-section" }, [
       el("h2", { class: "section-title", text: "Gaussian curvature" }),
       el("label", { class: "toggle" }, [curvatureToggle, el("span", { text: "paint K" })]),
-      el("div", { class: "legend", style: `background:${legendGradient()}` }),
+      legendBar,
       legendLabels,
     ]),
     el("section", { class: "panel-section" }, [
