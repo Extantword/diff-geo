@@ -1610,11 +1610,29 @@ function echoFor(source: string): HTMLElement {
         return tex(
           `${nameTex(row.name)}\\left(${row.args.map(nameTex).join(", ")}\\right) = ${toLatex(row.body)}`,
         );
-      case "vectorFunction":
+      case "vectorFunction": {
+        const head = `${nameTex(row.name)}\\left(${row.args.map(nameTex).join(", ")}\\right)`;
+        /**
+         * A surface is typeset the way it is written: stacked, one named coordinate per line.
+         *
+         * The preview and the editable text are two views of one thing, so they have to agree on
+         * SHAPE as well as content — reading a formula laid out over three lines and then seeing
+         * it typeset as one long row means re-finding your place every time. It also fixes the
+         * overflow: three components of a torus on one line simply run off the panel.
+         *
+         * Matched to `formatSurfaceSource` exactly — two arguments, three components — so the
+         * two never disagree about which rows get the treatment.
+         */
+        if (row.args.length === 2 && row.comps.length === COMPONENT_NAMES.length) {
+          const rows = row.comps
+            .map((c, index) => `${COMPONENT_NAMES[index]} &= ${toLatex(c)}`)
+            .join(" \\\\ ");
+          return tex(`${head} = \\left(\\begin{aligned} ${rows} \\end{aligned}\\right)`);
+        }
         return tex(
-          `${nameTex(row.name)}\\left(${row.args.map(nameTex).join(", ")}\\right) = ` +
-            `\\left(${row.comps.map((c) => toLatex(c)).join(",\\; ")}\\right)`,
+          `${head} = \\left(${row.comps.map((c) => toLatex(c)).join(",\\; ")}\\right)`,
         );
+      }
       case "equation":
         return tex(`${toLatex(row.lhs)} = ${toLatex(row.rhs)}`);
       case "tuple":
