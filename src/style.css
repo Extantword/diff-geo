@@ -769,6 +769,43 @@ option {
 }
 
 /*
+ * A chip: a symbol that toggles. Square, so a row of them reads as a row of buttons rather than
+ * as running text, and sized to the same height as the fields beside it.
+ */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  height: 21px;
+  padding: 0 5px;
+  background: var(--field);
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.chip sub {
+  font-size: 8px;
+}
+
+.chip:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+/* Pressed state carried by the fill, so which tools are live is readable at a glance across the
+   whole bar rather than one control at a time. */
+.chip--on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #ffffff;
+}
+
+/*
  * The prose hints are for the panel, not the toolbar. Each one restates what the control next to
  * it already says — "drag to aim a geodesic" is the checkbox's own label — and a sentence is
  * several times the width of the thing it explains.
@@ -1024,6 +1061,14 @@ option {
 
 .transport__speed:hover {
   color: var(--text);
+}
+
+/* The K and H readout: a measurement, so it is set in the same monospace as the fields and its
+   meaning is one hover away rather than spelled out in the bar. */
+.props .row__notes {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11px;
+  color: var(--text-dim);
 }
 
 /* ---- the cell bar ---- */

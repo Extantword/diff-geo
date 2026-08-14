@@ -173,3 +173,71 @@ describe("a numeric cell's typeset view", () => {
     expect(echo.textContent).toContain("3.5");
   });
 });
+
+describe("the toolbar is compact", () => {
+  beforeEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  it("labels the overlay tools with symbols, each explained on hover", () => {
+    /**
+     * The audience reads mathematics, so the symbols ARE the labels — and the reason that is
+     * legitimate rather than merely terse is that every one carries its full description in a
+     * tooltip. A symbol with no way to look it up would just be a smaller obstacle.
+     */
+    const { store, list } = makeList(["X(u,v) = (u, v, 0)"]);
+    document.body.append(list.root, list.card);
+    list.refresh([]);
+    list.select(store.rows()[0]!.id);
+
+    const chips = [...list.card.querySelectorAll<HTMLElement>(".chip")];
+    expect(chips.length).toBeGreaterThanOrEqual(4);
+    for (const chip of chips) {
+      expect(chip.title.length, chip.textContent ?? "").toBeGreaterThan(10);
+    }
+    // No spelled-out phrases left in the strip's own labels.
+    expect(list.card.textContent).not.toContain("lines of curvature");
+    expect(list.card.textContent).not.toContain("drag to aim a geodesic");
+  });
+
+  it("carries a chip's pressed state through to the overlay", () => {
+    const overlays = new Map();
+    const store = createDocument(["X(u,v) = (u, v, 0)"]);
+    const list = createExprList({
+      document: store,
+      onEdit: () => {},
+      onParameterChange: () => {},
+      domains: new Map(),
+      sliders: new Map(),
+      frames: new Map(),
+      rowSliders: new Map(),
+      inChart: new Set(),
+      animator: createAnimator(),
+      overlays,
+      colors: new Map(),
+    });
+    document.body.append(list.root, list.card);
+    list.refresh([]);
+    const id = store.rows()[0]!.id;
+    list.select(id);
+
+    const gauss = [...list.card.querySelectorAll<HTMLElement>(".chip")].find(
+      (chip) => chip.title.includes("Gauss"),
+    )!;
+    expect(gauss).toBeDefined();
+    gauss.click();
+    expect(gauss.classList.contains("chip--on")).toBe(true);
+    expect(overlays.get(id)?.gaussMap).toBe(true);
+  });
+
+  it("explains K and H on the readout that shows them", () => {
+    // The user's own question: the bar says K and H and had no way to find out what they were.
+    const { store, list } = makeList(["X(u,v) = (u, v, 0)"]);
+    document.body.append(list.root, list.card);
+    list.refresh([{ rowId: store.rows()[0]!.id, errors: [], warnings: [], info: ["K = 0.000   H = 0.000"] }]);
+
+    const info = list.card.querySelector<HTMLElement>(".row__info")!;
+    expect(info.title).toContain("Gaussian curvature");
+    expect(info.title).toContain("mean curvature");
+  });
+});

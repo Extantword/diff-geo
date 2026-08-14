@@ -505,6 +505,7 @@ export function createExprList(options: ExprListOptions): ExprList {
     const colorSwatch = el("input", {
       type: "color",
       class: "props__color",
+      title: "this object's colour; choosing one paints the surface solid",
       value: toHex(options.colors.get(id) ?? defaultColorFor(id)),
       onInput: () => {
         options.colors.set(id, fromHex(colorSwatch.value));
@@ -539,10 +540,7 @@ export function createExprList(options: ExprListOptions): ExprList {
 
     const details = el("div", { class: "props__body" }, [
       notes,
-      el("label", { class: "props__row" }, [
-        el("span", { text: "colour" }),
-        colorSwatch,
-      ]),
+      colorSwatch,
       chartHost,
       domainHost,
       overlayHost,
@@ -589,6 +587,33 @@ export function createExprList(options: ExprListOptions): ExprList {
    */
   const speedSelects = new Set<HTMLSelectElement>();
   const SPEEDS: readonly number[] = [0.25, 0.5, 1, 2, 4];
+
+  /**
+   * A toolbar chip: a short symbol that toggles, with its meaning in the tooltip.
+   *
+   * The audience reads mathematics, so the symbols ARE the labels — γ is a geodesic, s is arc
+   * length, k₁k₂ are the lines of curvature, N is the Gauss map. Each is a few pixels where the
+   * spelled-out phrase was a hundred, and none of them is a guess the reader has to make: the
+   * full description is one hover away.
+   */
+  const chip = (
+    symbol: string,
+    title: string,
+    pressed: boolean,
+    onToggle: (next: boolean) => void,
+  ): HTMLButtonElement => {
+    const button = el("button", {
+      class: `chip${pressed ? " chip--on" : ""}`,
+      title,
+      html: symbol,
+    }) as HTMLButtonElement;
+    button.addEventListener("click", () => {
+      const next = !button.classList.contains("chip--on");
+      button.classList.toggle("chip--on", next);
+      onToggle(next);
+    });
+    return button;
+  };
 
   const transport = (key: string): HTMLElement => {
     const play = el("button", {
@@ -1020,23 +1045,26 @@ export function createExprList(options: ExprListOptions): ExprList {
       commit();
     });
 
-    const curvature = el("input", {
-      type: "checkbox",
-      checked: curvatureLines,
-    }) as HTMLInputElement;
-    curvature.addEventListener("change", () => {
-      curvatureLines = curvature.checked;
-      commit();
-    });
+    const curvature = chip(
+      "k<sub>1</sub>k<sub>2</sub>",
+      "lines of curvature through the start point",
+      curvatureLines,
+      (next) => {
+        curvatureLines = next;
+        commit();
+      },
+    );
 
-    const gauss = el("input", {
-      type: "checkbox",
-      checked: gaussMap,
-    }) as HTMLInputElement;
-    gauss.addEventListener("change", () => {
-      gaussMap = gauss.checked;
-      commit();
-    });
+    const gauss = chip(
+      "N",
+      "Gauss map: N: S \u2192 S\u00b2 drawn beside the surface, in the same colours \u2014 " +
+        "its image folds where K = 0",
+      gaussMap,
+      (next) => {
+        gaussMap = next;
+        commit();
+      },
+    );
 
     const shotCount = () => options.overlays.get(view.id)?.shots?.length ?? 0;
 
@@ -1067,18 +1095,19 @@ export function createExprList(options: ExprListOptions): ExprList {
      * object the user pointed at — dragging anywhere else still moves the camera, which is what
      * keeps this from being a mode you get stuck in.
      */
-    const aim = el("input", {
-      type: "checkbox",
-      checked: aiming,
-    }) as HTMLInputElement;
-    aim.addEventListener("change", () => {
-      aiming = aim.checked;
-      commit();
-    });
+    const aim = chip(
+      "\u2197",
+      "aim: drag on this surface to shoot a geodesic in the direction dragged",
+      aiming,
+      (next) => {
+        aiming = next;
+        commit();
+      },
+    );
 
     const clearShots = el("button", {
-      class: "props__button",
-      text: "clear",
+      class: "chip",
+      text: "\u232b",
       title: "remove every aimed geodesic",
       onClick: () => {
         const overlay = options.overlays.get(view.id);
@@ -1089,13 +1118,10 @@ export function createExprList(options: ExprListOptions): ExprList {
     });
 
     replace(view.overlayHost, [
-      el("label", { class: "props__row" }, [
-        el("span", { text: "colour map" }),
-        colormapSelect,
-      ]),
+      colormapSelect,
       el("div", { class: "slider" }, [
         el("label", { class: "slider__label" }, [
-          el("span", { text: "geodesic spray" }),
+          el("span", { text: "\u03b3", title: "geodesics fanned from the start point" }),
           countReadout,
         ]),
         count,
@@ -1106,35 +1132,15 @@ export function createExprList(options: ExprListOptions): ExprList {
       }),
       el("div", { class: "slider" }, [
         el("label", { class: "slider__label" }, [
-          el("span", { text: "arc length" }),
+          el("span", { text: "s", title: "arc length of each geodesic" }),
           lengthReadout,
         ]),
         length,
       ]),
-      el("label", { class: "toggle toggle--tight" }, [
-        curvature,
-        el("span", { text: "lines of curvature" }),
-        el("span", { class: "frame-key" }, [
-          el("span", { class: "frame-key__b", text: "k\u2081" }),
-          el("span", { class: "curvature-key__2", text: "k\u2082" }),
-        ]),
-      ]),
-      el("label", { class: "toggle toggle--tight" }, [
-        aim,
-        el("span", { text: "drag to aim a geodesic" }),
-      ]),
-      el("div", { class: "props__row" }, [
-        el("span", { class: "overlay__hint", text: "drag on the surface to shoot" }),
-        clearShots,
-      ]),
-      el("label", { class: "toggle toggle--tight" }, [
-        gauss,
-        el("span", { text: "Gauss map" }),
-      ]),
-      el("div", {
-        class: "overlay__hint",
-        text: "N: S \u2192 S\u00b2 drawn beside the surface, same colours \u2014 the image folds where K = 0",
-      }),
+      curvature,
+      aim,
+      clearShots,
+      gauss,
     ]);
   };
 
@@ -1417,7 +1423,21 @@ export function createExprList(options: ExprListOptions): ExprList {
       notes.push(el("div", { class: "diag diag--warning", text: message }));
     }
     for (const message of report?.info ?? []) {
-      notes.push(el("div", { class: "row__info", text: message }));
+      /**
+       * A readout is only useful if its symbols can be looked up.
+       *
+       * `K = -1.190  H = 0.476` is opaque unless you already know the convention, and the panel
+       * has no room to spell it out — so the definition rides along as a tooltip on the line that
+       * shows it. K is the one that survives bending the surface without stretching it, which is
+       * the fact worth knowing about it.
+       */
+      notes.push(
+        el("div", {
+          class: "row__info",
+          text: message,
+          title: message.startsWith("K =") ? CURVATURE_TOOLTIP : undefined,
+        }),
+      );
     }
     if (item && NOT_YET_DRAWN.has(item.kind)) {
       notes.push(
@@ -1585,6 +1605,19 @@ function autoSize(field: HTMLTextAreaElement): void {
   field.style.height = "auto";
   field.style.height = `${field.scrollHeight}px`;
 }
+
+/**
+ * What the curvature readout means, for the tooltip.
+ *
+ * Both are built from the principal curvatures k₁ and k₂ — the largest and smallest amounts the
+ * surface bends at a point. K is intrinsic and H is not, which is the distinction the whole of do
+ * Carmo's chapter 4 rests on.
+ */
+const CURVATURE_TOOLTIP =
+  "K = k\u2081k\u2082 is the Gaussian curvature: > 0 dome-like, < 0 saddle-like, 0 flat in one " +
+  "direction. It is intrinsic \u2014 unchanged by bending the surface without stretching it.\n" +
+  "H = (k\u2081 + k\u2082)/2 is the mean curvature. It depends on the choice of unit normal and " +
+  "flips sign with it; H = 0 everywhere means a minimal surface.";
 
 /** Coordinate names for the components of a map into R³, in order. */
 const COMPONENT_NAMES = ["x", "y", "z"];
