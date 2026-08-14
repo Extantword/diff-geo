@@ -50,6 +50,15 @@ export interface Renderer {
    */
   pick(cssX: number, cssY: number): PickResult | null;
   pickAvailable(): { available: boolean; reason: string };
+  /**
+   * Turn a point on screen into a point in space, on the plane through `through` facing the
+   * camera.
+   *
+   * That plane is what a viewer reads as "where I am pointing": it passes through the scene and
+   * is perpendicular to the line of sight, so the answer is at the depth of what is being looked
+   * at rather than at some arbitrary distance along the ray.
+   */
+  unproject(cssX: number, cssY: number, through: [number, number, number]): [number, number, number] | null;
   start(): void;
   stop(): void;
   dispose(): void;
@@ -176,6 +185,41 @@ export function createRenderer(device: Device): Renderer {
       // the next frame has to reissue its own state. Marking dirty is what guarantees that.
       invalidate();
       return hit;
+    },
+
+    unproject(cssX, cssY, through) {
+      const width = Math.max(1, device.canvas.clientWidth);
+      const height = Math.max(1, device.canvas.clientHeight);
+      const { forward, right, up, fov } = camera.basis();
+      const eye = camera.eye();
+
+      // Normalised device coordinates, with y flipped: pointer events measure down from the top.
+      const ndcX = (cssX / width) * 2 - 1;
+      const ndcY = 1 - (cssY / height) * 2;
+      const tanHalf = Math.tan(fov / 2);
+      const aspect = width / height;
+
+      const dir: [number, number, number] = [
+        forward[0] + right[0] * ndcX * tanHalf * aspect + up[0] * ndcY * tanHalf,
+        forward[1] + right[1] * ndcX * tanHalf * aspect + up[1] * ndcY * tanHalf,
+        forward[2] + right[2] * ndcX * tanHalf * aspect + up[2] * ndcY * tanHalf,
+      ];
+
+      // Distance along the ray at which it crosses the plane. The denominator is the ray's
+      // component along the view direction, which is positive for anything in front of the
+      // camera and vanishes only for a ray parallel to the plane.
+      const denominator =
+        dir[0] * forward[0] + dir[1] * forward[1] + dir[2] * forward[2];
+      if (Math.abs(denominator) < 1e-9) return null;
+      const offset: [number, number, number] = [
+        through[0] - eye[0],
+        through[1] - eye[1],
+        through[2] - eye[2],
+      ];
+      const depth =
+        offset[0] * forward[0] + offset[1] * forward[1] + offset[2] * forward[2];
+      const t = depth / denominator;
+      return [eye[0] + dir[0] * t, eye[1] + dir[1] * t, eye[2] + dir[2] * t];
     },
 
     pickAvailable() {

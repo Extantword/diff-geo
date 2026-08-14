@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createDocument } from "../../src/state/graph.ts";
+import type { Vec3 } from "../../src/core/geom/types.ts";
 import { buildScene, type DomainRange, type FrameRequest } from "../../src/state/scene.ts";
 import { divergingColor } from "../../src/core/geom/curvatureColor.ts";
 import type { RowId } from "../../src/state/graph.ts";
@@ -956,5 +957,70 @@ describe("the Gauss map beside the surface", () => {
     }
     expect(zs.length).toBeGreaterThan(100);
     expect(Math.max(...zs) - Math.min(...zs)).toBeLessThan(1e-4);
+  });
+});
+
+describe("arranging objects in space", () => {
+  /**
+   * A translation is ARRANGEMENT, not geometry. The whole reason it is applied to the drawn
+   * positions rather than folded into the map is that every curvature is a derivative of X, and a
+   * constant offset differentiates away — so moving a surface must leave K, H and the principal
+   * directions untouched. That is the property worth testing; where the vertices land is the easy
+   * half.
+   */
+  function placed(offset: readonly [number, number, number] | null) {
+    const document = createDocument(["X(u,v) = (sin u cos v, sin u sin v, cos u)"]);
+    const rowId = document.rows()[0]!.id;
+    return buildScene({
+      items: [...document.resolution().items.values()],
+      parameters: new Map(),
+      domains: new Map([
+        [rowId, [{ min: 0.01, max: Math.PI - 0.01 }, { min: 0, max: 2 * Math.PI }]],
+      ]),
+      resolution: 32,
+      translations: offset ? new Map([[rowId, [...offset] as Vec3]]) : undefined,
+      overlays: new Map([
+        [rowId, { geodesics: 4, geodesicLength: 1, curvatureLines: false }],
+      ]),
+    });
+  }
+
+  it("moves every vertex by the offset and nothing else", () => {
+    const here = placed(null);
+    const there = placed([10, -3, 4]);
+    expect(there.mesh!.vertexCount).toBe(here.mesh!.vertexCount);
+    for (let k = 0; k < here.mesh!.vertexCount; k += 37) {
+      expect(there.mesh!.positions[k * 3]! - here.mesh!.positions[k * 3]!).toBeCloseTo(10, 4);
+      expect(there.mesh!.positions[k * 3 + 1]! - here.mesh!.positions[k * 3 + 1]!).toBeCloseTo(-3, 4);
+      expect(there.mesh!.positions[k * 3 + 2]! - here.mesh!.positions[k * 3 + 2]!).toBeCloseTo(4, 4);
+    }
+  });
+
+  it("leaves the curvature identical", () => {
+    // The claim that makes this safe: a unit sphere still has K = 1 wherever you put it.
+    const here = placed(null);
+    const there = placed([10, -3, 4]);
+    for (let k = 0; k < here.mesh!.vertexCount; k += 53) {
+      expect(there.mesh!.curvature[k]!).toBeCloseTo(here.mesh!.curvature[k]!, 12);
+    }
+    expect(there.curvatureScale).toBeCloseTo(here.curvatureScale, 12);
+  });
+
+  it("carries the object's curves along with it", () => {
+    // Geodesics, lines of curvature and frame glyphs all belong to the object; a surface that
+    // moved while its geodesics stayed behind would be worse than one that did not move at all.
+    const here = placed(null);
+    const there = placed([10, -3, 4]);
+    const first = (scene: typeof here) => scene.lines[0]!.polylines[0]!;
+    expect(first(there).points[0]! - first(here).points[0]!).toBeCloseTo(10, 4);
+    expect(first(there).points[1]! - first(here).points[1]!).toBeCloseTo(-3, 4);
+    expect(first(there).points[2]! - first(here).points[2]!).toBeCloseTo(4, 4);
+  });
+
+  it("moves the bounding sphere so the camera still frames it", () => {
+    const here = placed(null);
+    const there = placed([10, -3, 4]);
+    expect(there.bounds!.center[0] - here.bounds!.center[0]).toBeCloseTo(10, 3);
+    expect(there.bounds!.radius).toBeCloseTo(here.bounds!.radius, 3);
   });
 });

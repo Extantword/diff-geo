@@ -47,6 +47,14 @@ export interface LineStyle {
 }
 
 export interface LineGroup {
+  /**
+   * Which document row drew this group, when one did.
+   *
+   * Lets the scene move every curve an object produces — its own, its geodesics, its lines of
+   * curvature, its frame glyphs — in a single pass, so a new kind of curve added later cannot
+   * forget to follow the object it belongs to.
+   */
+  readonly rowId?: number;
   readonly polylines: readonly Polyline[];
   readonly style?: LineStyle;
 }

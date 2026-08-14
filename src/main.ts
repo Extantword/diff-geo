@@ -90,6 +90,8 @@ function main() {
   const overlays = new Map<RowId, SurfaceOverlay>();
   /** Per-row colour, set from the properties card and used everywhere that row is drawn. */
   const colors = new Map<RowId, Vec3>();
+  /** Where each object sits. Arrangement only — it never touches a curvature. */
+  const translations = new Map<RowId, Vec3>();
   /** Chart coordinates of the last successful pick, for the diagnostics readout. */
   let pickedAt: { u: number; v: number } | null = null;
   const animator = createAnimator();
@@ -121,6 +123,7 @@ function main() {
       inChart,
       overlays,
       colors,
+      translations,
     });
 
     renderer.setSurfaceMesh(scene.mesh ?? EMPTY_MESH);
@@ -461,6 +464,46 @@ function main() {
    * you are looking. Typing into the field and pressing Enter creates a cell on the left, so the
    * menu is a shortcut into the same document rather than a separate way of making objects.
    */
+  /**
+   * Where a newly created object should sit.
+   *
+   * Two cases, and the difference is what the click landed on. On EMPTY SPACE the answer is
+   * simply "there": the click ray is intersected with the plane through the scene's centre facing
+   * the camera, which is the surface a viewer reads as "the place I am pointing at". On an
+   * EXISTING SURFACE, dropping the new object at that point would bury it inside the old one, so
+   * it is offset clear of that object's extent — beside it, along whichever screen direction has
+   * the most room.
+   *
+   * Returns a translation, never a change to the formula. A parametrization says where its points
+   * are relative to its own origin; where that origin sits is arrangement.
+   */
+  const placementFor = (event: MouseEvent, exclude: RowId): Vec3 => {
+    const bounds = lastScene?.bounds;
+    if (!bounds) return [0, 0, 0];
+
+    const rect = canvas.getBoundingClientRect();
+    const hit = renderer.pick(event.clientX - rect.left, event.clientY - rect.top);
+    const point = renderer.unproject(
+      event.clientX - rect.left,
+      event.clientY - rect.top,
+      bounds.center,
+    );
+    if (!point) return [0, 0, 0];
+
+    if (!hit || hit.rowId === exclude) return point;
+
+    /**
+     * Landed on something: step aside rather than inside it.
+     *
+     * The offset is along the camera's own right vector, so "beside" means beside as SEEN, which
+     * is what a person pointing at a crowded scene means. Its size comes from the scene's extent,
+     * so it scales with whatever is already there.
+     */
+    const right = renderer.camera.basis().right;
+    const step = bounds.radius * 1.2;
+    return [point[0] + right[0] * step, point[1] + right[1] * step, point[2] + right[2] * step];
+  };
+
   const menu = el("div", { class: "context-menu context-menu--hidden" });
   canvas.parentElement?.append(menu);
 
@@ -481,6 +524,7 @@ function main() {
       const source = field.value.trim();
       if (source === "") return;
       const row = store.addRow(source);
+      translations.set(row.id, placementFor(event, row.id));
       closeMenu();
       onEdit(true);
       list.select(row.id);

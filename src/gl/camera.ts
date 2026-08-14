@@ -15,6 +15,14 @@ export interface Camera {
   view(): Mat4;
   projection(aspect: number): Mat4;
   eye(): V3;
+  /**
+   * The camera's own axes in world space, and its vertical field of view.
+   *
+   * Exposed so a screen point can be turned back into a world ray. Derived here rather than by
+   * inverting the view-projection matrix: the basis is what the view matrix is BUILT from, so
+   * reading it straight off is exact and needs no matrix inverse that could quietly disagree.
+   */
+  basis(): { forward: V3; right: V3; up: V3; fov: number };
   setAiming(aiming: boolean): void;
   isAiming(): boolean;
   /** Frame a bounding sphere. */
@@ -104,6 +112,34 @@ export function createCamera(): Camera {
     },
 
     eye: eyeOf,
+
+    basis() {
+      const eye = eyeOf();
+      // Built as plain mutable triples and frozen into V3 on return: V3 is readonly, which is
+      // the right contract for a camera axis but not for one being normalised in place.
+      const fx = ctx - eye[0];
+      const fy = cty - eye[1];
+      const fz = ctz - eye[2];
+      const flen = Math.hypot(fx, fy, fz) || 1;
+      const forward: V3 = [fx / flen, fy / flen, fz / flen];
+
+      /**
+       * right = forward × worldUp, then up = right × forward.
+       *
+       * Taken in that order so the pair stays orthonormal even when the camera looks steeply up
+       * or down, where forward and worldUp are nearly parallel and the cross product collapses —
+       * the fallback catches exactly that case.
+       */
+      const rlen = Math.hypot(forward[2], 0, -forward[0]);
+      const right: V3 =
+        rlen > 1e-9 ? [forward[2] / rlen, 0, -forward[0] / rlen] : [1, 0, 0];
+      const up: V3 = [
+        right[1] * forward[2] - right[2] * forward[1],
+        right[2] * forward[0] - right[0] * forward[2],
+        right[0] * forward[1] - right[1] * forward[0],
+      ];
+      return { forward, right, up, fov: FOV };
+    },
 
     setAiming(a) {
       aiming = a;

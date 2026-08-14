@@ -98,6 +98,16 @@ export interface SceneRequest {
    * letting it be reassigned per object would make the legend meaningless.
    */
   readonly colors?: ReadonlyMap<RowId, Vec3>;
+  /**
+   * Where each object sits, as a translation applied after its formula.
+   *
+   * A parametrization already says where its points are, so this is not geometry — it is
+   * ARRANGEMENT, which is why it is a rigid translation and nothing more. Moving a surface must
+   * not change a single curvature: K, H and the principal directions are all built from
+   * derivatives of X, and a constant offset differentiates away. So the translation is applied to
+   * the drawn positions only, never to the map the geometry is computed from.
+   */
+  readonly translations?: ReadonlyMap<RowId, Vec3>;
 }
 
 /**
@@ -288,6 +298,29 @@ export interface Scene {
   ): Polyline | null;
 }
 
+/** No translation, shared so the common case allocates nothing. */
+const ZERO_OFFSET: Vec3 = [0, 0, 0];
+
+/** Shift every vertex of a mesh in place. */
+function translateMesh(mesh: TessellatedSurface, offset: Vec3): void {
+  if (offset[0] === 0 && offset[1] === 0 && offset[2] === 0) return;
+  for (let k = 0; k < mesh.vertexCount; k++) {
+    mesh.positions[k * 3] = mesh.positions[k * 3]! + offset[0];
+    mesh.positions[k * 3 + 1] = mesh.positions[k * 3 + 1]! + offset[1];
+    mesh.positions[k * 3 + 2] = mesh.positions[k * 3 + 2]! + offset[2];
+  }
+}
+
+/** Shift every point of a polyline in place. */
+function translatePolyline(line: Polyline, offset: Vec3): void {
+  if (offset[0] === 0 && offset[1] === 0 && offset[2] === 0) return;
+  for (let k = 0; k < line.count; k++) {
+    line.points[k * 3] = line.points[k * 3]! + offset[0];
+    line.points[k * 3 + 1] = line.points[k * 3 + 1]! + offset[1];
+    line.points[k * 3 + 2] = line.points[k * 3 + 2]! + offset[2];
+  }
+}
+
 /** Distinct colours for curves, cycled by row order. */
 const CURVE_PALETTE: readonly Vec3[] = [
   [0.45, 0.78, 1.0],
@@ -380,6 +413,8 @@ export function buildScene(request: SceneRequest): Scene {
   const inChart = request.inChart ?? new Set<RowId>();
   const overlays = request.overlays ?? new Map<RowId, SurfaceOverlay>();
   const rowColors = request.colors ?? new Map<RowId, Vec3>();
+  const translations = request.translations ?? new Map<RowId, Vec3>();
+  const offsetOf = (rowId: RowId): Vec3 => translations.get(rowId) ?? ZERO_OFFSET;
   /** This row's chosen colour, or the built-in default for whatever it draws. */
   const colorOf = (rowId: RowId, fallback: Vec3): Vec3 => rowColors.get(rowId) ?? fallback;
 
@@ -483,6 +518,15 @@ export function buildScene(request: SceneRequest): Scene {
         baseColor: rowColors.get(item.rowId),
         colormap: overlays.get(item.rowId)?.colormap,
       });
+      /**
+       * Arrangement is applied to the DRAWN mesh only.
+       *
+       * Never to the map the geometry came from: every curvature is a derivative of X, and a
+       * constant offset differentiates away — so moving a surface must leave K, H and the
+       * principal directions untouched, and the one way to guarantee that is to translate after
+       * they have been computed rather than before.
+       */
+      translateMesh(mesh, offsetOf(item.rowId));
       meshes.push(mesh);
       entry.mesh = mesh;
 
@@ -602,7 +646,7 @@ export function buildScene(request: SceneRequest): Scene {
             );
           }
           if (polylines.length > 0) {
-            lines.push({ polylines, style: { widthPx: 2.6 } });
+            lines.push({ rowId: item.rowId, polylines, style: { widthPx: 2.6 } });
           }
           // Reporting WHY each ray ended is the difference between a picture and a diagnosis.
           reports.push({
@@ -645,7 +689,7 @@ export function buildScene(request: SceneRequest): Scene {
             ),
           );
         }
-        if (aimed.length > 0) lines.push({ polylines: aimed, style: { widthPx: 3.0 } });
+        if (aimed.length > 0) lines.push({ rowId: item.rowId, polylines: aimed, style: { widthPx: 3.0 } });
         reports.push({
           rowId: item.rowId,
           info: `${aimed.length} aimed · ${[...shotStops]
@@ -692,7 +736,7 @@ export function buildScene(request: SceneRequest): Scene {
               );
             }
           }
-          if (polylines.length > 0) lines.push({ polylines, style: { widthPx: 3 } });
+          if (polylines.length > 0) lines.push({ rowId: item.rowId, polylines, style: { widthPx: 3 } });
         }
       }
     } catch (thrown) {
@@ -738,7 +782,7 @@ export function buildScene(request: SceneRequest): Scene {
         arcLength: frames.arcLength,
         color: colorOf(item.rowId, CURVE_PALETTE[curveIndex % CURVE_PALETTE.length]!),
       };
-      lines.push({ polylines: [polyline], style: { widthPx: 3.5 } });
+      lines.push({ rowId: item.rowId, polylines: [polyline], style: { widthPx: 3.5 } });
       curveIndex++;
 
       // The moving frame, if this row asked for one. Its position along the domain is
@@ -767,7 +811,7 @@ export function buildScene(request: SceneRequest): Scene {
           glyphs.push(arrow(frame.p, frame.B, glyphLength, B_COLOR));
         }
         if (glyphs.length > 0) {
-          lines.push({ polylines: glyphs, style: { widthPx: 5 } });
+          lines.push({ rowId: item.rowId, polylines: glyphs, style: { widthPx: 5 } });
         }
       }
 
@@ -829,7 +873,7 @@ export function buildScene(request: SceneRequest): Scene {
           lift,
         );
         chartCurves.push(result.chart);
-        if (result.surface) lines.push({ polylines: [result.surface], style: { widthPx: 4 } });
+        if (result.surface) lines.push({ rowId: item.rowId, polylines: [result.surface], style: { widthPx: 4 } });
         reports.push({
           rowId: item.rowId,
           info:
@@ -867,7 +911,7 @@ export function buildScene(request: SceneRequest): Scene {
         );
         chartCurves.push(...result.chart);
         if (result.surface.length > 0) {
-          lines.push({ polylines: result.surface, style: { widthPx: 4 } });
+          lines.push({ rowId: item.rowId, polylines: result.surface, style: { widthPx: 4 } });
         }
         reports.push({
           rowId: item.rowId,
@@ -906,7 +950,7 @@ export function buildScene(request: SceneRequest): Scene {
         );
 
         chartCurves.push(result.chart);
-        if (result.surface) lines.push({ polylines: [result.surface], style: { widthPx: 4 } });
+        if (result.surface) lines.push({ rowId: item.rowId, polylines: [result.surface], style: { widthPx: 4 } });
 
         reports.push({
           rowId: item.rowId,
@@ -954,7 +998,23 @@ export function buildScene(request: SceneRequest): Scene {
       reports.push({ rowId: item.rowId, error: messageOf(thrown) });
     }
   }
+  // Points from several rows share one group, so this one carries no owner and is not moved by
+  // any object's arrangement.
   if (dots.length > 0) lines.push({ polylines: dots, style: { widthPx: 11 } });
+
+  /**
+   * Curves are shifted at the end, in one pass over the finished groups.
+   *
+   * Doing it here rather than at each construction site means every polyline a row produces —
+   * its own curve, its geodesics, its lines of curvature, its frame glyphs, its chart curve
+   * pushed onto a surface — moves with the object automatically, and a new kind of curve added
+   * later cannot forget to.
+   */
+  for (const group of lines) {
+    if (group.rowId === undefined) continue;
+    const offset = offsetOf(group.rowId);
+    for (const polyline of group.polylines) translatePolyline(polyline, offset);
+  }
 
   const mesh = meshes.length === 0 ? null : concatenate(meshes);
   const bounds = computeBounds(mesh, lines);
