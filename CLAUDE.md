@@ -98,6 +98,23 @@ a silent failure that looks like a rendering bug. `robustScale` takes the 98th p
 outliers saturate the colormap instead of flattening everything. ManifoldSandbox has the `max`
 version; do not copy it back.
 
+**Debounce text edits; throttle everything else.** A debounce waits for quiet, so a *held* slider
+produces nothing until release and then jumps — jank, even though each render was fast. Only a
+change that must **reparse** belongs on `onEdit`. Parameter values, domain bounds and overlay
+settings change no formula, so they go through `onParameterChange`: one draft render per animation
+frame, upgrading to full resolution once the drag settles. This mistake has now been made three
+times — parameter sliders, domain sliders, overlay sliders.
+
+**Focus and click ownership are implicit in the DOM, and that is where this UI keeps breaking.**
+Three separate bugs, one root: replacing a focused `<input>`; reparenting a node containing one
+(`append` on an existing child is a *move*, which detaches and reinserts); and a parent click
+handler stealing a child control's click. A row-level handler must test `event.target.closest(
+"input, button, select, textarea, label, …")` before acting.
+
+**`el()` sets attributes, and a `<textarea>`'s text is not an attribute.** `setAttribute("value",…)`
+is silently ignored there — the element is created empty and stays empty, while the attribute shows
+up in the inspector. `dom.ts` special-cases it; anything else property-backed needs the same care.
+
 **Never replace a DOM element the user might be typing in.** Rebuilding an `<input>` destroys its
 focus and caret, which reads as the UI refusing input. Build fields once; update only their
 siblings. Feature code goes through `ui/dom.ts` and never touches `appendChild` directly.

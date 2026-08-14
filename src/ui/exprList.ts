@@ -399,6 +399,21 @@ export function createExprList(options: ExprListOptions): ExprList {
     const paramHost = el("div", { class: "row__params" });
 
     const enterEdit = () => {
+      /**
+       * Lay a surface out before showing it, so the text being edited matches the shape of the
+       * typeset form above it.
+       *
+       * Formatting only on blur left a gap: anything that arrived already written on one line —
+       * a template, a pasted formula, a cell never yet edited — opened as a single dense line
+       * even though its preview was the multi-line map. Doing it on the way IN as well means the
+       * two views always agree, and since the formatter is idempotent this costs nothing for a
+       * cell that has been edited before.
+       */
+      const formatted = formatSurfaceSource(input.value);
+      if (formatted !== null && formatted !== input.value) {
+        input.value = formatted;
+        row.source.set(formatted);
+      }
       root.classList.add("row--editing");
       autoSize(input);
       input.focus();
@@ -737,6 +752,16 @@ export function createExprList(options: ExprListOptions): ExprList {
          * they are two views of one number and whichever the user touched must not be written
          * back to — assigning to an input the user is dragging or typing in fights them.
          */
+        /**
+         * Committed through the PARAMETER path, not the edit path.
+         *
+         * A domain bound changes nothing about the formula — no reparse, no recompile, only a
+         * different sampling interval — so it belongs on the throttled route that runs one draft
+         * render per animation frame and upgrades to full resolution once the drag settles.
+         * `onEdit` debounces, and a debounce waits for quiet: a held slider produced nothing at
+         * all until release and then jumped, which is exactly the jank a throttle exists to
+         * prevent. The same mistake was made once already, on the parameter sliders.
+         */
         const commit = (which: "min" | "max", value: number, source: "slider" | "number") => {
           if (!Number.isFinite(value)) return;
           entry[which] = value;
@@ -744,7 +769,7 @@ export function createExprList(options: ExprListOptions): ExprList {
           const sliderField = which === "min" ? minSlider : maxSlider;
           if (source === "slider") numberField.value = String(Number(value.toFixed(4)));
           else sliderField.value = String(value);
-          options.onEdit(false);
+          options.onParameterChange();
         };
 
         minSlider.addEventListener("input", () => commit("min", Number(minSlider.value), "slider"));
@@ -881,7 +906,12 @@ export function createExprList(options: ExprListOptions): ExprList {
           shots: options.overlays.get(view.id)?.shots,
         });
       }
-      options.onEdit(false);
+      /**
+       * Also the throttled path: an overlay change re-integrates curves and re-tessellates, but
+       * it never reparses, so the spray-count and arc-length sliders should give continuous
+       * feedback rather than waiting for the drag to stop.
+       */
+      options.onParameterChange();
     };
 
     const count = el("input", {

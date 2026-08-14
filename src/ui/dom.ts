@@ -28,6 +28,16 @@ export function el<K extends keyof HTMLElementTagNameMap>(
     else if (key === "html") node.innerHTML = String(value);
     else if (key.startsWith("on") && typeof value === "function") {
       node.addEventListener(key.slice(2).toLowerCase(), value as EventListener);
+    } else if (key === "value" && tag === "textarea") {
+      /**
+       * A textarea's text is its CHILD NODE, not a `value` attribute.
+       *
+       * `setAttribute("value", …)` is silently ignored on a textarea — the element is created
+       * empty and stays empty — so the property has to be assigned instead. Set here rather than
+       * left to callers because the failure is invisible: the attribute appears in the DOM
+       * inspector, and the field is simply blank.
+       */
+      (node as HTMLTextAreaElement).value = String(value);
     } else if (value === true) node.setAttribute(key, "");
     else node.setAttribute(key, String(value));
   }
