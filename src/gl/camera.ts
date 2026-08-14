@@ -9,6 +9,13 @@ import { lookAt, perspective, type Mat4, type V3 } from "./mat4.ts";
  * ManifoldSandbox solved this with `<OrbitControls enabled={!aiming} />`; the same
  * flag, hand-rolled.
  */
+export interface CameraState {
+  readonly theta: number;
+  readonly phi: number;
+  readonly radius: number;
+  readonly target: readonly [number, number, number];
+}
+
 export interface Camera {
   /** Advance damping. Returns true while still settling, so the renderer keeps drawing. */
   update(): boolean;
@@ -25,6 +32,15 @@ export interface Camera {
   basis(): { forward: V3; right: V3; up: V3; fov: number };
   setAiming(aiming: boolean): void;
   isAiming(): boolean;
+  /**
+   * The whole camera as plain numbers, and the way back.
+   *
+   * Exists so a view can survive being re-created — a hot reload keeps the scene you were looking
+   * at rather than snapping back to the default framing, which is most of what makes an edit
+   * feel continuous.
+   */
+  state(): CameraState;
+  restore(state: CameraState): void;
   /** Frame a bounding sphere. */
   frame(center: V3, radius: number): void;
   /** Attach pointer/wheel handlers. Returns a detach function. */
@@ -112,6 +128,27 @@ export function createCamera(): Camera {
     },
 
     eye: eyeOf,
+
+    state() {
+      return { theta, phi, radius, target: [tx, ty, tz] as const };
+    },
+
+    restore(saved) {
+      theta = saved.theta;
+      phi = saved.phi;
+      radius = saved.radius;
+      tx = saved.target[0];
+      ty = saved.target[1];
+      tz = saved.target[2];
+      // Snapped rather than damped toward: restoring is not a movement the user made, so it
+      // should not be animated as if it were.
+      cTheta = theta;
+      cPhi = phi;
+      cRadius = radius;
+      ctx = tx;
+      cty = ty;
+      ctz = tz;
+    },
 
     basis() {
       const eye = eyeOf();

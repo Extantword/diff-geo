@@ -361,3 +361,43 @@ describe("duplicating a cell", () => {
     expect(sources[1]).toBe("X(u,v) = (u, v, 0)");
   });
 });
+
+describe("the properties window", () => {
+  beforeEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  it("never opens over the cell column", () => {
+    /**
+     * Selecting a row opens the window at the pointer, and the pointer is IN the column — so it
+     * landed on top of the very cell just clicked and made it impossible to edit the thing being
+     * inspected. It is pushed clear of the panel's right edge instead.
+     */
+    const { store, list } = makeList(["X(u,v) = (u, v, 0)"]);
+    document.body.append(list.root, list.card);
+    list.refresh([]);
+    list.setPlacement("cursor");
+
+    // A click well inside where the column would be.
+    list.placeAt(20, 120);
+    list.select(store.rows()[0]!.id);
+
+    const left = Number.parseFloat(list.card.style.left);
+    expect(Number.isFinite(left)).toBe(true);
+    expect(left).toBeGreaterThanOrEqual(list.root.getBoundingClientRect().right);
+  });
+
+  it("keeps both placements available", () => {
+    // Neither implementation was deleted; they are one DOM with a different class, so switching
+    // must not reparent anything — reparenting is what detaches a focused control.
+    const { list } = makeList(["X(u,v) = (u, v, 0)"]);
+    document.body.append(list.root, list.card);
+    const parent = list.card.parentElement;
+
+    list.setPlacement("cursor");
+    expect(list.card.classList.contains("props--at-cursor")).toBe(true);
+    list.setPlacement("bar");
+    expect(list.card.classList.contains("props--at-cursor")).toBe(false);
+    expect(list.card.parentElement).toBe(parent);
+  });
+});

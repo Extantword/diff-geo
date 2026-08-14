@@ -13,6 +13,7 @@ import { createRenderer } from "./gl/renderer.ts";
 import { createAnimator } from "./ui/animate.ts";
 import { createExprList, type SliderSpec } from "./ui/exprList.ts";
 import { createTemplatePicker, TEMPLATE_ENTRIES } from "./ui/templates.ts";
+import { installHotReloadGate, takeHotSession } from "./dev/hot.ts";
 import type { Vec3 } from "./core/geom/types.ts";
 import type { LineGroup } from "./gl/passes/lines.ts";
 import { arrow, type Scene } from "./state/scene.ts";
@@ -252,6 +253,24 @@ function main() {
     domains,
     requestRender: (refit: boolean) => onEdit(refit),
     invalidateSliders: () => list.invalidateSliders(),
+    /**
+     * Put a template beside whatever is already there.
+     *
+     * Templates add to the document now rather than replacing it, so without this a second
+     * surface would be created inside the first — two objects sharing an origin, which reads as
+     * one broken object rather than as two.
+     */
+    onCreated: (rowId: RowId) => {
+      const bounds = lastScene?.bounds;
+      if (!bounds || translations.size === 0 && store.rows().length <= 2) return;
+      const right = renderer.camera.basis().right;
+      const step = bounds.radius * 2.2;
+      translations.set(rowId, [
+        bounds.center[0] + right[0] * step,
+        bounds.center[1] + right[1] * step,
+        bounds.center[2] + right[2] * step,
+      ]);
+    },
   });
 
   // A playing slider redraws through the same throttled path as a drag: one draft render per
@@ -701,7 +720,61 @@ function main() {
   // Only the cells. Everything else lives on the stage, next to what it affects.
   if (panel) replace(panel, [list.root]);
 
+  /**
+   * Carry the scene across a hot reload.
+   *
+   * Only what the user made: the rows they typed, the values they dragged to, where they put
+   * things, and the angle they are looking from. Everything else is derived and will be rebuilt.
+   */
+  installHotReloadGate(() => ({
+    rows: store.rows().map((row) => row.source()),
+    parameters: [...store.parameters()],
+    sliders: [...sliders].map(([name, spec]) => [name, { ...spec }]),
+    domains: [...domains].map(([id, ranges]) => [id, ranges.map((r) => ({ ...r }))]),
+    colors: [...colors],
+    translations: [...translations],
+    overlays: [...overlays].map(([id, overlay]) => [id, { ...overlay }]),
+    camera: renderer.camera.state(),
+    selected: list.selected(),
+  }));
+
+  const session = takeHotSession();
+  if (session) {
+    const rowSources = session["rows"] as string[] | undefined;
+    if (rowSources?.length) store.setRows(rowSources);
+    const rows = store.rows();
+    /**
+     * Row ids are reassigned on `setRows`, so anything keyed by id is remapped by POSITION.
+     * Saving the ids themselves would look more faithful and be wrong: they are identities within
+     * one run of the document, not names that survive it.
+     */
+    const remap = <T>(saved: unknown): Map<RowId, T> => {
+      const out = new Map<RowId, T>();
+      const entries = (saved as [number, T][] | undefined) ?? [];
+      for (const [index, [, value]] of entries.entries()) {
+        const row = rows[index];
+        if (row) out.set(row.id, value);
+      }
+      return out;
+    };
+    for (const [id, value] of remap<Vec3>(session["colors"])) colors.set(id, value);
+    for (const [id, value] of remap<Vec3>(session["translations"])) translations.set(id, value);
+    for (const [id, value] of remap<DomainRange[]>(session["domains"])) domains.set(id, value);
+    for (const [id, value] of remap<SurfaceOverlay>(session["overlays"])) overlays.set(id, value);
+    for (const [name, spec] of (session["sliders"] as [string, SliderSpec][] | undefined) ?? []) {
+      sliders.set(name, spec);
+    }
+    for (const [name, value] of (session["parameters"] as [string, number][] | undefined) ?? []) {
+      store.setParameter(name, value);
+    }
+    const camera = session["camera"] as Parameters<typeof renderer.camera.restore>[0] | undefined;
+    if (camera) renderer.camera.restore(camera);
+    list.invalidateSliders();
+  }
+
   render(FULL_RESOLUTION, true, true);
+  // The camera was restored deliberately; framing would undo it.
+  if (session?.["camera"]) framedOnce = true;
 }
 
 main();

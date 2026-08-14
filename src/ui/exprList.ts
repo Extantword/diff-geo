@@ -232,9 +232,20 @@ export function createExprList(options: ExprListOptions): ExprList {
     const margin = 8;
     const width = card.offsetWidth || 320;
     const height = card.offsetHeight || 220;
+
+    /**
+     * Never over the cell column.
+     *
+     * Selecting a row opens the window at the pointer, which is IN the column — so it landed on
+     * top of the cell just clicked and made it impossible to edit the thing being inspected. The
+     * window is pushed clear of the panel's right edge, which costs nothing when the click came
+     * from the scene and fixes the case where it did not.
+     */
+    const panelRight = root.getBoundingClientRect().right;
+    const minX = Math.max(margin, panelRight + margin);
     const maxX = globalThis.innerWidth - width - margin;
     const maxY = globalThis.innerHeight - height - margin;
-    card.style.left = `${Math.max(margin, Math.min(maxX, cursorX + 12))}px`;
+    card.style.left = `${Math.max(minX, Math.min(Math.max(minX, maxX), cursorX + 12))}px`;
     card.style.top = `${Math.max(margin, Math.min(maxY, cursorY + 12))}px`;
   };
 

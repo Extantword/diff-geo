@@ -41,6 +41,12 @@ export interface TemplateOptions {
   readonly requestRender: (refit: boolean) => void;
   /** Tell the list its slider specs were replaced, so it rebuilds them. */
   readonly invalidateSliders: () => void;
+  /**
+   * Called with a newly created row, so the caller can put it somewhere.
+   *
+   * The catalog knows what a surface IS; only the app knows where there is room for it.
+   */
+  readonly onCreated?: (rowId: RowId) => void;
 }
 
 function sliderFor(definition: ParamDef): SliderSpec {
@@ -76,20 +82,28 @@ export function createTemplatePicker(options: TemplateOptions): HTMLElement {
   const blurb = el("p", { class: "blurb" });
 
   const loadSurface = (spec: SurfaceSpec) => {
-    const rows = store.setRows([surfaceRow(spec)]);
-    const rowId = rows[0]!.id;
+    /**
+     * ADDED to the document, not substituted for it.
+     *
+     * Loading a template used to replace every row, which made the catalog a way of starting
+     * over rather than a way of building a scene — and silently discarded whatever was already
+     * there. Comparing a sphere with a pseudosphere is the ordinary thing to want.
+     */
+    const rowId = store.addRow(surfaceRow(spec)).id;
 
-    // Parameters stay symbolic and become sliders, seeded with the catalog's ranges.
-    options.sliders.clear();
+    // Parameters stay symbolic and become sliders, seeded with the catalog's ranges. Existing
+    // ones are left alone: another surface may be using them, and a template must not reach into
+    // objects it did not create.
     for (const definition of spec.params) {
-      options.sliders.set(definition.key, sliderFor(definition));
-      store.setParameter(definition.key, definition.default);
+      if (!options.sliders.has(definition.key)) {
+        options.sliders.set(definition.key, sliderFor(definition));
+        store.setParameter(definition.key, definition.default);
+      }
     }
 
     // The inset is applied here: `sampleBounds` is what keeps the sphere off its poles.
     const [u0, u1] = sampleBounds(spec.u);
     const [v0, v1] = sampleBounds(spec.v);
-    options.domains.clear();
     options.domains.set(rowId, [
       { min: u0, max: u1 },
       { min: v0, max: v1 },
@@ -97,25 +111,26 @@ export function createTemplatePicker(options: TemplateOptions): HTMLElement {
 
     blurb.textContent = spec.blurb;
     options.invalidateSliders();
+    options.onCreated?.(rowId);
     options.requestRender(true);
   };
 
   const loadCurve = (spec: CurveSpec) => {
-    const rows = store.setRows([curveRow(spec)]);
-    const rowId = rows[0]!.id;
+    const rowId = store.addRow(curveRow(spec)).id;
 
-    options.sliders.clear();
     for (const definition of spec.params) {
-      options.sliders.set(definition.key, sliderFor(definition));
-      store.setParameter(definition.key, definition.default);
+      if (!options.sliders.has(definition.key)) {
+        options.sliders.set(definition.key, sliderFor(definition));
+        store.setParameter(definition.key, definition.default);
+      }
     }
 
     const [t0, t1] = sampleBounds(spec.t);
-    options.domains.clear();
     options.domains.set(rowId, [{ min: t0, max: t1 }]);
 
     blurb.textContent = spec.blurb;
     options.invalidateSliders();
+    options.onCreated?.(rowId);
     options.requestRender(true);
   };
 

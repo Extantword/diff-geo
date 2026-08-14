@@ -1004,6 +1004,31 @@ option {
   display: none;
 }
 
+/*
+ * The apply-changes button. Dev only — nothing creates it in a production build.
+ *
+ * Green because it is the one control in the app that means "go", and low in the corner because
+ * it must never be mistaken for part of the document.
+ */
+.hot-apply {
+  position: fixed;
+  right: 14px;
+  bottom: 14px;
+  z-index: 50;
+  padding: 6px 12px;
+  background: #1a9952;
+  border: none;
+  border-radius: 6px;
+  color: #ffffff;
+  cursor: pointer;
+  font-size: 12px;
+  box-shadow: 0 4px 14px rgba(20, 60, 40, 0.28);
+}
+
+.hot-apply:hover {
+  background: #157a42;
+}
+
 /* ---- right-click menu ---- */
 
 .context-menu {
