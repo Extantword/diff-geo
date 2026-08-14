@@ -1,21 +1,42 @@
 :root {
-  --bg: #0b0f14;
-  --panel: #111820;
-  --panel-border: #1e2a36;
-  --text: #e6edf3;
-  --text-dim: #8b9bab;
-  --accent: #3aa6a0;
+  --bg: #ffffff;
+  --panel: #fafbfc;
+  --panel-border: #e2e6ea;
+  --field: #ffffff;
+  --text: #16191d;
+  --text-dim: #5c6672;
+  --text-faint: #8a93a0;
+  --accent: #0f766e;
+
+  /* Diagnostic bands. Each is a tinted wash with a saturated rule down the left, so severity
+     reads from the colour alone at a glance and from the text on inspection. */
+  --error-bg: #fdecea;
+  --error-fg: #a3231b;
+  --error-rule: #d93025;
+  --warning-bg: #fdf4e3;
+  --warning-fg: #855400;
+  --warning-rule: #e0a030;
+  --hint-bg: #eaf2fa;
+  --hint-fg: #15558c;
 
   /* Shared colour language across the scene and the UI legends. Keep these in
      sync with core/geom/curvatureColor.ts — the palette has one source. */
-  --geodesic: #ffe066;
-  --mark-a: #6bff95;
-  --mark-b: #6b9bff;
-  --axis-x: #ff6b6b;
-  --axis-y: #6bff95;
-  --axis-z: #6b9bff;
+  /*
+   * Curve keys, EXACTLY mirroring the Vec3 constants the renderer draws with — `state/scene.ts`
+   * for the 3D curves. A key is a claim about what a colour on screen means, so an approximate
+   * match is a key that lies; each of these is its constant written in hex.
+   *
+   *   --curve-t  T_COLOR                         [0.10, 0.60, 0.32]
+   *   --geodesic GEODESIC_COLOR = N_COLOR        [0.85, 0.55, 0.00]
+   *   --curve-b  B_COLOR = CURVATURE_LINE_1      [0.80, 0.15, 0.15]
+   *   --curve-k2 CURVATURE_LINE_2                [0.10, 0.40, 0.85]
+   */
+  --geodesic: #d98c00;
+  --curve-t: #1a9952;
+  --curve-b: #cc2626;
+  --curve-k2: #1a66d9;
 
-  color-scheme: dark;
+  color-scheme: light;
 }
 
 * {
@@ -115,7 +136,7 @@ body {
 
 .field {
   width: 100%;
-  background: #0b1017;
+  background: var(--field);
   color: var(--text);
   border: 1px solid var(--panel-border);
   border-radius: 5px;
@@ -172,26 +193,26 @@ body {
 
 .overlay__hint {
   margin: 2px 0 6px;
-  color: #6f7f92;
+  color: var(--text-faint);
   font-size: 11px;
   line-height: 1.4;
 }
 
 .diag--error {
-  background: #2a1416;
-  color: #ff9b9b;
-  border-left: 2px solid #ff6b6b;
+  background: var(--error-bg);
+  color: var(--error-fg);
+  border-left: 2px solid var(--error-rule);
 }
 
 .diag--warning {
-  background: #2a2314;
-  color: #ffd08a;
-  border-left: 2px solid #ffb04d;
+  background: var(--warning-bg);
+  color: var(--warning-fg);
+  border-left: 2px solid var(--warning-rule);
 }
 
 .diag--hint {
-  background: #14202a;
-  color: #8fc9ff;
+  background: var(--hint-bg);
+  color: var(--hint-fg);
   border-left: 2px solid var(--accent);
 }
 
@@ -278,7 +299,7 @@ body {
   gap: 4px;
   margin: 14px 0 4px;
   padding: 3px;
-  background: #0b1017;
+  background: var(--field);
   border: 1px solid var(--panel-border);
   border-radius: 6px;
 }
@@ -318,7 +339,7 @@ body {
 
 .row {
   padding: 8px;
-  background: #0b1017;
+  background: var(--field);
   border: 1px solid var(--panel-border);
   border-radius: 6px;
 }
@@ -340,7 +361,7 @@ body {
 }
 
 .row__badge--pending {
-  color: #ffb04d;
+  color: var(--warning-rule);
 }
 
 .row__badge--empty {
@@ -358,11 +379,11 @@ body {
 }
 
 .row__remove:hover {
-  color: #ff8b8b;
+  color: var(--error-rule);
 }
 
 .row__input {
-  background: #070b10;
+  background: var(--field);
 }
 
 .row__notes {
@@ -454,9 +475,9 @@ body {
   font-weight: 700;
 }
 
-.frame-key__t { color: #6bff95; }
-.frame-key__n { color: #ffe066; }
-.frame-key__b { color: #ff6b6b; }
+.frame-key__t { color: var(--curve-t); }
+.frame-key__n { color: var(--geodesic); }
+.frame-key__b { color: var(--curve-b); }
 
 .frame-position {
   display: flex;
@@ -526,7 +547,7 @@ option {
 .transport__button {
   min-width: 26px;
   padding: 2px 5px;
-  background: #0b1017;
+  background: var(--field);
   color: var(--text-dim);
   border: 1px solid var(--panel-border);
   border-radius: 4px;
@@ -542,7 +563,7 @@ option {
 
 .transport__button--active {
   background: var(--accent);
-  color: #06231f;
+  color: #ffffff;
   border-color: var(--accent);
 }
 
@@ -560,4 +581,4 @@ option {
   margin-bottom: 8px;
 }
 
-.curvature-key__2 { color: #6b9bff; }
+.curvature-key__2 { color: var(--curve-k2); }

@@ -32,7 +32,7 @@ export function createSurfacePass(
   opts: SurfacePassOpts = {},
 ): SurfacePass {
   const {
-    baseColor = [0.42, 0.55, 0.68],
+    baseColor = [0.46, 0.58, 0.70],
     gridSpacing = [Math.PI / 4, Math.PI / 4],
     gridOpacity = 1,
     curvatureMix = 1,

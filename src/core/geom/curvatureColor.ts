@@ -21,18 +21,25 @@ import { makeSurfacePoint, sampleBounds, type Vec3 } from "./types.ts";
  */
 
 /** K < 0 — hyperbolic, saddle-like. */
-const NEGATIVE: Vec3 = [0.13, 0.45, 0.95];
-/** K ≈ 0 — flat. */
-const ZERO: Vec3 = [0.92, 0.94, 0.96];
+const NEGATIVE: Vec3 = [0.10, 0.38, 0.88];
+/**
+ * K ≈ 0 — flat.
+ *
+ * Light, but deliberately NOT near-white: on a white background the neutral end of the scale is
+ * the one that can disappear into the page, and a plane reading as a hole in the canvas is the
+ * worst failure this colormap can have. Kept dark enough that the shading multiplier, which tops
+ * out at 1, always leaves it visibly below the background.
+ */
+const ZERO: Vec3 = [0.86, 0.88, 0.90];
 /** K > 0 — elliptic, dome-like. */
-const POSITIVE: Vec3 = [0.95, 0.3, 0.22];
+const POSITIVE: Vec3 = [0.86, 0.20, 0.14];
 
 /**
  * Distinct grey for a point where curvature is not defined — a chart pole, a cone
  * point, a formula that blew up. Never silently coloured as if K were 0: "undefined" and
  * "flat" are completely different facts about a surface.
  */
-export const INVALID_COLOR: Vec3 = [0.30, 0.32, 0.35];
+export const INVALID_COLOR: Vec3 = [0.42, 0.44, 0.47];
 
 /** Diverging blue → light → red for `t` in [−1, 1]; values outside saturate. */
 export function divergingColor(t: number, out: Vec3 = [0, 0, 0]): Vec3 {

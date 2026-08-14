@@ -51,9 +51,17 @@ out vec4 fragColor;
 
 const vec3 LIGHT_KEY_DIR   = normalize(vec3( 5.0, 8.0,  3.0));
 const vec3 LIGHT_FILL_DIR  = normalize(vec3(-4.0,-2.0, -5.0));
-const float AMBIENT = 0.30;
-const float KEY     = 0.85;
-const float FILL    = 0.25;
+/**
+ * Lighting gains, chosen so the total multiplier never exceeds 1.
+ *
+ * On a white background a surface can only read by being DARKER than the page, so any face that
+ * saturates is a face that has disappeared. AMBIENT + KEY + FILL = 1 keeps the brightest lit face
+ * exactly at its albedo and lets everything else fall below it; the old values summed to 1.4,
+ * which was right against black and blows a light albedo out to flat white here.
+ */
+const float AMBIENT = 0.52;
+const float KEY     = 0.36;
+const float FILL    = 0.12;
 
 /* Chart grid lines, drawn as a screen-space-derivative-antialiased overlay so the
    parametrization stays visible without a separate wireframe pass. */
@@ -81,14 +89,18 @@ void main() {
   float key  = max(dot(n, LIGHT_KEY_DIR),  0.0);
   float fill = max(dot(n, LIGHT_FILL_DIR), 0.0);
 
-  /* A touch of rim light reads the silhouette against the dark background, which is
-     what makes the shape legible when curvature colours flatten the diffuse term. */
-  float rim = pow(1.0 - max(dot(n, viewDir), 0.0), 3.0) * 0.25;
+  /* The rim term DARKENS here rather than adding light. Its job is to separate the silhouette
+     from the background, and against white that means the edge has to fall away from the page,
+     not glow into it — an additive rim on a light background erases the outline it exists to
+     draw. Same shape of falloff, opposite sign. */
+  float rim = pow(1.0 - max(dot(n, viewDir), 0.0), 3.0) * 0.30;
 
-  vec3 color = albedo * (AMBIENT + KEY * key + FILL * fill) + vec3(rim);
+  vec3 color = albedo * (AMBIENT + KEY * key + FILL * fill) * (1.0 - rim);
 
   float grid = chartGrid(vChart, uGridSpacing) * uGridOpacity;
-  color = mix(color, vec3(0.85, 0.92, 0.98), grid * 0.35);
+  /* Grid lines darker than any albedo, for the same reason as the rim: a near-white line was
+     legible on a dark surface and vanishes on a pale one. */
+  color = mix(color, vec3(0.20, 0.26, 0.33), grid * 0.38);
 
   fragColor = vec4(color, 1.0);
 }

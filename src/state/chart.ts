@@ -19,15 +19,15 @@ import type { LineGroup, Polyline } from "../gl/passes/lines.ts";
  */
 
 /** Domain border. */
-const BORDER_COLOR: Vec3 = [0.42, 0.5, 0.6];
-/** Interior grid lines. */
-const GRID_COLOR: Vec3 = [0.16, 0.21, 0.27];
+const BORDER_COLOR: Vec3 = [0.38, 0.45, 0.54];
+/** Interior grid lines — lighter than the border, so the frame still reads as the frame. */
+const GRID_COLOR: Vec3 = [0.80, 0.84, 0.88];
 /** Distinct colours for chart curves, matched between the inset and the surface. */
 export const CHART_CURVE_PALETTE: readonly Vec3[] = [
-  [1.0, 0.85, 0.35],
-  [0.45, 0.95, 0.7],
-  [1.0, 0.55, 0.8],
-  [0.55, 0.75, 1.0],
+  [0.85, 0.50, 0.0],
+  [0.10, 0.60, 0.40],
+  [0.78, 0.20, 0.55],
+  [0.15, 0.40, 0.80],
 ];
 
 export interface ChartBounds {

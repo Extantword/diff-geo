@@ -266,14 +266,14 @@ function cachedDiffMap(request: {
 }
 
 /** Colours for the moving frame, shared with the row legend. */
-const GEODESIC_COLOR: Vec3 = [1.0, 0.88, 0.4];
+const GEODESIC_COLOR: Vec3 = [0.85, 0.55, 0.0];
 /** k1 and k2 get distinct colours; they are different curves through the same point. */
-const CURVATURE_LINE_1: Vec3 = [1.0, 0.42, 0.42];
-const CURVATURE_LINE_2: Vec3 = [0.45, 0.78, 1.0];
-const T_COLOR: Vec3 = [0.42, 1.0, 0.58];
-const N_COLOR: Vec3 = [1.0, 0.88, 0.4];
-const B_COLOR: Vec3 = [1.0, 0.42, 0.42];
-const POINT_COLOR: Vec3 = [1.0, 0.85, 0.45];
+const CURVATURE_LINE_1: Vec3 = [0.80, 0.15, 0.15];
+const CURVATURE_LINE_2: Vec3 = [0.10, 0.40, 0.85];
+const T_COLOR: Vec3 = [0.10, 0.60, 0.32];
+const N_COLOR: Vec3 = [0.85, 0.55, 0.0];
+const B_COLOR: Vec3 = [0.80, 0.15, 0.15];
+const POINT_COLOR: Vec3 = [0.85, 0.45, 0.0];
 
 /** A two-point polyline standing in for one frame vector. */
 function arrow(from: Vec3, direction: Vec3, length: number, color: Vec3): Polyline {

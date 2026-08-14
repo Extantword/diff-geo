@@ -55,7 +55,7 @@ const EMPTY_MESH = {
 function fail(message: string) {
   const stage = document.querySelector<HTMLElement>(".stage");
   if (stage) {
-    stage.innerHTML = `<div style="padding:24px;color:#ff9b9b;font:14px/1.6 ui-sans-serif,system-ui">
+    stage.innerHTML = `<div style="padding:24px;color:#a3231b;font:14px/1.6 ui-sans-serif,system-ui">
       <strong>DiffGeo could not start.</strong><br>${message}
     </div>`;
   }

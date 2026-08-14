@@ -55,9 +55,9 @@ export interface Renderer {
   dispose(): void;
 }
 
-const BACKGROUND: [number, number, number] = [0.043, 0.059, 0.078]; // #0b0f14
-/** Slightly lifted, so the inset reads as a separate surface rather than a hole. */
-const INSET_BACKGROUND: [number, number, number] = [0.067, 0.094, 0.125];
+const BACKGROUND: [number, number, number] = [1, 1, 1];
+/** Slightly recessed, so the inset reads as a separate surface rather than a hole. */
+const INSET_BACKGROUND: [number, number, number] = [0.964, 0.972, 0.980];
 
 export function createRenderer(device: Device): Renderer {
   const { gl } = device;
