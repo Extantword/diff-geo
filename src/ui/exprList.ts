@@ -8,6 +8,13 @@ import {
 import { toLatex } from "../core/expr/latex.ts";
 import { parse, parseRow } from "../core/expr/parse.ts";
 import { toSource } from "../core/expr/print.ts";
+import {
+  CURVE_NAMES,
+  SURFACE_NAMES,
+  nextName,
+  renameDeclaration,
+  usedNames,
+} from "../state/naming.ts";
 import type { DocumentStore, Item, RowId } from "../state/graph.ts";
 import {
   DEFAULT_DOMAIN,
@@ -453,7 +460,21 @@ export function createExprList(options: ExprListOptions): ExprList {
       onClick: (event: Event) => {
         event.stopPropagation();
         const source = store.rows().find((candidate) => candidate.id === id)?.source() ?? "";
-        const copy = store.addRow(source);
+        /**
+         * The copy gets a name of its own.
+         *
+         * Two rows declaring `X` is one definition overwritten, not two objects — so a duplicate
+         * that kept its name would look like a copy and behave like a typo. Which sequence to
+         * draw from follows the row's arity: two arguments is a surface, one is a curve.
+         */
+        const parsed = parseRow(source).row;
+        const isCurve = parsed?.kind === "vectorFunction" && parsed.args.length === 1;
+        const copy = store.addRow(
+          renameDeclaration(
+            source,
+            nextName(isCurve ? CURVE_NAMES : SURFACE_NAMES, usedNames(store)),
+          ),
+        );
         // Straight below the original rather than at the end, so a comparison stays side by side.
         const index = store.rows().findIndex((candidate) => candidate.id === id);
         store.moveRow(copy.id, index + 1 - (store.rows().length - 1));
@@ -650,9 +671,19 @@ export function createExprList(options: ExprListOptions): ExprList {
      * made the window worse at the one job it has. The tray still exists and is still built, so
      * the top-bar placement keeps every control; the window is deliberately the minimal form.
      */
+    /**
+     * Split in two: what floats at the pointer, and what does not.
+     *
+     * The domain and the colour are the two things you reach for while looking AT an object — one
+     * changes what part of it you see, the other how you tell it from the one beside it. The rest
+     * is occasional and stays in the tray, which the floating form hides and the top bar shows.
+     */
     const details = el("div", { class: "props__body" }, [
-      el("div", { class: "props__panel-body" }, [domainHost]),
-      el("div", { class: "props__tray" }, [notes, colorSwatch, chartHost, overlayHost, frameHost]),
+      el("div", { class: "props__panel-body" }, [
+        domainHost,
+        el("div", { class: "props__swatches" }, [colorSwatch]),
+      ]),
+      el("div", { class: "props__tray" }, [notes, chartHost, overlayHost, frameHost]),
     ]);
 
     return {

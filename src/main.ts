@@ -296,6 +296,16 @@ function main() {
     | { readonly kind: "idle" }
     | { readonly kind: "camera"; readonly x: number; readonly y: number }
     | {
+        /** Dragging an object through space; see the note on placement below. */
+        readonly kind: "move";
+        readonly rowId: RowId;
+        readonly grabbed: Vec3;
+        readonly from: Vec3;
+        /** Where the press started, so a click can be told from a drag on release. */
+        readonly x: number;
+        readonly y: number;
+      }
+    | {
         readonly kind: "aim";
         readonly rowId: RowId;
         readonly u: number;
@@ -328,8 +338,10 @@ function main() {
     renderer.setLines(previewLines.length === 0 ? sceneLines : [...sceneLines, ...previewLines]);
   };
 
+  const rect0 = (_event: PointerEvent) => canvas.getBoundingClientRect();
+
   const pickAt = (event: PointerEvent) => {
-    const rect = canvas.getBoundingClientRect();
+    const rect = rect0(event);
     return renderer.pick(event.clientX - rect.left, event.clientY - rect.top);
   };
 
@@ -355,6 +367,38 @@ function main() {
           return;
         }
       }
+      /**
+       * A press that lands on a surface moves that surface; one on empty space orbits.
+       *
+       * The same rule the aim tool follows: the owner of the drag is decided on pointerdown from
+       * what is under it, and fixed for the whole gesture. It does cost the ability to orbit by
+       * dragging ON an object — the background is now the place to grab for that — which is the
+       * trade a direct-manipulation scene makes, and the one that makes objects feel like things
+       * rather than pictures.
+       */
+      if (hit && lastScene) {
+        const from = renderer.unproject(
+          event.clientX - rect0(event).left,
+          event.clientY - rect0(event).top,
+          surfacePointAt(hit.rowId, hit.u, hit.v) ?? lastScene.bounds?.center ?? [0, 0, 0],
+        );
+        if (from) {
+          gesture = {
+            kind: "move",
+            rowId: hit.rowId,
+            grabbed: translations.get(hit.rowId) ?? [0, 0, 0],
+            from,
+            x: event.clientX,
+            y: event.clientY,
+          };
+          renderer.camera.setAiming(true);
+          canvas.setPointerCapture(event.pointerId);
+          event.stopPropagation();
+          event.preventDefault();
+          return;
+        }
+      }
+
       gesture = { kind: "camera", x: event.clientX, y: event.clientY };
     },
     { capture: true },
@@ -363,6 +407,29 @@ function main() {
   canvas.addEventListener(
     "pointermove",
     (event: PointerEvent) => {
+      if (gesture.kind === "move") {
+        /**
+         * Follow the pointer on the plane the object was grabbed on.
+         *
+         * Measured as a DIFFERENCE from where the grab started rather than by putting the object
+         * under the cursor, so it does not jump when picked up away from its centre — the point
+         * you grabbed stays the point under your finger.
+         */
+        const to = renderer.unproject(
+          event.clientX - rect0(event).left,
+          event.clientY - rect0(event).top,
+          gesture.from,
+        );
+        if (!to) return;
+        translations.set(gesture.rowId, [
+          gesture.grabbed[0] + to[0] - gesture.from[0],
+          gesture.grabbed[1] + to[1] - gesture.from[1],
+          gesture.grabbed[2] + to[2] - gesture.from[2],
+        ]);
+        onParameterChange();
+        event.stopPropagation();
+        return;
+      }
       if (gesture.kind !== "aim") return;
       const hit = pickAt(event);
       // Off the surface: keep the last arrow rather than dropping it, so a cursor that strays
@@ -419,6 +486,32 @@ function main() {
       const finished = gesture;
       gesture = { kind: "idle" };
       previewLines = [];
+
+      if (finished.kind === "move") {
+        renderer.camera.setAiming(false);
+
+        /**
+         * A press that did not travel was a CLICK, not a move.
+         *
+         * Taking ownership of the drag on pointerdown is what makes dragging an object work, and
+         * it also swallows the click that used to select it — so the distinction has to be made
+         * again on release, the same way the camera gesture makes it. The translation is put back
+         * exactly, so a click cannot nudge an object by a pixel of hand tremor.
+         */
+        const travelled = Math.hypot(event.clientX - finished.x, event.clientY - finished.y);
+        if (travelled <= CLICK_SLOP) {
+          translations.set(finished.rowId, finished.grabbed);
+          list.placeAt(event.clientX, event.clientY);
+          list.select(finished.rowId, true);
+          pickedAt = null;
+          onEdit(false);
+          return;
+        }
+
+        // One full-resolution pass at the end, as with any other drag.
+        onEdit(false);
+        return;
+      }
 
       if (finished.kind === "aim") {
         renderer.camera.setAiming(false);
@@ -583,7 +676,7 @@ function main() {
   });
 
   canvas.addEventListener("pointercancel", () => {
-    if (gesture.kind === "aim") renderer.camera.setAiming(false);
+    if (gesture.kind === "aim" || gesture.kind === "move") renderer.camera.setAiming(false);
     gesture = { kind: "idle" };
     previewLines = [];
     aimChart = [0, 0];

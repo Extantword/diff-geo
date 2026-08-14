@@ -3,6 +3,7 @@ import { CATALOG, type ParamDef, type SurfaceSpec } from "../core/catalog/surfac
 import { sampleBounds } from "../core/geom/types.ts";
 import type { DocumentStore, RowId } from "../state/graph.ts";
 import type { DomainRange } from "../state/scene.ts";
+import { CURVE_NAMES, SURFACE_NAMES, nextName, usedNames } from "../state/naming.ts";
 import { el } from "./dom.ts";
 import type { SliderSpec } from "./exprList.ts";
 
@@ -58,13 +59,13 @@ function sliderFor(definition: ParamDef): SliderSpec {
   };
 }
 
-/** `X(u,v) = (a, b, c)` from a surface spec's components. */
-function surfaceRow(spec: SurfaceSpec): string {
-  return `X(u,v) = (${spec.components.join(", ")})`;
+/** `X(u,v) = (a, b, c)` from a surface spec's components, under a name nobody is using. */
+function surfaceRow(spec: SurfaceSpec, name: string): string {
+  return `${name}(u,v) = (${spec.components.join(", ")})`;
 }
 
-function curveRow(spec: CurveSpec): string {
-  return `alpha(t) = (${spec.components.join(", ")})`;
+function curveRow(spec: CurveSpec, name: string): string {
+  return `${name}(t) = (${spec.components.join(", ")})`;
 }
 
 /**
@@ -89,7 +90,9 @@ export function createTemplatePicker(options: TemplateOptions): HTMLElement {
      * over rather than a way of building a scene — and silently discarded whatever was already
      * there. Comparing a sphere with a pseudosphere is the ordinary thing to want.
      */
-    const rowId = store.addRow(surfaceRow(spec)).id;
+    // A name nobody is using: two rows declaring `X` is not two surfaces, it is one definition
+    // overwritten by the other.
+    const rowId = store.addRow(surfaceRow(spec, nextName(SURFACE_NAMES, usedNames(store)))).id;
 
     // Parameters stay symbolic and become sliders, seeded with the catalog's ranges. Existing
     // ones are left alone: another surface may be using them, and a template must not reach into
@@ -116,7 +119,7 @@ export function createTemplatePicker(options: TemplateOptions): HTMLElement {
   };
 
   const loadCurve = (spec: CurveSpec) => {
-    const rowId = store.addRow(curveRow(spec)).id;
+    const rowId = store.addRow(curveRow(spec, nextName(CURVE_NAMES, usedNames(store)))).id;
 
     for (const definition of spec.params) {
       if (!options.sliders.has(definition.key)) {
