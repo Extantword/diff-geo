@@ -434,6 +434,19 @@ export function createExprList(options: ExprListOptions): ExprList {
       target instanceof Element &&
       target.closest("input, button, select, textarea, label, .slider, .transport") !== null;
     input.addEventListener("keydown", (event: KeyboardEvent) => {
+      /**
+       * Shift+Enter runs the cell; plain Enter inserts a line break.
+       *
+       * That way round because a cell is now multi-line and laying a surface out over several
+       * lines is the ordinary case — if Enter committed, writing the thing the format exists for
+       * would need a modifier. Blur does the work: it reformats, re-renders and drops back to the
+       * typeset view, so "run" is exactly "leave the cell".
+       */
+      if (event.key === "Enter" && event.shiftKey) {
+        event.preventDefault();
+        input.blur();
+        return;
+      }
       if (event.key === "Escape") input.blur();
     });
 
@@ -541,6 +554,16 @@ export function createExprList(options: ExprListOptions): ExprList {
    * back from the animator rather than tracked separately — two copies of "is this playing" is
    * exactly the kind of thing that drifts apart.
    */
+  /**
+   * Every transport's speed menu, so setting one sets them all.
+   *
+   * The animator runs a single clock — two sweeps playing together keep their relative rates —
+   * but the control has to appear beside each play button, because that is where anyone looks
+   * for it. One value, several views of it, kept in step here.
+   */
+  const speedSelects = new Set<HTMLSelectElement>();
+  const SPEEDS: readonly number[] = [0.25, 0.5, 1, 2, 4];
+
   const transport = (key: string): HTMLElement => {
     const play = el("button", {
       class: "transport__button",
@@ -565,7 +588,26 @@ export function createExprList(options: ExprListOptions): ExprList {
       onClick: () => options.animator.rewind(key),
     });
 
-    return el("div", { class: "transport" }, [rewind, play]);
+    const speed = el("select", {
+      class: "transport__speed",
+      title: "animation speed",
+    }) as HTMLSelectElement;
+    for (const value of SPEEDS) {
+      speed.append(
+        el("option", {
+          value: String(value),
+          text: `${value}\u00d7`,
+          selected: value === options.animator.speed(),
+        }),
+      );
+    }
+    speed.addEventListener("change", () => {
+      options.animator.setSpeed(Number(speed.value));
+      for (const other of speedSelects) other.value = speed.value;
+    });
+    speedSelects.add(speed);
+
+    return el("div", { class: "transport" }, [speed, rewind, play]);
   };
 
   /**

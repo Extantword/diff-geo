@@ -498,40 +498,8 @@ function main() {
   };
   syncLegend();
 
-  /**
-   * Animation speed, next to the scene's other global settings.
-   *
-   * Placed here rather than on each slider's transport because the animator runs one clock: a
-   * per-slider speed would let two sweeps drift apart, and their RELATIVE rates are what a
-   * one-parameter family is showing.
-   */
-  const speedReadout = el("span", { class: "slider__value", text: "1.0\u00d7" });
-  const speedSlider = el("input", {
-    type: "range",
-    class: "slider__input",
-    min: 0.1,
-    max: 4,
-    step: 0.1,
-    value: 1,
-  }) as HTMLInputElement;
-  speedSlider.addEventListener("input", () => {
-    const value = Number(speedSlider.value);
-    animator.setSpeed(value);
-    speedReadout.textContent = `${value.toFixed(1)}\u00d7`;
-  });
-
   const sceneBody = el("div", { class: "scene-card__body" }, [
     templates,
-    el("section", { class: "panel-section" }, [
-      el("h2", { class: "section-title", text: "Animation" }),
-      el("div", { class: "slider" }, [
-        el("label", { class: "slider__label" }, [
-          el("span", { text: "speed" }),
-          speedReadout,
-        ]),
-        speedSlider,
-      ]),
-    ]),
     el("section", { class: "panel-section" }, [
       el("h2", { class: "section-title", text: "Gaussian curvature" }),
       el("label", { class: "toggle" }, [curvatureToggle, el("span", { text: "paint K" })]),

@@ -766,6 +766,20 @@ option {
   padding: 2px 4px;
 }
 
+.transport__speed {
+  background: transparent;
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 1px 2px;
+}
+
+.transport__speed:hover {
+  color: var(--text);
+}
+
 /* ---- the cell bar ---- */
 
 /*
