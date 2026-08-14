@@ -391,8 +391,22 @@ export function createExprList(options: ExprListOptions): ExprList {
     const enterEdit = () => {
       root.classList.add("row--editing");
       input.focus();
-      input.select();
     };
+
+    /**
+     * Does this click belong to a control rather than to the cell?
+     *
+     * A cell contains sliders, transport buttons, number fields and toggles, and a click on any
+     * of them was reaching the row's own handler and calling `enterEdit` — which focuses the text
+     * input and takes the click with it. Pressing pause moved the caret instead of pausing, and
+     * dragging a slider would have been stolen the same way.
+     *
+     * Checked with `closest` rather than by comparing against the target directly, because the
+     * clickable thing is often a child: the glyph inside a button, the text inside a label.
+     */
+    const isControl = (target: EventTarget | null) =>
+      target instanceof Element &&
+      target.closest("input, button, select, textarea, label, .slider, .transport") !== null;
     input.addEventListener("blur", () => {
       root.classList.remove("row--editing");
       // An empty cell has no typeset form to fall back to, so it keeps showing its input.
@@ -401,8 +415,11 @@ export function createExprList(options: ExprListOptions): ExprList {
 
     const root = el("div", {
       class: "row row--editing",
-      onClick: () => {
+      onClick: (event: Event) => {
+        // Selecting is always right — clicking a row's slider is still a statement about which
+        // object you are working on. Entering edit mode is not.
         select(id);
+        if (isControl(event.target)) return;
         if (!root.classList.contains("row--editing")) enterEdit();
       },
     }, [
