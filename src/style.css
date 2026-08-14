@@ -606,7 +606,8 @@ option {
  */
 .props {
   position: absolute;
-  top: 14px;
+  /* Below the stage tools, which own the top right corner. */
+  top: 62px;
   right: 14px;
   width: 268px;
   max-height: calc(100% - 28px);
@@ -673,6 +674,55 @@ option {
   border-radius: 4px;
   background: none;
   cursor: pointer;
+}
+
+/* ---- stage tools, top right ---- */
+
+.stage-tools {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  /* Above the properties card, so the popover is not covered by it. */
+  z-index: 2;
+}
+
+.tool-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  color: var(--text-dim);
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(20, 30, 45, 0.10);
+}
+
+.tool-button:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.tool-popover {
+  width: 268px;
+  max-height: calc(100vh - 90px);
+  overflow-y: auto;
+  padding: 12px;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  box-shadow: 0 6px 24px rgba(20, 30, 45, 0.12);
+}
+
+.tool-popover--hidden {
+  display: none;
 }
 
 /* ---- scene settings, floating bottom left ---- */

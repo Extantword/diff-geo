@@ -498,8 +498,37 @@ function main() {
   };
   syncLegend();
 
+  /**
+   * The template gallery, behind a button in the stage's top right corner.
+   *
+   * A preset gallery is not a convenience here — text entry only works if nobody has to face an
+   * empty box, which is one of the three affordances that make formula input viable at all. It
+   * had ended up inside the collapsed scene card, which is the same as not having it.
+   *
+   * The icon is a curved patch with its chart lines, because that is what the button produces.
+   */
+  const templatesPanel = el("div", { class: "tool-popover tool-popover--hidden" }, [templates]);
+  const templatesButton = el("button", {
+    class: "tool-button",
+    title: "surface and curve templates",
+    html:
+      '<svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" ' +
+      'stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">' +
+      '<path d="M3 8 C 8 4, 16 12, 21 8"/>' +
+      '<path d="M3 16 C 8 12, 16 20, 21 16"/>' +
+      '<path d="M3 8 L 3 16"/><path d="M21 8 L 21 16"/>' +
+      '<path d="M9.1 7.2 L 9.1 15.2" opacity="0.55"/>' +
+      '<path d="M14.9 8.8 L 14.9 16.8" opacity="0.55"/>' +
+      "</svg>",
+  });
+  templatesButton.addEventListener("click", () => {
+    templatesPanel.classList.toggle("tool-popover--hidden");
+  });
+  canvas.parentElement?.append(
+    el("div", { class: "stage-tools" }, [templatesButton, templatesPanel]),
+  );
+
   const sceneBody = el("div", { class: "scene-card__body" }, [
-    templates,
     el("section", { class: "panel-section" }, [
       el("h2", { class: "section-title", text: "Gaussian curvature" }),
       el("label", { class: "toggle" }, [curvatureToggle, el("span", { text: "paint K" })]),

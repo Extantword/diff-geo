@@ -154,6 +154,8 @@ interface RowView {
    */
   readonly details: HTMLElement;
   readonly colorSwatch: HTMLInputElement;
+  /** this row's colour-map menu, once its surface controls exist */
+  colormapSelect: HTMLSelectElement | null;
   readonly detailsTitle: HTMLElement;
   /** sliders for the free parameters THIS row uses */
   readonly paramHost: HTMLElement;
@@ -506,7 +508,30 @@ export function createExprList(options: ExprListOptions): ExprList {
       value: toHex(options.colors.get(id) ?? defaultColorFor(id)),
       onInput: () => {
         options.colors.set(id, fromHex(colorSwatch.value));
-        options.onEdit(false);
+
+        /**
+         * Choosing a colour also switches the surface to the solid map.
+         *
+         * Otherwise the swatch appears broken: a surface is painted with its curvature by
+         * default, and that colour is drawn OVER the object's own, so picking one changed
+         * something completely hidden. Asking for a colour is a statement that you want to see
+         * that colour, and the map menu is right there to go back to K.
+         */
+        const select = views.get(id)?.colormapSelect;
+        if (select && select.value !== "solid") {
+          /**
+           * Driven through the menu rather than written to the overlay directly.
+           *
+           * The overlay controls hold their state in closure locals and write ALL of them on
+           * every commit, so setting the map behind the menu's back would leave that local stale
+           * and the next slider drag would quietly put the old map back — the same staleness that
+           * already cost the picked start point and the aimed shots.
+           */
+          select.value = "solid";
+          select.dispatchEvent(new Event("change"));
+          return;
+        }
+        options.onParameterChange();
       },
     }) as HTMLInputElement;
 
@@ -538,6 +563,7 @@ export function createExprList(options: ExprListOptions): ExprList {
       overlayHost,
       details,
       colorSwatch,
+      colormapSelect: null,
       detailsTitle,
       paramHost,
       overlayBuilt: false,
@@ -1027,6 +1053,7 @@ export function createExprList(options: ExprListOptions): ExprList {
         el("option", { value: name, text: COLORMAP_LABEL[name], selected: name === colormap }),
       );
     }
+    view.colormapSelect = colormapSelect;
     colormapSelect.addEventListener("change", () => {
       colormap = colormapSelect.value as ColormapName;
       commit();
