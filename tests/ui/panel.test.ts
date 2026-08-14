@@ -230,8 +230,13 @@ describe("the toolbar is compact", () => {
     const id = store.rows()[0]!.id;
     list.select(id);
 
-    const gauss = [...list.card.querySelectorAll<HTMLElement>(".chip")].find(
-      (chip) => chip.title.includes("Gauss"),
+    /**
+     * Matched on "Gauss map", not "Gauss": the curvature chip is titled "paint Gaussian
+     * curvature", so the looser match found that one instead and the test silently exercised the
+     * wrong control.
+     */
+    const gauss = [...list.card.querySelectorAll<HTMLElement>(".chip")].find((chip) =>
+      chip.title.startsWith("Gauss map"),
     )!;
     expect(gauss).toBeDefined();
     gauss.click();
@@ -459,9 +464,13 @@ describe("the window in cursor placement", () => {
 
     const panel = list.card.querySelector(".props__panel-body")!;
     const tray = list.card.querySelector(".props__tray")!;
+    // The panel holds what you reach for while looking at an object: its domain, its colour, and
+    // whether curvature is painted on it.
     expect(panel.querySelector(".row__domain")).not.toBeNull();
-    expect(panel.querySelector(".chip")).toBeNull();
-    expect(tray.querySelectorAll(".chip").length).toBeGreaterThan(0);
+    expect(panel.querySelector(".props__color")).not.toBeNull();
+    expect(panel.querySelectorAll(".chip")).toHaveLength(1);
+    // The occasional tools stay in the tray, which the floating form hides.
+    expect(tray.querySelectorAll(".chip").length).toBeGreaterThan(1);
   });
 });
 

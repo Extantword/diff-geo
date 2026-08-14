@@ -5,6 +5,12 @@ import { createParametricSurface } from "../core/geom/parametric.ts";
 import { detectPeriodicity, detectPoles, type ChartPoles } from "../core/geom/periodic.ts";
 import type { ColormapName } from "../core/geom/colormaps.ts";
 import {
+  QUAT_IDENTITY,
+  isIdentity,
+  quatRotate,
+  type Quat,
+} from "../core/num/quat.ts";
+import {
   integrateCurvatureLine,
   integrateGeodesic,
   sprayDirections,
@@ -108,6 +114,14 @@ export interface SceneRequest {
    * the drawn positions only, never to the map the geometry is computed from.
    */
   readonly translations?: ReadonlyMap<RowId, Vec3>;
+  /**
+   * How each object is turned, about its own centre.
+   *
+   * Rigid, like the translation, and for the same reason: a rotation preserves every derivative's
+   * length and every angle between them, so K, H and the principal curvatures come out unchanged.
+   * Applied to the drawn positions and normals only.
+   */
+  readonly rotations?: ReadonlyMap<RowId, Quat>;
 }
 
 /**
@@ -301,6 +315,111 @@ export interface Scene {
 /** No translation, shared so the common case allocates nothing. */
 const ZERO_OFFSET: Vec3 = [0, 0, 0];
 
+/**
+ * Turn a mesh about its own centre, in place.
+ *
+ * About the CENTRE rather than the formula's origin: a surface whose parametrization is offset
+ * from zero — a graph over a corner of its domain, say — would otherwise swing on a long arm
+ * rather than spin where it sits, which reads as the object running away from the pointer.
+ *
+ * Normals are rotated too, and are NOT re-normalised: a unit quaternion preserves length exactly,
+ * so anything that came in unit comes out unit, and a zero normal — the mesh builder's mark for a
+ * degenerate vertex — stays zero, which is what the shader tests for.
+ */
+function rotateMesh(mesh: TessellatedSurface, rotation: Quat): void {
+  if (isIdentity(rotation) || mesh.vertexCount === 0) return;
+
+  let minX = Infinity;
+  let minY = Infinity;
+  let minZ = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  let maxZ = -Infinity;
+  for (let k = 0; k < mesh.vertexCount; k++) {
+    const x = mesh.positions[k * 3]!;
+    const y = mesh.positions[k * 3 + 1]!;
+    const z = mesh.positions[k * 3 + 2]!;
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
+    if (x < minX) minX = x;
+    if (y < minY) minY = y;
+    if (z < minZ) minZ = z;
+    if (x > maxX) maxX = x;
+    if (y > maxY) maxY = y;
+    if (z > maxZ) maxZ = z;
+  }
+  if (!Number.isFinite(minX)) return;
+  const cx = (minX + maxX) / 2;
+  const cy = (minY + maxY) / 2;
+  const cz = (minZ + maxZ) / 2;
+
+  const out: Vec3 = [0, 0, 0];
+  for (let k = 0; k < mesh.vertexCount; k++) {
+    quatRotate(
+      rotation,
+      mesh.positions[k * 3]! - cx,
+      mesh.positions[k * 3 + 1]! - cy,
+      mesh.positions[k * 3 + 2]! - cz,
+      out,
+    );
+    mesh.positions[k * 3] = out[0] + cx;
+    mesh.positions[k * 3 + 1] = out[1] + cy;
+    mesh.positions[k * 3 + 2] = out[2] + cz;
+
+    quatRotate(
+      rotation,
+      mesh.normals[k * 3]!,
+      mesh.normals[k * 3 + 1]!,
+      mesh.normals[k * 3 + 2]!,
+      out,
+    );
+    mesh.normals[k * 3] = out[0];
+    mesh.normals[k * 3 + 1] = out[1];
+    mesh.normals[k * 3 + 2] = out[2];
+  }
+}
+
+/** Turn a polyline about a given centre, in place. */
+function rotatePolyline(line: Polyline, rotation: Quat, centre: Vec3): void {
+  if (isIdentity(rotation)) return;
+  const out: Vec3 = [0, 0, 0];
+  for (let k = 0; k < line.count; k++) {
+    quatRotate(
+      rotation,
+      line.points[k * 3]! - centre[0],
+      line.points[k * 3 + 1]! - centre[1],
+      line.points[k * 3 + 2]! - centre[2],
+      out,
+    );
+    line.points[k * 3] = out[0] + centre[0];
+    line.points[k * 3 + 1] = out[1] + centre[1];
+    line.points[k * 3 + 2] = out[2] + centre[2];
+  }
+}
+
+/** The centre of a mesh's bounding box, ignoring non-finite vertices. */
+function meshCentre(mesh: TessellatedSurface): Vec3 {
+  let minX = Infinity;
+  let minY = Infinity;
+  let minZ = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  let maxZ = -Infinity;
+  for (let k = 0; k < mesh.vertexCount; k++) {
+    const x = mesh.positions[k * 3]!;
+    const y = mesh.positions[k * 3 + 1]!;
+    const z = mesh.positions[k * 3 + 2]!;
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
+    if (x < minX) minX = x;
+    if (y < minY) minY = y;
+    if (z < minZ) minZ = z;
+    if (x > maxX) maxX = x;
+    if (y > maxY) maxY = y;
+    if (z > maxZ) maxZ = z;
+  }
+  if (!Number.isFinite(minX)) return [0, 0, 0];
+  return [(minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2];
+}
+
 /** Shift every vertex of a mesh in place. */
 function translateMesh(mesh: TessellatedSurface, offset: Vec3): void {
   if (offset[0] === 0 && offset[1] === 0 && offset[2] === 0) return;
@@ -415,6 +534,8 @@ export function buildScene(request: SceneRequest): Scene {
   const rowColors = request.colors ?? new Map<RowId, Vec3>();
   const translations = request.translations ?? new Map<RowId, Vec3>();
   const offsetOf = (rowId: RowId): Vec3 => translations.get(rowId) ?? ZERO_OFFSET;
+  const rotations = request.rotations ?? new Map<RowId, Quat>();
+  const rotationOf = (rowId: RowId): Quat => rotations.get(rowId) ?? QUAT_IDENTITY;
   /** This row's chosen colour, or the built-in default for whatever it draws. */
   const colorOf = (rowId: RowId, fallback: Vec3): Vec3 => rowColors.get(rowId) ?? fallback;
 
@@ -445,6 +566,8 @@ export function buildScene(request: SceneRequest): Scene {
      * Gauss image would be built from its neighbour's normals.
      */
     mesh?: TessellatedSurface;
+    /** the mesh's centre after rotation and before translation, for turning its curves with it */
+    centre?: Vec3;
   }> = [];
 
   for (const item of surfaceItems) {
@@ -526,6 +649,15 @@ export function buildScene(request: SceneRequest): Scene {
        * principal directions untouched, and the one way to guarantee that is to translate after
        * they have been computed rather than before.
        */
+      /**
+       * Rotate, then translate — and both AFTER the geometry.
+       *
+       * Order matters: the rotation is about the mesh's own centre, so it has to happen while the
+       * object is still where its formula put it. Turning it after moving it would spin it about
+       * a centre that had already been displaced.
+       */
+      rotateMesh(mesh, rotationOf(item.rowId));
+      entry.centre = meshCentre(mesh);
       translateMesh(mesh, offsetOf(item.rowId));
       meshes.push(mesh);
       entry.mesh = mesh;
@@ -1012,8 +1144,15 @@ export function buildScene(request: SceneRequest): Scene {
    */
   for (const group of lines) {
     if (group.rowId === undefined) continue;
+    // Curves are built from the untouched parametrization, so they take the same rigid motion as
+    // the mesh, about the same centre — otherwise a rotated surface leaves its geodesics behind.
+    const centre = compiledSurfaces.find((entry) => entry.item.rowId === group.rowId)?.centre;
+    const rotation = rotationOf(group.rowId);
     const offset = offsetOf(group.rowId);
-    for (const polyline of group.polylines) translatePolyline(polyline, offset);
+    for (const polyline of group.polylines) {
+      if (centre) rotatePolyline(polyline, rotation, centre);
+      translatePolyline(polyline, offset);
+    }
   }
 
   const mesh = meshes.length === 0 ? null : concatenate(meshes);

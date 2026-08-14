@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createDocument } from "../../src/state/graph.ts";
 import type { Vec3 } from "../../src/core/geom/types.ts";
+import { quatFromAxisAngle, type Quat } from "../../src/core/num/quat.ts";
 import { buildScene, type DomainRange, type FrameRequest } from "../../src/state/scene.ts";
 import { divergingColor } from "../../src/core/geom/curvatureColor.ts";
 import type { RowId } from "../../src/state/graph.ts";
@@ -968,6 +969,74 @@ describe("arranging objects in space", () => {
    * directions untouched. That is the property worth testing; where the vertices land is the easy
    * half.
    */
+  function turned(rotation: Quat | null) {
+    const document = createDocument(["X(u,v) = (sin u cos v, sin u sin v, cos u)"]);
+    const rowId = document.rows()[0]!.id;
+    return buildScene({
+      items: [...document.resolution().items.values()],
+      parameters: new Map(),
+      domains: new Map([
+        [rowId, [{ min: 0.01, max: Math.PI - 0.01 }, { min: 0, max: 2 * Math.PI }]],
+      ]),
+      resolution: 32,
+      rotations: rotation ? new Map([[rowId, rotation]]) : undefined,
+      overlays: new Map([
+        [rowId, { geodesics: 4, geodesicLength: 1, curvatureLines: false }],
+      ]),
+    });
+  }
+
+  it("turns an object without changing a single curvature", () => {
+    /**
+     * The justification for applying arrangement to the drawn mesh rather than folding it into
+     * the map: a rotation is an isometry, so every derivative keeps its length and every pair its
+     * angle — and K and H are built from exactly those. A rotated unit sphere still has K = 1.
+     */
+    const still = turned(null);
+    const spun = turned(quatFromAxisAngle([0.3, 1, -0.5], 1.1));
+    for (let k = 0; k < still.mesh!.vertexCount; k += 53) {
+      expect(spun.mesh!.curvature[k]!).toBeCloseTo(still.mesh!.curvature[k]!, 12);
+    }
+  });
+
+  it("keeps a rotated sphere a sphere, with unit normals", () => {
+    // Positions move but the shape does not: every vertex is still at radius 1 from the centre,
+    // and every normal is still unit — which is what the shader's degenerate test relies on.
+    const spun = turned(quatFromAxisAngle([1, 0.2, 0.4], 2.3));
+    for (let k = 0; k < spun.mesh!.vertexCount; k += 37) {
+      const r = Math.hypot(
+        spun.mesh!.positions[k * 3]!,
+        spun.mesh!.positions[k * 3 + 1]!,
+        spun.mesh!.positions[k * 3 + 2]!,
+      );
+      expect(r).toBeCloseTo(1, 4);
+      const n = Math.hypot(
+        spun.mesh!.normals[k * 3]!,
+        spun.mesh!.normals[k * 3 + 1]!,
+        spun.mesh!.normals[k * 3 + 2]!,
+      );
+      // Zero marks a degenerate vertex and must stay exactly zero rather than being normalised.
+      expect(n === 0 || Math.abs(n - 1) < 1e-4).toBe(true);
+    }
+  });
+
+  it("carries an object's curves through the rotation with it", () => {
+    // A surface that turned while its geodesics stayed behind would be worse than one that did
+    // not turn at all.
+    const spun = turned(quatFromAxisAngle([0, 1, 0], 0.9));
+    for (const polyline of spun.lines[0]!.polylines) {
+      for (let k = 0; k < polyline.count; k += 17) {
+        const r = Math.hypot(
+          polyline.points[k * 3]!,
+          polyline.points[k * 3 + 1]!,
+          polyline.points[k * 3 + 2]!,
+        );
+        // Still on the sphere, allowing for the overlay lift.
+        expect(Math.abs(r - 1)).toBeLessThan(0.02);
+      }
+    }
+  });
+
   function placed(offset: readonly [number, number, number] | null) {
     const document = createDocument(["X(u,v) = (sin u cos v, sin u sin v, cos u)"]);
     const rowId = document.rows()[0]!.id;

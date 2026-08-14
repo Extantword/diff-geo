@@ -15,6 +15,12 @@ import { createExprList, type SliderSpec } from "./ui/exprList.ts";
 import { createTemplatePicker, TEMPLATE_ENTRIES } from "./ui/templates.ts";
 import { installHotReloadGate, takeHotSession } from "./dev/hot.ts";
 import type { Vec3 } from "./core/geom/types.ts";
+import {
+  QUAT_IDENTITY,
+  quatFromAxisAngle,
+  quatMultiply,
+  type Quat,
+} from "./core/num/quat.ts";
 import type { LineGroup } from "./gl/passes/lines.ts";
 import { arrow, type Scene } from "./state/scene.ts";
 import { el, replace } from "./ui/dom.ts";
@@ -93,6 +99,8 @@ function main() {
   const colors = new Map<RowId, Vec3>();
   /** Where each object sits. Arrangement only — it never touches a curvature. */
   const translations = new Map<RowId, Vec3>();
+  /** How each object is turned. Arrangement, like the translation — never a curvature. */
+  const rotations = new Map<RowId, Quat>();
   /** Chart coordinates of the last successful pick, for the diagnostics readout. */
   let pickedAt: { u: number; v: number } | null = null;
   const animator = createAnimator();
@@ -125,6 +133,7 @@ function main() {
       overlays,
       colors,
       translations,
+      rotations,
     });
 
     renderer.setSurfaceMesh(scene.mesh ?? EMPTY_MESH);
@@ -306,6 +315,14 @@ function main() {
         readonly y: number;
       }
     | {
+        /** Right-dragging an object to turn it. */
+        readonly kind: "rotate";
+        readonly rowId: RowId;
+        readonly startRotation: Quat;
+        x: number;
+        y: number;
+      }
+    | {
         readonly kind: "aim";
         readonly rowId: RowId;
         readonly u: number;
@@ -387,6 +404,28 @@ function main() {
         }
       }
       /**
+       * Right-dragging an object turns it.
+       *
+       * The same rule as everywhere else on this canvas — what is under the pointer decides who
+       * owns the drag — which is also what keeps this from stealing the context menu: right-click
+       * on EMPTY space still opens it, because there is no object there to turn.
+       */
+      if (hit && event.button === 2) {
+        gesture = {
+          kind: "rotate",
+          rowId: hit.rowId,
+          startRotation: rotations.get(hit.rowId) ?? QUAT_IDENTITY,
+          x: event.clientX,
+          y: event.clientY,
+        };
+        renderer.camera.setAiming(true);
+        canvas.setPointerCapture(event.pointerId);
+        event.stopPropagation();
+        event.preventDefault();
+        return;
+      }
+
+      /**
        * A press that lands on a surface moves that surface; one on empty space orbits.
        *
        * The same rule the aim tool follows: the owner of the drag is decided on pointerdown from
@@ -426,6 +465,36 @@ function main() {
   canvas.addEventListener(
     "pointermove",
     (event: PointerEvent) => {
+      if (gesture.kind === "rotate") {
+        /**
+         * Turn about the camera's own axes, so the object follows the hand.
+         *
+         * A horizontal drag spins it about the screen's vertical axis and a vertical drag about
+         * the horizontal one — which is what "turning something to look at its other side" means
+         * when the thing you are turning is on a screen rather than in your hands. Composing on
+         * the LEFT applies the new turn in world space, so the gesture stays intuitive however
+         * far the object has already been rotated.
+         */
+        const dx = event.clientX - gesture.x;
+        const dy = event.clientY - gesture.y;
+        gesture.x = event.clientX;
+        gesture.y = event.clientY;
+
+        const { right, up } = renderer.camera.basis();
+        const RADIANS_PER_PIXEL = 0.008;
+        const spin = quatMultiply(
+          quatFromAxisAngle(up, dx * RADIANS_PER_PIXEL),
+          quatFromAxisAngle(right, dy * RADIANS_PER_PIXEL),
+        );
+        rotations.set(
+          gesture.rowId,
+          quatMultiply(spin, rotations.get(gesture.rowId) ?? QUAT_IDENTITY),
+        );
+        onParameterChange();
+        event.stopPropagation();
+        return;
+      }
+
       if (gesture.kind === "move") {
         /**
          * Follow the pointer on the plane the object was grabbed on.
@@ -505,6 +574,12 @@ function main() {
       const finished = gesture;
       gesture = { kind: "idle" };
       previewLines = [];
+
+      if (finished.kind === "rotate") {
+        renderer.camera.setAiming(false);
+        onEdit(false);
+        return;
+      }
 
       if (finished.kind === "move") {
         renderer.camera.setAiming(false);
@@ -642,6 +717,8 @@ function main() {
 
   canvas.addEventListener("contextmenu", (event: MouseEvent) => {
     event.preventDefault();
+    // A right-press that landed on an object was a rotation, not a request for the menu.
+    if (gesture.kind === "rotate") return;
 
     const field = el("input", {
       class: "field field--mono context-menu__field",
@@ -695,7 +772,7 @@ function main() {
   });
 
   canvas.addEventListener("pointercancel", () => {
-    if (gesture.kind === "aim" || gesture.kind === "move") renderer.camera.setAiming(false);
+    if (gesture.kind !== "idle" && gesture.kind !== "camera") renderer.camera.setAiming(false);
     gesture = { kind: "idle" };
     previewLines = [];
     aimChart = [0, 0];

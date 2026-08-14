@@ -175,6 +175,8 @@ interface RowView {
    */
   readonly details: HTMLElement;
   readonly colorSwatch: HTMLInputElement;
+  /** the K toggle beside the colour, kept in step with the colour-map menu */
+  readonly curvatureChip: HTMLButtonElement;
   /** this row's colour-map menu, once its surface controls exist */
   colormapSelect: HTMLSelectElement | null;
   readonly detailsTitle: HTMLElement;
@@ -654,6 +656,30 @@ export function createExprList(options: ExprListOptions): ExprList {
       },
     }) as HTMLInputElement;
 
+    /**
+     * Paint K, or show the object's own colour.
+     *
+     * The colour map menu already expresses this and four other choices, but reaching for a menu
+     * to answer "is this thing curved" is the wrong shape of interaction for the question people
+     * ask most. The chip drives the MENU rather than the overlay directly — the overlay controls
+     * rewrite all their state on every commit, so setting it behind the menu's back would leave
+     * that local stale and the next slider drag would silently undo this.
+     */
+    const curvatureChip = el("button", {
+      class: "chip",
+      text: "K",
+      title: "paint Gaussian curvature on the surface",
+    }) as HTMLButtonElement;
+    curvatureChip.addEventListener("click", (event: Event) => {
+      event.stopPropagation();
+      const select = views.get(id)?.colormapSelect;
+      if (!select) return;
+      const turningOn = select.value === "solid";
+      select.value = turningOn ? "curvature" : "solid";
+      select.dispatchEvent(new Event("change"));
+      curvatureChip.classList.toggle("chip--on", turningOn);
+    });
+
     const detailsTitle = el("span", { class: "props__kind", text: "expression" });
 
     /**
@@ -681,7 +707,7 @@ export function createExprList(options: ExprListOptions): ExprList {
     const details = el("div", { class: "props__body" }, [
       el("div", { class: "props__panel-body" }, [
         domainHost,
-        el("div", { class: "props__swatches" }, [colorSwatch]),
+        el("div", { class: "props__swatches" }, [colorSwatch, curvatureChip]),
       ]),
       el("div", { class: "props__tray" }, [notes, chartHost, overlayHost, frameHost]),
     ]);
@@ -700,6 +726,7 @@ export function createExprList(options: ExprListOptions): ExprList {
       overlayHost,
       details,
       colorSwatch,
+      curvatureChip,
       colormapSelect: null,
       detailsTitle,
       paramHost,
@@ -1748,6 +1775,11 @@ export function createExprList(options: ExprListOptions): ExprList {
       syncDomain(view, item);
       syncFrameControl(view, item);
       syncRowParams(view, item);
+      // Read back from the overlay rather than remembered, so the chip and the menu cannot drift.
+      view.curvatureChip.classList.toggle(
+        "chip--on",
+        (options.overlays.get(id)?.colormap ?? "curvature") !== "solid",
+      );
       syncEditing(view);
 
       renderNotes(view, reportById.get(id));
