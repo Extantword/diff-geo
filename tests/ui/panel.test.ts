@@ -488,3 +488,94 @@ describe("only the selected row's panel is on screen", () => {
     }
   });
 });
+
+describe("dragging past a slider's end", () => {
+  beforeEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  /** happy-dom has no layout, so the track is given a box to measure against. */
+  function withTrack(input: HTMLInputElement, width = 200) {
+    input.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width, height: 16, right: width, bottom: 16, x: 0, y: 0 }) as DOMRect;
+  }
+
+  const move = (input: HTMLInputElement, type: string, clientX: number) =>
+    input.dispatchEvent(new MouseEvent(type, { clientX, bubbles: true }));
+
+  it("grows the range instead of stopping at the limit", () => {
+    /**
+     * Any interval a track covers is a guess about what will be wanted. Rather than making that
+     * guess binding — a wall you hit and then type your way around — pushing against it moves it.
+     */
+    const { list } = makeList(["R = 2"]);
+    document.body.append(list.root);
+    list.refresh([]);
+
+    const input = list.root.querySelector<HTMLInputElement>(".row__value .vslider__input")!;
+    withTrack(input);
+    const before = Number(input.max);
+    input.value = input.max;
+
+    move(input, "pointerdown", 200);
+    move(input, "pointermove", 260);
+
+    expect(Number(input.max)).toBeGreaterThan(before);
+    // The value travels with the end it is pinned to, so the drag keeps having an effect.
+    expect(Number(input.value)).toBeCloseTo(Number(input.max), 6);
+  });
+
+  it("grows the low end too", () => {
+    const { list } = makeList(["R = 2"]);
+    document.body.append(list.root);
+    list.refresh([]);
+
+    const input = list.root.querySelector<HTMLInputElement>(".row__value .vslider__input")!;
+    withTrack(input);
+    const before = Number(input.min);
+    input.value = input.min;
+
+    move(input, "pointerdown", 0);
+    move(input, "pointermove", -60);
+
+    expect(Number(input.min)).toBeLessThan(before);
+    expect(Number(input.value)).toBeCloseTo(Number(input.min), 6);
+  });
+
+  it("leaves the range alone when the thumb is not at an end", () => {
+    /**
+     * The guard that stops this being obnoxious: a fast drag that flings the pointer past the
+     * track while the thumb is still mid-range must not stretch anything. Only a thumb that has
+     * genuinely run out of track pushes the wall.
+     */
+    const { list } = makeList(["R = 2"]);
+    document.body.append(list.root);
+    list.refresh([]);
+
+    const input = list.root.querySelector<HTMLInputElement>(".row__value .vslider__input")!;
+    withTrack(input);
+    const before = { min: Number(input.min), max: Number(input.max) };
+    input.value = String((before.min + before.max) / 2);
+
+    move(input, "pointerdown", 100);
+    move(input, "pointermove", 400);
+
+    expect(Number(input.max)).toBeCloseTo(before.max, 9);
+    expect(Number(input.min)).toBeCloseTo(before.min, 9);
+  });
+
+  it("does not stretch on a hover, only on a drag", () => {
+    const { list } = makeList(["R = 2"]);
+    document.body.append(list.root);
+    list.refresh([]);
+
+    const input = list.root.querySelector<HTMLInputElement>(".row__value .vslider__input")!;
+    withTrack(input);
+    input.value = input.max;
+    const before = Number(input.max);
+
+    // No pointerdown: the pointer is merely passing over the control.
+    move(input, "pointermove", 400);
+    expect(Number(input.max)).toBeCloseTo(before, 9);
+  });
+});

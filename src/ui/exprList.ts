@@ -889,15 +889,84 @@ export function createExprList(options: ExprListOptions): ExprList {
     };
     place(config.value);
 
+    /**
+     * Dragging past the end grows the range.
+     *
+     * A track has to cover some interval, and any interval it covers is a guess about what will
+     * be wanted. Rather than making that guess binding — a wall you hit and then have to go and
+     * type your way around — pushing against it moves it: while the thumb is pinned at an end and
+     * the pointer keeps travelling outward, the end travels with it.
+     *
+     * Growth is proportional to how far past the track the pointer has gone, measured as a
+     * fraction of the track's own width, so a small nudge extends a little and a firm push
+     * extends a lot. That makes the reach self-scaling: the further out you get, the wider the
+     * span becomes and the faster the same gesture covers ground.
+     */
+    let dragging = false;
+    const EPSILON = 1e-9;
+
     const followPointer = (event: PointerEvent) => {
       const box = input.getBoundingClientRect();
+      const raw = event.clientX - box.left;
+
+      if (dragging && box.width > 0) {
+        const value = Number(input.value);
+        const span = max - min;
+        const overshoot = raw > box.width ? raw - box.width : raw < 0 ? raw : 0;
+        // Only when the thumb has actually run out of track: otherwise a fast drag that flings
+        // the pointer past the end would stretch a range the user was still inside.
+        const pinnedHigh = overshoot > 0 && value >= max - span * EPSILON;
+        const pinnedLow = overshoot < 0 && value <= min + span * EPSILON;
+
+        if (pinnedHigh || pinnedLow) {
+          const grow = Math.abs(overshoot / box.width) * span;
+          if (pinnedHigh) max += grow;
+          else min -= grow;
+          input.min = String(min);
+          input.max = String(max);
+          const next = pinnedHigh ? max : min;
+          input.value = String(next);
+          bubble.textContent = format(next);
+          pointerAt = Math.min(box.width, Math.max(0, raw));
+          place(next);
+          config.onInput(next);
+          return;
+        }
+      }
+
       // Clamped to the track: past its ends the value has stopped changing, so a label that kept
       // travelling would point at nothing.
-      pointerAt = Math.min(box.width, Math.max(0, event.clientX - box.left));
+      pointerAt = Math.min(box.width, Math.max(0, raw));
       place(Number(input.value));
     };
+
     input.addEventListener("pointermove", followPointer);
-    input.addEventListener("pointerdown", followPointer);
+    input.addEventListener("pointerdown", (event: PointerEvent) => {
+      dragging = true;
+      /**
+       * Captured so the drag — and the stretching — survives the pointer leaving the track, which
+       * is precisely where this feature lives.
+       *
+       * Guarded because pointer capture is not universal: a DOM implementation without it should
+       * lose the capture, not the whole interaction.
+       */
+      if (typeof input.setPointerCapture === "function") {
+        input.setPointerCapture(event.pointerId);
+      }
+      followPointer(event);
+    });
+    input.addEventListener("pointerup", (event: PointerEvent) => {
+      dragging = false;
+      if (
+        typeof input.hasPointerCapture === "function" &&
+        input.hasPointerCapture(event.pointerId)
+      ) {
+        input.releasePointerCapture(event.pointerId);
+      }
+    });
+    input.addEventListener("pointercancel", () => {
+      dragging = false;
+    });
     input.addEventListener("pointerleave", () => {
       pointerAt = null;
       place(Number(input.value));
