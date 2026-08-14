@@ -57,21 +57,30 @@ describe("the properties card", () => {
 
     list.select(store.rows()[0]!.id);
     expect(list.card.parentElement).toBe(host);
-    expect(list.card.classList.contains("props--hidden")).toBe(false);
+    expect(list.card.classList.contains("props--empty")).toBe(false);
     // And it is a sibling of the body, not inside the stage — nested there it could only overlay
     // the geometry rather than sit above it.
     expect(document.querySelector(".stage")!.contains(list.card)).toBe(false);
   });
 
-  it("is hidden until a row is selected, and shown after", () => {
+  it("empties rather than vanishes when nothing is selected", () => {
+    /**
+     * A strip that appears on selection resizes the stage, which changes the canvas aspect and
+     * moves the camera — clicking a surface to inspect it nudged the thing being inspected. So
+     * the box stays in the layout and only its contents change, which is what `props--empty`
+     * means as opposed to the `props--hidden` it replaced.
+     */
     const { store, list } = makeList(["X(u,v) = (u, v, 0)"]);
     document.body.append(list.root, list.card);
 
-    expect(list.card.classList.contains("props--hidden")).toBe(true);
+    expect(list.card.classList.contains("props--empty")).toBe(true);
     list.select(store.rows()[0]!.id);
-    expect(list.card.classList.contains("props--hidden")).toBe(false);
+    expect(list.card.classList.contains("props--empty")).toBe(false);
     list.select(null);
-    expect(list.card.classList.contains("props--hidden")).toBe(true);
+    expect(list.card.classList.contains("props--empty")).toBe(true);
+    // Never removed from the document, and never display:none.
+    expect(list.card.isConnected).toBe(true);
+    expect(list.card.classList.contains("props--hidden")).toBe(false);
   });
 
   it("puts the selected row's details inside the card, not inside the row", () => {
@@ -297,5 +306,58 @@ describe("sliders with a moving label", () => {
     // And the field is gone again, replaced by the label.
     expect(slider.querySelector(".vslider__exact")).toBeNull();
     expect(slider.querySelector(".vslider__bubble")).not.toBeNull();
+  });
+});
+
+describe("parameter values in the typeset view", () => {
+  beforeEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  it("substitutes a declared parameter's value into a surface", () => {
+    /**
+     * The typeset view is meant to show what is ON SCREEN, and what is on screen is a torus of
+     * some particular size — so a bare `R` is a promise the reader has to go elsewhere to
+     * redeem. Substituting keeps the formula and the object in agreement.
+     */
+    const { list } = makeList(["R = 2", "X(u,v) = (R cos u, R sin u, v)"]);
+    document.body.append(list.root, list.card);
+    list.refresh([]);
+
+    const echoes = [...list.root.querySelectorAll(".formula__echo")];
+    const surface = echoes[1]!;
+    expect(surface.textContent).toContain("2");
+    expect(surface.textContent).not.toContain("R");
+  });
+
+  it("leaves the chart coordinates symbolic", () => {
+    // u and v are what the map is a function OF; substituting them would not be a value, it
+    // would be evaluating the surface at a point.
+    const { list } = makeList(["X(u,v) = (u, v, 0)"]);
+    document.body.append(list.root, list.card);
+    list.refresh([]);
+    const echo = list.root.querySelector(".formula__echo")!;
+    expect(echo.textContent).toContain("u");
+    expect(echo.textContent).toContain("v");
+  });
+});
+
+describe("duplicating a cell", () => {
+  beforeEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  it("copies the text into a new cell directly below", () => {
+    const { store, list } = makeList(["X(u,v) = (u, v, 0)"]);
+    document.body.append(list.root, list.card);
+    list.refresh([]);
+
+    const button = list.root.querySelector<HTMLElement>('.row__move[title*="duplicate"]')!;
+    expect(button).not.toBeNull();
+    button.click();
+
+    const sources = store.rows().map((row) => row.source());
+    expect(sources[0]).toBe("X(u,v) = (u, v, 0)");
+    expect(sources[1]).toBe("X(u,v) = (u, v, 0)");
   });
 });

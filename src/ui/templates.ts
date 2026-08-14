@@ -27,6 +27,13 @@ import type { SliderSpec } from "./exprList.ts";
  *    render with holes.
  */
 
+/** One catalog entry, for callers that want to build their own picker. */
+export interface TemplateEntry {
+  readonly name: string;
+  readonly blurb: string;
+  readonly load: () => void;
+}
+
 export interface TemplateOptions {
   readonly document: DocumentStore;
   readonly sliders: Map<string, SliderSpec>;
@@ -53,6 +60,15 @@ function surfaceRow(spec: SurfaceSpec): string {
 function curveRow(spec: CurveSpec): string {
   return `alpha(t) = (${spec.components.join(", ")})`;
 }
+
+/**
+ * Filled in when the picker is built, so other UI can offer the same catalog.
+ *
+ * A module-level list rather than a return value because the picker is created once and the
+ * right-click menu is built later from somewhere else entirely; threading it through would mean
+ * passing the picker to things that have no other use for it.
+ */
+export let TEMPLATE_ENTRIES: readonly TemplateEntry[] = [];
 
 export function createTemplatePicker(options: TemplateOptions): HTMLElement {
   const { document: store } = options;
@@ -122,6 +138,25 @@ export function createTemplatePicker(options: TemplateOptions): HTMLElement {
     }, [
       el("span", { class: "template__name", text: name }),
     ]);
+
+  /**
+   * The catalog as data, so a second picker — the right-click menu — can present the same
+   * entries without duplicating what loading one means. Loading is the subtle part: source text,
+   * the catalog's parameter ranges, AND the domain with its inset, which is what keeps the sphere
+   * off its poles.
+   */
+  TEMPLATE_ENTRIES = [
+    ...CATALOG.map((spec) => ({
+      name: spec.name,
+      blurb: spec.blurb,
+      load: () => loadSurface(spec),
+    })),
+    ...CURVE_CATALOG.map((spec) => ({
+      name: spec.name,
+      blurb: spec.blurb,
+      load: () => loadCurve(spec),
+    })),
+  ];
 
   return el("div", { class: "templates" }, [
     el("h2", { class: "section-title", text: "Surfaces" }),

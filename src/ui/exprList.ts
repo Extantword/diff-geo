@@ -8,6 +8,7 @@ import {
 import { toLatex } from "../core/expr/latex.ts";
 import { parse, parseRow } from "../core/expr/parse.ts";
 import { toSource } from "../core/expr/print.ts";
+import { ctx, type Expr } from "../core/expr/ast.ts";
 import type { DocumentStore, Item, RowId } from "../state/graph.ts";
 import {
   DEFAULT_DOMAIN,
@@ -106,6 +107,16 @@ export interface ExprList {
   /** Show a row's properties, or `null` to close the card. Also driven by picking in 3D. */
   select(id: RowId | null): void;
   selected(): RowId | null;
+  /**
+   * Where the properties live: the strip along the top, or a window at the pointer.
+   *
+   * Both are kept. They are the same DOM with a different class — no reparenting, which would
+   * detach whatever control had focus — so switching between them costs nothing and neither
+   * implementation has to be deleted to try the other.
+   */
+  setPlacement(mode: "bar" | "cursor"): void;
+  /** Remember where to open the window, for the cursor placement. */
+  placeAt(x: number, y: number): void;
   /** Full refresh: echoes, badges, controls, diagnostics. For structural changes. */
   refresh(reports: readonly RowReport[]): void;
   /**
@@ -180,9 +191,21 @@ export function createExprList(options: ExprListOptions): ExprList {
    */
   const cardTitle = el("span", { class: "props__title", text: "properties" });
   const cardBody = el("div", { class: "props__slot" });
-  const card = el("div", { class: "props props--hidden" }, [
+  /**
+   * Shown when nothing is selected, so the strip keeps its height.
+   *
+   * The strip must never appear and disappear: doing so resizes the stage, which changes the
+   * canvas aspect and shifts the camera — so clicking a surface to inspect it nudged the very
+   * thing being inspected. Its height is reserved always, and this is what occupies it.
+   */
+  const cardPlaceholder = el("span", {
+    class: "props__placeholder",
+    text: "select an object to edit it",
+  });
+  const card = el("div", { class: "props props--empty" }, [
     el("div", { class: "props__head" }, [
       cardTitle,
+      cardPlaceholder,
       el("button", {
         class: "props__close",
         title: "close",
@@ -194,6 +217,26 @@ export function createExprList(options: ExprListOptions): ExprList {
   ]);
 
   let selectedId: RowId | null = null;
+  let placement: "bar" | "cursor" = "bar";
+  let cursorX = 0;
+  let cursorY = 0;
+
+  /**
+   * Keep the window on screen.
+   *
+   * Opening flush against the pointer puts it off the right or bottom edge whenever the click is
+   * near one, which is exactly where a surface tends to be clicked when it fills the view.
+   */
+  const positionAtCursor = () => {
+    if (placement !== "cursor") return;
+    const margin = 8;
+    const width = card.offsetWidth || 320;
+    const height = card.offsetHeight || 220;
+    const maxX = globalThis.innerWidth - width - margin;
+    const maxY = globalThis.innerHeight - height - margin;
+    card.style.left = `${Math.max(margin, Math.min(maxX, cursorX + 12))}px`;
+    card.style.top = `${Math.max(margin, Math.min(maxY, cursorY + 12))}px`;
+  };
 
   /**
    * Show one row's properties, or none.
@@ -210,7 +253,9 @@ export function createExprList(options: ExprListOptions): ExprList {
       view.root.classList.toggle("row--selected", chosen);
       if (chosen) cardTitle.textContent = view.detailsTitle.textContent ?? "properties";
     }
-    card.classList.toggle("props--hidden", id === null || !views.has(id));
+    // The strip stays in the layout either way; only its CONTENTS change. See the placeholder.
+    card.classList.toggle("props--empty", id === null || !views.has(id));
+    positionAtCursor();
   };
 
   const views = new Map<RowId, RowView>();
@@ -367,6 +412,31 @@ export function createExprList(options: ExprListOptions): ExprList {
       },
     });
 
+    /**
+     * Duplicate this cell, right below itself.
+     *
+     * A surface is usually explored by variation — the same map with one component changed — and
+     * retyping a parametrization to compare two of them is the slowest thing in the tool. The copy
+     * carries the row's TEXT only; its colour, domain and overlays start fresh, because a
+     * duplicate is a new object rather than a second view of the same one.
+     */
+    const duplicate = el("button", {
+      class: "row__move",
+      title: "duplicate this expression",
+      text: "\u29c9",
+      onClick: (event: Event) => {
+        event.stopPropagation();
+        const source = store.rows().find((candidate) => candidate.id === id)?.source() ?? "";
+        const copy = store.addRow(source);
+        // Straight below the original rather than at the end, so a comparison stays side by side.
+        const index = store.rows().findIndex((candidate) => candidate.id === id);
+        store.moveRow(copy.id, index + 1 - (store.rows().length - 1));
+        syncRows();
+        options.onEdit(false);
+        select(copy.id);
+      },
+    });
+
     const shift = (delta: number, label: string, title: string) =>
       el("button", {
         class: "row__move",
@@ -486,6 +556,7 @@ export function createExprList(options: ExprListOptions): ExprList {
       input,
       echo,
       el("div", { class: "row__tools" }, [
+        duplicate,
         shift(-1, "\u2191", "move up"),
         shift(1, "\u2193", "move down"),
         remove,
@@ -1427,7 +1498,7 @@ export function createExprList(options: ExprListOptions): ExprList {
     if (!view) return;
     const row = store.rows().find((candidate) => candidate.id === view.id);
     if (!row) return;
-    replace(view.echo, [echoFor(row.source(), liveValueOf(view.id))]);
+    replace(view.echo, [echoFor(row.source(), liveValueOf(view.id), currentValues())]);
   };
 
   /**
@@ -1439,6 +1510,15 @@ export function createExprList(options: ExprListOptions): ExprList {
    * 1.95, which is the definition disagreeing with the object on screen. The typeset view shows
    * the live number instead; the text is reconciled when the drag ends.
    */
+  /**
+   * Every parameter's current value, for the typeset view.
+   *
+   * Read from the document's own parameter store rather than from the sliders, because both kinds
+   * of slider — a free parameter's and a numeric row's — write there, so one lookup covers them
+   * uniformly and cannot fall out of step with a second copy.
+   */
+  const currentValues = (): ReadonlyMap<string, number> => new Map(store.parameters());
+
   const liveValueOf = (id: RowId): number | null => {
     const spec = options.rowSliders.get(id);
     return spec ? spec.value : null;
@@ -1501,11 +1581,10 @@ export function createExprList(options: ExprListOptions): ExprList {
     for (const [id, view] of views) {
       const row = store.rows().find((candidate) => candidate.id === id);
       if (!row) continue;
-      const source = row.source();
 
-      // The echo comes from a plain expression parse where possible so that a bare formula
-      // typeset as one; otherwise fall back to the declaration's right-hand side.
-      replace(view.echo, [echoFor(source)]);
+      // Through the same helper as a live update, so a full refresh and a drag cannot disagree
+      // about whether parameters are shown by name or by value.
+      refreshEcho(view);
 
       const item = resolution.items.get(id) ?? null;
       const label = item ? (KIND_LABEL[item.kind] ?? item.kind) : "";
@@ -1578,6 +1657,20 @@ export function createExprList(options: ExprListOptions): ExprList {
     card,
     select,
     selected: () => selectedId,
+    setPlacement(mode) {
+      placement = mode;
+      card.classList.toggle("props--at-cursor", mode === "cursor");
+      if (mode === "bar") {
+        card.style.left = "";
+        card.style.top = "";
+      }
+      positionAtCursor();
+    },
+    placeAt(x, y) {
+      cursorX = x;
+      cursorY = y;
+      positionAtCursor();
+    },
     refresh,
     refreshReports,
     invalidateSliders: () => {
@@ -1657,6 +1750,39 @@ const CURVATURE_TOOLTIP =
   "H = (k\u2081 + k\u2082)/2 is the mean curvature. It depends on the choice of unit normal and " +
   "flips sign with it; H = 0 everywhere means a minimal surface.";
 
+/**
+ * Replace named parameters by their current values.
+ *
+ * The typeset view is meant to show what is ON SCREEN, and what is on screen is a torus of some
+ * particular size — so `R` there is a promise the reader has to go and look up. Substituting keeps
+ * the formula and the object in agreement.
+ *
+ * Only variables with a known value are touched: the chart coordinates u and v, and anything
+ * undefined, stay symbolic, because those are what the map is a function OF. Rebuilt through the
+ * interned constructors, so constant folding applies on the way and `1 · cos u` never appears.
+ */
+function substituteValues(expr: Expr, values: ReadonlyMap<string, number>): Expr {
+  switch (expr.kind) {
+    case "num":
+      return expr;
+    case "var": {
+      const value = values.get(expr.name);
+      return value === undefined ? expr : ctx.num(value);
+    }
+    case "add":
+      return ctx.add(...expr.terms.map((term) => substituteValues(term, values)));
+    case "mul":
+      return ctx.mul(...expr.factors.map((factor) => substituteValues(factor, values)));
+    case "pow":
+      return ctx.pow(
+        substituteValues(expr.base, values),
+        substituteValues(expr.exp, values),
+      );
+    case "call":
+      return ctx.call(expr.fn, ...expr.args.map((arg) => substituteValues(arg, values)));
+  }
+}
+
 /** Coordinate names for the components of a map into R³, in order. */
 const COMPONENT_NAMES = ["x", "y", "z"];
 
@@ -1698,7 +1824,11 @@ function diagnosticNode(diagnostic: Diagnostic): HTMLElement {
  * side; a bare expression is echoed directly. An unparseable row shows a dash rather than
  * clearing, so the panel does not flicker mid-word.
  */
-function echoFor(source: string, liveValue: number | null = null): HTMLElement {
+function echoFor(
+  source: string,
+  liveValue: number | null = null,
+  values: ReadonlyMap<string, number> = new Map(),
+): HTMLElement {
   if (source.trim() === "") return el("span", { class: "echo-empty", text: " " });
 
   const { row } = parseRow(source);
@@ -1716,6 +1846,10 @@ function echoFor(source: string, liveValue: number | null = null): HTMLElement {
         );
       case "vectorFunction": {
         const head = `${nameTex(row.name)}\\left(${row.args.map(nameTex).join(", ")}\\right)`;
+        // The map's own arguments stay symbolic; everything with a value takes it.
+        const bound = new Map(values);
+        for (const arg of row.args) bound.delete(arg);
+        const comps = row.comps.map((comp) => substituteValues(comp, bound));
         /**
          * A surface is typeset the way it is written: stacked, one named coordinate per line.
          *
@@ -1728,14 +1862,12 @@ function echoFor(source: string, liveValue: number | null = null): HTMLElement {
          * two never disagree about which rows get the treatment.
          */
         if (row.args.length === 2 && row.comps.length === COMPONENT_NAMES.length) {
-          const rows = row.comps
+          const rows = comps
             .map((c, index) => `${COMPONENT_NAMES[index]} &= ${toLatex(c)}`)
             .join(" \\\\ ");
           return tex(`${head} = \\left(\\begin{aligned} ${rows} \\end{aligned}\\right)`);
         }
-        return tex(
-          `${head} = \\left(${row.comps.map((c) => toLatex(c)).join(",\\; ")}\\right)`,
-        );
+        return tex(`${head} = \\left(${comps.map((c) => toLatex(c)).join(",\\; ")}\\right)`);
       }
       case "equation":
         return tex(`${toLatex(row.lhs)} = ${toLatex(row.rhs)}`);

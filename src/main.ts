@@ -12,7 +12,7 @@ import { createDevice } from "./gl/device.ts";
 import { createRenderer } from "./gl/renderer.ts";
 import { createAnimator } from "./ui/animate.ts";
 import { createExprList, type SliderSpec } from "./ui/exprList.ts";
-import { createTemplatePicker } from "./ui/templates.ts";
+import { createTemplatePicker, TEMPLATE_ENTRIES } from "./ui/templates.ts";
 import type { Vec3 } from "./core/geom/types.ts";
 import type { LineGroup } from "./gl/passes/lines.ts";
 import { arrow, type Scene } from "./state/scene.ts";
@@ -433,6 +433,8 @@ function main() {
 
       // Selecting an object opens its properties. This is the same act as clicking its row, and
       // both land in the list so the highlight and the card can never disagree.
+      // The window opens where the click happened; the bar placement ignores this.
+      list.placeAt(event.clientX, event.clientY);
       list.select(hit.rowId);
       pickedAt = { u: hit.u, v: hit.v };
 
@@ -451,6 +453,72 @@ function main() {
     { capture: true },
   );
 
+  /**
+   * Right-click on empty space: pick a template, or start one of your own.
+   *
+   * The gallery button in the corner answers "show me the catalog"; this answers "put something
+   * here", which is the thing you want when the scene is empty and the cursor is already where
+   * you are looking. Typing into the field and pressing Enter creates a cell on the left, so the
+   * menu is a shortcut into the same document rather than a separate way of making objects.
+   */
+  const menu = el("div", { class: "context-menu context-menu--hidden" });
+  canvas.parentElement?.append(menu);
+
+  const closeMenu = () => menu.classList.add("context-menu--hidden");
+
+  canvas.addEventListener("contextmenu", (event: MouseEvent) => {
+    event.preventDefault();
+
+    const field = el("input", {
+      class: "field field--mono context-menu__field",
+      placeholder: "X(u,v) = (…, …, …)",
+      spellcheck: "false",
+    }) as HTMLInputElement;
+
+    field.addEventListener("keydown", (keyEvent: KeyboardEvent) => {
+      if (keyEvent.key === "Escape") closeMenu();
+      if (keyEvent.key !== "Enter") return;
+      const source = field.value.trim();
+      if (source === "") return;
+      const row = store.addRow(source);
+      closeMenu();
+      onEdit(true);
+      list.select(row.id);
+    });
+
+    replace(menu, [
+      field,
+      el("div", { class: "context-menu__label", text: "or load" }),
+      el("div", { class: "context-menu__grid" },
+        TEMPLATE_ENTRIES.map((entry) =>
+          el("button", {
+            class: "template",
+            title: entry.blurb,
+            text: entry.name,
+            onClick: () => {
+              entry.load();
+              closeMenu();
+            },
+          }),
+        )),
+    ]);
+
+    // Clamped to the viewport, like the properties window: a right-click near an edge is the
+    // common case, not the exception.
+    menu.classList.remove("context-menu--hidden");
+    const margin = 8;
+    const maxX = globalThis.innerWidth - menu.offsetWidth - margin;
+    const maxY = globalThis.innerHeight - menu.offsetHeight - margin;
+    menu.style.left = `${Math.max(margin, Math.min(maxX, event.clientX))}px`;
+    menu.style.top = `${Math.max(margin, Math.min(maxY, event.clientY))}px`;
+    field.focus();
+  });
+
+  // Any click elsewhere dismisses it, which is what a context menu is expected to do.
+  globalThis.addEventListener("pointerdown", (event: PointerEvent) => {
+    if (!menu.contains(event.target as Node)) closeMenu();
+  });
+
   canvas.addEventListener("pointercancel", () => {
     if (gesture.kind === "aim") renderer.camera.setAiming(false);
     gesture = { kind: "idle" };
@@ -458,6 +526,21 @@ function main() {
     aimChart = [0, 0];
     paintLines();
   });
+
+  /**
+   * Which placement the properties use.
+   *
+   * Both are kept while it is being decided which reads better — they are one DOM with a
+   * different class, so this costs a class toggle rather than a second implementation.
+   */
+  const placementToggle = el("input", {
+    type: "checkbox",
+    checked: true,
+    onChange: (event: Event) => {
+      list.setPlacement((event.target as HTMLInputElement).checked ? "cursor" : "bar");
+    },
+  }) as HTMLInputElement;
+  list.setPlacement("cursor");
 
   const chartToggle = el("input", {
     type: "checkbox",
@@ -539,6 +622,13 @@ function main() {
       el("label", { class: "toggle" }, [curvatureToggle, el("span", { text: "paint K" })]),
       legendBar,
       legendLabels,
+    ]),
+    el("section", { class: "panel-section" }, [
+      el("h2", { class: "section-title", text: "Properties" }),
+      el("label", { class: "toggle" }, [
+        placementToggle,
+        el("span", { text: "as a window at the pointer" }),
+      ]),
     ]),
     el("section", { class: "panel-section" }, [
       el("h2", { class: "section-title", text: "Chart" }),
