@@ -114,7 +114,16 @@ export function createRenderer(device: Device): Renderer {
     const size = Math.round(Math.min(device.width, device.height) * 0.3);
     if (size < 32) return; // too small to read; better to omit than to draw noise
 
-    const x = margin;
+    /**
+     * Bottom RIGHT, opposite the expression panel on the left.
+     *
+     * `x` is passed on to the lines pass as its viewport origin, which is load-bearing:
+     * `gl_FragCoord` is framebuffer-absolute, so a pass comparing against screen-space positions
+     * has to be told where its viewport starts. Anything that omits it works perfectly while the
+     * inset sits at the origin and fails totally the moment it moves — which is exactly what this
+     * change would have triggered.
+     */
+    const x = device.width - size - margin;
     const y = margin;
 
     gl.enable(gl.SCISSOR_TEST);

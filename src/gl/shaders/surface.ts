@@ -14,6 +14,7 @@ in vec3 aPosition;
 in vec3 aNormal;
 in vec2 aChart;
 in vec3 aColor;
+in vec3 aBaseColor;
 
 uniform mat4 uView;
 uniform mat4 uProjection;
@@ -22,12 +23,14 @@ out vec3 vWorldPosition;
 out vec3 vNormal;
 out vec2 vChart;
 out vec3 vColor;
+out vec3 vBaseColor;
 
 void main() {
   vWorldPosition = aPosition;
   vNormal = aNormal;
   vChart = aChart;
   vColor = aColor;
+  vBaseColor = aBaseColor;
   gl_Position = uProjection * uView * vec4(aPosition, 1.0);
 }
 `;
@@ -39,9 +42,9 @@ in vec3 vWorldPosition;
 in vec3 vNormal;
 in vec2 vChart;
 in vec3 vColor;
+in vec3 vBaseColor;
 
 uniform vec3 uEye;
-uniform vec3 uBaseColor;
 uniform float uGridOpacity;
 uniform vec2 uGridSpacing;
 /** 0 = flat base colour, 1 = per-vertex curvature colour */
@@ -74,7 +77,9 @@ float chartGrid(vec2 uv, vec2 spacing) {
 
 void main() {
   vec3 n = normalize(vNormal);
-  vec3 albedo = mix(uBaseColor, vColor, uCurvatureMix);
+  /* The base colour arrives per vertex, not as a uniform: every surface is concatenated into one
+     draw call, so a uniform could only give them all the same colour. */
+  vec3 albedo = mix(vBaseColor, vColor, uCurvatureMix);
 
   /* A zero normal means the mesh builder found a degenerate vertex (a cone tip, a
      chart pole). Shade it flat rather than letting normalize() produce NaN. */

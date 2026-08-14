@@ -101,6 +101,14 @@ export interface DocumentStore {
   readonly parameters: WritableSignal<ReadonlyMap<string, number>>;
   addRow(source?: string): Row;
   removeRow(id: RowId): void;
+  /**
+   * Shift a row by `delta` places, clamped at the ends.
+   *
+   * Order is presentation only — resolution is by name through the dependency graph, so a row may
+   * refer to one below it and moving rows never changes what the document means. It exists so the
+   * list can be arranged to read well.
+   */
+  moveRow(id: RowId, delta: number): void;
   /** Replace every row at once, for loading a template. */
   setRows(sources: readonly string[]): Row[];
   /** Per-row diagnostics, as a stable signal so a row can render its own errors. */
@@ -154,6 +162,18 @@ export function createDocument(initial: readonly string[] = []): DocumentStore {
       const row: Row = { id: nextId++, source: signal(source) };
       rowsSignal.set([...rowsSignal(), row]);
       return row;
+    },
+
+    moveRow(id, delta) {
+      const current = rowsSignal();
+      const from = current.findIndex((row) => row.id === id);
+      if (from < 0) return;
+      const to = Math.min(current.length - 1, Math.max(0, from + delta));
+      if (to === from) return;
+      const next = [...current];
+      const [moved] = next.splice(from, 1);
+      next.splice(to, 0, moved!);
+      rowsSignal.set(next);
     },
 
     removeRow(id) {

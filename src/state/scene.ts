@@ -88,6 +88,15 @@ export interface SceneRequest {
    * becomes visible.
    */
   readonly inChart?: ReadonlySet<RowId>;
+  /**
+   * Per-row colour, overriding the defaults for everything that row draws.
+   *
+   * Applies to a curve's polyline, a chart curve on both the inset and the surface, and a
+   * surface's base colour — the shade shown when curvature painting is off. It deliberately does
+   * NOT override the curvature colormap: that colour is a measurement, not a decoration, and
+   * letting it be reassigned per object would make the legend meaningless.
+   */
+  readonly colors?: ReadonlyMap<RowId, Vec3>;
 }
 
 /**
@@ -298,6 +307,9 @@ export function buildScene(request: SceneRequest): Scene {
   const declared = request.declaredParameters ?? new Map<string, number>();
   const inChart = request.inChart ?? new Set<RowId>();
   const overlays = request.overlays ?? new Map<RowId, SurfaceOverlay>();
+  const rowColors = request.colors ?? new Map<RowId, Vec3>();
+  /** This row's chosen colour, or the built-in default for whatever it draws. */
+  const colorOf = (rowId: RowId, fallback: Vec3): Vec3 => rowColors.get(rowId) ?? fallback;
 
   const reports: RawReport[] = [];
   const meshes: TessellatedSurface[] = [];
@@ -396,6 +408,7 @@ export function buildScene(request: SceneRequest): Scene {
         },
         // The row id travels into the mesh so a pick can name the row it landed on.
         objectId: item.rowId,
+        baseColor: rowColors.get(item.rowId),
       });
       meshes.push(mesh);
       entry.mesh = mesh;
@@ -623,7 +636,7 @@ export function buildScene(request: SceneRequest): Scene {
         count: frames.count,
         valid: frames.valid,
         arcLength: frames.arcLength,
-        color: CURVE_PALETTE[curveIndex % CURVE_PALETTE.length]!,
+        color: colorOf(item.rowId, CURVE_PALETTE[curveIndex % CURVE_PALETTE.length]!),
       };
       lines.push({ polylines: [polyline], style: { widthPx: 3.5 } });
       curveIndex++;
@@ -707,6 +720,7 @@ export function buildScene(request: SceneRequest): Scene {
             params: paramNames,
             variable: (item.vars[0] === "v" ? "v" : "u") as "u" | "v",
             colorIndex: chartColorIndex++,
+            color: rowColors.get(item.rowId),
           },
           chartBounds,
           primary.surface,
@@ -742,6 +756,7 @@ export function buildScene(request: SceneRequest): Scene {
             comps: item.comps,
             params: paramNames,
             colorIndex: chartColorIndex++,
+            color: rowColors.get(item.rowId),
           },
           chartBounds,
           primary.surface,
@@ -782,6 +797,7 @@ export function buildScene(request: SceneRequest): Scene {
             variable: item.vars[0] ?? "t",
             range,
             colorIndex: chartColorIndex++,
+            color: rowColors.get(item.rowId),
           },
           primary.surface,
           packParameters(paramNames, parameters, declared),
@@ -828,7 +844,7 @@ export function buildScene(request: SceneRequest): Scene {
       dots.push({
         points: new Float64Array([...position, ...position]),
         count: 2,
-        color: POINT_COLOR,
+        color: colorOf(item.rowId, POINT_COLOR),
       });
       reports.push({
         rowId: item.rowId,
@@ -1022,6 +1038,7 @@ function concatenate(meshes: readonly TessellatedSurface[]): TessellatedSurface 
   const positions = new Float32Array(vertexCount * 3);
   const normals = new Float32Array(vertexCount * 3);
   const colors = new Float32Array(vertexCount * 3);
+  const baseColors = new Float32Array(vertexCount * 3);
   const chart = new Float32Array(vertexCount * 2);
   const ids = new Float32Array(vertexCount);
   const curvature = new Float64Array(vertexCount);
@@ -1033,6 +1050,7 @@ function concatenate(meshes: readonly TessellatedSurface[]): TessellatedSurface 
     positions.set(mesh.positions, vertexOffset * 3);
     normals.set(mesh.normals, vertexOffset * 3);
     colors.set(mesh.colors, vertexOffset * 3);
+    baseColors.set(mesh.baseColors, vertexOffset * 3);
     chart.set(mesh.chart, vertexOffset * 2);
     ids.set(mesh.ids, vertexOffset);
     curvature.set(mesh.curvature, vertexOffset);
@@ -1047,6 +1065,7 @@ function concatenate(meshes: readonly TessellatedSurface[]): TessellatedSurface 
     positions,
     normals,
     colors,
+    baseColors,
     chart,
     ids,
     curvature,

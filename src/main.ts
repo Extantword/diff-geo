@@ -12,6 +12,7 @@ import { createRenderer } from "./gl/renderer.ts";
 import { createAnimator } from "./ui/animate.ts";
 import { createExprList, type SliderSpec } from "./ui/exprList.ts";
 import { createTemplatePicker } from "./ui/templates.ts";
+import type { Vec3 } from "./core/geom/types.ts";
 import { el, replace } from "./ui/dom.ts";
 
 /**
@@ -41,6 +42,7 @@ const EMPTY_MESH = {
   positions: new Float32Array(0),
   normals: new Float32Array(0),
   colors: new Float32Array(0),
+  baseColors: new Float32Array(0),
   chart: new Float32Array(0),
   ids: new Float32Array(0),
   curvature: new Float64Array(0),
@@ -83,6 +85,8 @@ function main() {
   const rowSliders = new Map<RowId, SliderSpec>();
   const inChart = new Set<RowId>();
   const overlays = new Map<RowId, SurfaceOverlay>();
+  /** Per-row colour, set from the properties card and used everywhere that row is drawn. */
+  const colors = new Map<RowId, Vec3>();
   /** Chart coordinates of the last successful pick, for the diagnostics readout. */
   let pickedAt: { u: number; v: number } | null = null;
   const animator = createAnimator();
@@ -113,6 +117,7 @@ function main() {
       frames,
       inChart,
       overlays,
+      colors,
     });
 
     renderer.setSurfaceMesh(scene.mesh ?? EMPTY_MESH);
@@ -223,7 +228,10 @@ function main() {
     inChart,
     animator,
     overlays,
+    colors,
   });
+  // The card floats over the scene rather than sitting in the panel, so the list stays a list.
+  canvas.parentElement?.append(list.card);
   const templates = createTemplatePicker({
     document: store,
     sliders,
@@ -266,22 +274,31 @@ function main() {
     const travelled = Math.hypot(event.clientX - pressX, event.clientY - pressY);
     if (travelled > CLICK_SLOP) return;
 
-    // Only rows already showing an overlay respond. Clicking a bare surface should do nothing
-    // rather than silently arming a feature the user has not asked for.
-    const armed = [...overlays.entries()].filter(
-      ([, overlay]) => overlay.geodesics > 0 || overlay.curvatureLines,
-    );
-    if (armed.length === 0) return;
-
     const rect = canvas.getBoundingClientRect();
     const hit = renderer.pick(event.clientX - rect.left, event.clientY - rect.top);
-    if (!hit) return;
 
-    const overlay = overlays.get(hit.rowId);
-    if (!overlay || (overlay.geodesics === 0 && !overlay.curvatureLines)) return;
+    // Clicking empty space deselects, which is the only way to dismiss the card without
+    // reaching for its close button.
+    if (!hit) {
+      list.select(null);
+      return;
+    }
 
-    overlays.set(hit.rowId, { ...overlay, start: [hit.u, hit.v] });
+    // Selecting an object opens its properties. This is the same act as clicking its row, and
+    // both land in the list so the highlight and the card can never disagree.
+    list.select(hit.rowId);
     pickedAt = { u: hit.u, v: hit.v };
+
+    /**
+     * A click on an armed surface also moves where its curves start.
+     *
+     * Only rows already showing an overlay respond: clicking a bare surface should select it and
+     * nothing more, rather than silently arming a feature the user has not asked for.
+     */
+    const overlay = overlays.get(hit.rowId);
+    if (overlay && (overlay.geodesics > 0 || overlay.curvatureLines)) {
+      overlays.set(hit.rowId, { ...overlay, start: [hit.u, hit.v] });
+    }
     onEdit(false);
   });
 

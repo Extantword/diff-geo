@@ -1,4 +1,5 @@
 import type { Diagnostic } from "../core/expr/diagnostics.ts";
+import type { Vec3 } from "../core/geom/types.ts";
 import { toLatex } from "../core/expr/latex.ts";
 import { parse, parseRow } from "../core/expr/parse.ts";
 import type { DocumentStore, Item, RowId } from "../state/graph.ts";
@@ -88,10 +89,17 @@ export interface ExprListOptions {
   readonly animator: Animator;
   /** Per-surface overlays: geodesic sprays, lines of curvature, the Gauss map. */
   readonly overlays: Map<RowId, SurfaceOverlay>;
+  /** Per-row colour, for every part of the scene that row draws. */
+  readonly colors: Map<RowId, Vec3>;
 }
 
 export interface ExprList {
   readonly root: HTMLElement;
+  /** The floating properties card, for the caller to mount over the scene. */
+  readonly card: HTMLElement;
+  /** Show a row's properties, or `null` to close the card. Also driven by picking in 3D. */
+  select(id: RowId | null): void;
+  selected(): RowId | null;
   /** Full refresh: echoes, badges, controls, diagnostics. For structural changes. */
   refresh(reports: readonly RowReport[]): void;
   /**
@@ -130,6 +138,17 @@ interface RowView {
   readonly chartHost: HTMLElement;
   /** host for the geodesic and curvature-line controls a surface row gets */
   readonly overlayHost: HTMLElement;
+  /**
+   * This row's properties, shown in the floating card when the row is selected.
+   *
+   * Every row's details block lives in the card the whole time; selection only toggles which one
+   * is VISIBLE. Nothing is ever reparented, which matters because moving a DOM node detaches and
+   * reinserts it — blurring any focused descendant — and because the sync functions can then go
+   * on updating a row's controls whether or not it happens to be on screen.
+   */
+  readonly details: HTMLElement;
+  readonly colorSwatch: HTMLInputElement;
+  readonly detailsTitle: HTMLElement;
   overlayBuilt: boolean;
   /** the name the inline slider was built for, or "" if there is none */
   valueName: string;
@@ -139,6 +158,48 @@ export function createExprList(options: ExprListOptions): ExprList {
   const { document: store } = options;
 
   const rowHost = el("div", { class: "rows" });
+
+  /**
+   * The floating properties card.
+   *
+   * Lives over the scene rather than in the panel, so the expression list stays what it says it
+   * is — a list of inputs — and so properties appear next to the object they describe when it is
+   * selected by clicking it in the scene.
+   */
+  const cardTitle = el("span", { class: "props__title", text: "properties" });
+  const cardBody = el("div", { class: "props__slot" });
+  const card = el("div", { class: "props props--hidden" }, [
+    el("div", { class: "props__head" }, [
+      cardTitle,
+      el("button", {
+        class: "props__close",
+        title: "close",
+        text: "\u00d7",
+        onClick: () => select(null),
+      }),
+    ]),
+    cardBody,
+  ]);
+
+  let selectedId: RowId | null = null;
+
+  /**
+   * Show one row's properties, or none.
+   *
+   * Selection is a property of the LIST rather than of a row so that the scene and the list can
+   * drive it interchangeably: clicking a surface in 3D and clicking its row are the same act, and
+   * both have to land in one place or the highlight and the card can disagree.
+   */
+  const select = (id: RowId | null) => {
+    selectedId = id;
+    for (const [rowId, view] of views) {
+      const chosen = rowId === id;
+      view.details.classList.toggle("props__body--hidden", !chosen);
+      view.root.classList.toggle("row--selected", chosen);
+      if (chosen) cardTitle.textContent = view.detailsTitle.textContent ?? "properties";
+    }
+    card.classList.toggle("props--hidden", id === null || !views.has(id));
+  };
   const sliderHost = el("div", { class: "sliders" });
   const sliderEmpty = el("p", {
     class: "blurb",
@@ -174,12 +235,21 @@ export function createExprList(options: ExprListOptions): ExprList {
 
     for (const row of rows) {
       seen.add(row.id);
-      if (!views.has(row.id)) views.set(row.id, createRowView(row.id));
+      if (!views.has(row.id)) {
+        const view = createRowView(row.id);
+        views.set(row.id, view);
+        // Every row's details block joins the card immediately and stays there; only visibility
+        // changes with selection, so nothing is ever reparented out from under a focused field.
+        view.details.classList.add("props__body--hidden");
+        cardBody.append(view.details);
+      }
     }
     for (const [id, view] of views) {
       if (!seen.has(id)) {
         view.root.remove();
+        view.details.remove();
         views.delete(id);
+        if (selectedId === id) select(null);
       }
     }
     /**
@@ -234,24 +304,77 @@ export function createExprList(options: ExprListOptions): ExprList {
       class: "row__remove",
       title: "remove this expression",
       text: "×",
-      onClick: () => {
+      onClick: (event: Event) => {
+        // Removing is not selecting: without this the click would also open the card for a row
+        // that is about to stop existing.
+        event.stopPropagation();
         store.removeRow(id);
         views.get(id)?.root.remove();
+        views.get(id)?.details.remove();
         views.delete(id);
+        if (selectedId === id) select(null);
         options.onEdit(false);
       },
     });
 
-    const root = el("div", { class: "row" }, [
-      el("div", { class: "row__head" }, [badge, remove]),
+    const shift = (delta: number, label: string, title: string) =>
+      el("button", {
+        class: "row__move",
+        title,
+        text: label,
+        onClick: (event: Event) => {
+          event.stopPropagation();
+          store.moveRow(id, delta);
+          syncRows();
+          options.onEdit(false);
+        },
+      });
+
+    const root = el("div", {
+      class: "row",
+      onClick: () => select(id),
+    }, [
+      el("div", { class: "row__head" }, [
+        badge,
+        el("span", { class: "row__spacer" }),
+        shift(-1, "\u2191", "move up"),
+        shift(1, "\u2193", "move down"),
+        remove,
+      ]),
       input,
       echo,
+      notes,
+    ]);
+
+    /**
+     * The colour every drawn part of this row takes.
+     *
+     * A native colour input rather than a palette: it costs one element, it is keyboard and
+     * screen-reader accessible for free, and it does not constrain the user to swatches we
+     * happened to choose.
+     */
+    const colorSwatch = el("input", {
+      type: "color",
+      class: "props__color",
+      value: toHex(options.colors.get(id) ?? defaultColorFor(id)),
+      onInput: () => {
+        options.colors.set(id, fromHex(colorSwatch.value));
+        options.onEdit(false);
+      },
+    }) as HTMLInputElement;
+
+    const detailsTitle = el("span", { class: "props__kind", text: "expression" });
+
+    const details = el("div", { class: "props__body" }, [
+      el("label", { class: "props__row" }, [
+        el("span", { text: "colour" }),
+        colorSwatch,
+      ]),
       valueHost,
       chartHost,
       domainHost,
       overlayHost,
       frameHost,
-      notes,
     ]);
 
     return {
@@ -266,6 +389,9 @@ export function createExprList(options: ExprListOptions): ExprList {
       valueHost,
       chartHost,
       overlayHost,
+      details,
+      colorSwatch,
+      detailsTitle,
       overlayBuilt: false,
       domainVars: "",
       valueName: "",
@@ -436,25 +562,72 @@ export function createExprList(options: ExprListOptions): ExprList {
       view.domainHost,
       vars.map((name, index) => {
         const entry = stored[index]!;
-        const field = (which: "min" | "max") =>
+
+        /**
+         * Slider bounds, derived from the interval the row starts with.
+         *
+         * A domain bound has no natural range of its own — it could be anything — so the track
+         * spans twice the current width either side of it. Wide enough to explore, tight enough
+         * that a drag still resolves finely.
+         */
+        const span = Math.abs(entry.max - entry.min) || 1;
+        const centre = (entry.min + entry.max) / 2;
+        const lo = centre - span * 2;
+        const hi = centre + span * 2;
+
+        const number = (which: "min" | "max") =>
           el("input", {
             type: "number",
             class: "field field--tiny",
             value: Number(entry[which].toFixed(4)),
             step: "any",
-            onChange: (event: Event) => {
-              const next = Number((event.target as HTMLInputElement).value);
-              if (!Number.isFinite(next)) return;
-              entry[which] = next;
-              options.onEdit(false);
-            },
-          });
+          }) as HTMLInputElement;
+
+        const slider = (which: "min" | "max") =>
+          el("input", {
+            type: "range",
+            class: "slider__input slider__input--tight",
+            min: lo,
+            max: hi,
+            step: (hi - lo) / 400,
+            value: entry[which],
+          }) as HTMLInputElement;
+
+        const minNumber = number("min");
+        const maxNumber = number("max");
+        const minSlider = slider("min");
+        const maxSlider = slider("max");
+
+        /**
+         * The two controls are kept in step by hand rather than one driving the other, because
+         * they are two views of one number and whichever the user touched must not be written
+         * back to — assigning to an input the user is dragging or typing in fights them.
+         */
+        const commit = (which: "min" | "max", value: number, source: "slider" | "number") => {
+          if (!Number.isFinite(value)) return;
+          entry[which] = value;
+          const numberField = which === "min" ? minNumber : maxNumber;
+          const sliderField = which === "min" ? minSlider : maxSlider;
+          if (source === "slider") numberField.value = String(Number(value.toFixed(4)));
+          else sliderField.value = String(value);
+          options.onEdit(false);
+        };
+
+        minSlider.addEventListener("input", () => commit("min", Number(minSlider.value), "slider"));
+        maxSlider.addEventListener("input", () => commit("max", Number(maxSlider.value), "slider"));
+        minNumber.addEventListener("change", () => commit("min", Number(minNumber.value), "number"));
+        maxNumber.addEventListener("change", () => commit("max", Number(maxNumber.value), "number"));
+
         return el("div", { class: "domain" }, [
-          el("span", { class: "domain__var" }, [tex(name)]),
-          el("span", { class: "domain__in", text: "∈" }),
-          field("min"),
-          el("span", { text: "…" }),
-          field("max"),
+          el("div", { class: "domain__head" }, [
+            el("span", { class: "domain__var" }, [tex(name)]),
+            el("span", { class: "domain__in", text: "∈" }),
+            minNumber,
+            el("span", { text: "…" }),
+            maxNumber,
+          ]),
+          minSlider,
+          maxSlider,
         ]);
       }),
     );
@@ -919,6 +1092,10 @@ export function createExprList(options: ExprListOptions): ExprList {
       const item = resolution.items.get(id) ?? null;
       const label = item ? (KIND_LABEL[item.kind] ?? item.kind) : "";
       view.badge.textContent = label;
+      // The card's heading names the same thing the row's badge does, so a selected object is
+      // identifiable from the card alone once the list scrolls away from it.
+      view.detailsTitle.textContent = label === "" ? "expression" : label;
+      if (selectedId === id) cardTitle.textContent = view.detailsTitle.textContent;
       view.badge.className =
         "row__badge" +
         (item && NOT_YET_DRAWN.has(item.kind) ? " row__badge--pending" : "") +
@@ -954,12 +1131,61 @@ export function createExprList(options: ExprListOptions): ExprList {
 
   return {
     root,
+    card,
+    select,
+    selected: () => selectedId,
     refresh,
     refreshReports,
     invalidateSliders: () => {
       renderedSliders = "\u0000";
     },
   };
+}
+
+/**
+ * A distinct starting colour per row, walked around the hue circle.
+ *
+ * Golden-ratio spacing rather than even division, because the number of rows is not known in
+ * advance: each new row lands in the largest remaining gap, so any prefix of the sequence is
+ * well separated instead of only a full set being so.
+ */
+function defaultColorFor(id: RowId): Vec3 {
+  const hue = (id * 0.61803398875) % 1;
+  return hslToRgb(hue, 0.62, 0.42);
+}
+
+function hslToRgb(h: number, s: number, l: number): Vec3 {
+  const chroma = (1 - Math.abs(2 * l - 1)) * s;
+  const sector = h * 6;
+  const second = chroma * (1 - Math.abs((sector % 2) - 1));
+  const base = l - chroma / 2;
+  const table: ReadonlyArray<readonly [number, number, number]> = [
+    [chroma, second, 0],
+    [second, chroma, 0],
+    [0, chroma, second],
+    [0, second, chroma],
+    [second, 0, chroma],
+    [chroma, 0, second],
+  ];
+  const picked = table[Math.min(5, Math.floor(sector))]!;
+  return [picked[0] + base, picked[1] + base, picked[2] + base];
+}
+
+const channel = (value: number) =>
+  Math.max(0, Math.min(255, Math.round(value * 255)))
+    .toString(16)
+    .padStart(2, "0");
+
+/** Vec3 in [0,1] to the `#rrggbb` a colour input needs. */
+export function toHex(color: Vec3): string {
+  return `#${channel(color[0])}${channel(color[1])}${channel(color[2])}`;
+}
+
+/** `#rrggbb` back to a Vec3 in [0,1]. */
+export function fromHex(hex: string): Vec3 {
+  const n = Number.parseInt(hex.replace("#", ""), 16);
+  if (!Number.isFinite(n)) return [0.5, 0.5, 0.5];
+  return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
 }
 
 function diagnosticNode(diagnostic: Diagnostic): HTMLElement {

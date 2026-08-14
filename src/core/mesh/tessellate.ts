@@ -24,6 +24,9 @@ import { periodicCanonical } from "./grid.ts";
  * touching an invalid vertex is dropped.
  */
 
+/** The shade a surface takes when it has not been given one — a muted slate blue. */
+export const DEFAULT_BASE_COLOR: Vec3 = [0.46, 0.58, 0.70];
+
 export interface TessellatedSurface {
   /** 3 floats per vertex */
   positions: Float32Array;
@@ -41,6 +44,15 @@ export interface TessellatedSurface {
   ids: Float32Array;
   /** 3 floats per vertex, from the diverging curvature colormap */
   colors: Float32Array;
+  /**
+   * 3 floats per vertex: the surface's own colour, shown when curvature painting is off.
+   *
+   * Per vertex rather than as a uniform because every surface is concatenated into a single draw
+   * call — a uniform could only give them all the same colour. The curvature colours stay separate
+   * and are never overridden: that colour is a measurement, and the legend has to keep meaning
+   * what it says.
+   */
+  baseColors: Float32Array;
   /** Gaussian curvature per vertex, for readouts and the legend */
   curvature: Float64Array;
   indices: Uint32Array;
@@ -59,6 +71,8 @@ export interface TessellateOptions {
   range?: CurvatureRange;
   /** stamped on every vertex so the pick pass can name what was clicked */
   objectId?: number;
+  /** the surface's own colour, for the uncoloured view */
+  baseColor?: Vec3;
 }
 
 export function tessellate(
@@ -66,7 +80,7 @@ export function tessellate(
   params: ArrayLike<number>,
   options: TessellateOptions = {},
 ): TessellatedSurface {
-  const { resU = 128, resV = 128, objectId = 0 } = options;
+  const { resU = 128, resV = 128, objectId = 0, baseColor = DEFAULT_BASE_COLOR } = options;
   const range = options.range ?? sampleCurvatureRange(surface, params);
 
   const [u0, u1] = sampleBounds(surface.u);
@@ -81,6 +95,12 @@ export function tessellate(
   const normals = new Float32Array(vertexCount * 3);
   const chart = new Float32Array(vertexCount * 2);
   const ids = new Float32Array(vertexCount).fill(objectId);
+  const baseColors = new Float32Array(vertexCount * 3);
+  for (let k = 0; k < vertexCount; k++) {
+    baseColors[k * 3] = baseColor[0];
+    baseColors[k * 3 + 1] = baseColor[1];
+    baseColors[k * 3 + 2] = baseColor[2];
+  }
   const colors = new Float32Array(vertexCount * 3);
   const curvature = new Float64Array(vertexCount);
   const valid = new Uint8Array(vertexCount);
@@ -189,6 +209,7 @@ export function tessellate(
     chart,
     ids,
     colors,
+    baseColors,
     curvature,
     indices: new Uint32Array(indices),
     vertexCount,

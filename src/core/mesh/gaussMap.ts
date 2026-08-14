@@ -71,6 +71,7 @@ export function gaussImage(
     chart: mesh.chart,
     ids: mesh.ids,
     colors: mesh.colors,
+    baseColors: mesh.baseColors,
     curvature: mesh.curvature,
     indices: mesh.indices,
     vertexCount: count,

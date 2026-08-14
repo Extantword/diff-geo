@@ -45,6 +45,8 @@ export interface ChartCurveRequest {
   readonly variable: string;
   readonly range: { min: number; max: number };
   readonly colorIndex: number;
+  /** Overrides the palette when the row has been given a colour of its own. */
+  readonly color?: Vec3;
 }
 
 export interface ChartCurveResult {
@@ -186,7 +188,7 @@ export function pushForward(
     surfaceValid[i] = 1;
   }
 
-  const color = CHART_CURVE_PALETTE[request.colorIndex % CHART_CURVE_PALETTE.length]!;
+  const color = request.color ?? CHART_CURVE_PALETTE[request.colorIndex % CHART_CURVE_PALETTE.length]!;
 
   const chart: Polyline = {
     points: chartPoints,
@@ -244,6 +246,8 @@ export interface ChartGraphRequest {
   /** which chart variable is the input: "u" gives v = f(u), "v" gives u = f(v) */
   readonly variable: "u" | "v";
   readonly colorIndex: number;
+  /** Overrides the palette when the row has been given a colour of its own. */
+  readonly color?: Vec3;
 }
 
 /**
@@ -317,7 +321,7 @@ export function sampleChartGraph(
     surfaceValid[i] = 1;
   }
 
-  const color = CHART_CURVE_PALETTE[request.colorIndex % CHART_CURVE_PALETTE.length]!;
+  const color = request.color ?? CHART_CURVE_PALETTE[request.colorIndex % CHART_CURVE_PALETTE.length]!;
   let anyOnSurface = false;
   for (let i = 0; i < count; i++) {
     if (surfaceValid[i]) {
@@ -342,6 +346,8 @@ export interface ChartRelationRequest {
   readonly comps: readonly Expr[];
   readonly params: readonly string[];
   readonly colorIndex: number;
+  /** Overrides the palette when the row has been given a colour of its own. */
+  readonly color?: Vec3;
 }
 
 export interface ChartRelationResult {
@@ -390,7 +396,7 @@ export function sampleChartRelation(
     resV: resolution,
   });
 
-  const color = CHART_CURVE_PALETTE[request.colorIndex % CHART_CURVE_PALETTE.length]!;
+  const color = request.color ?? CHART_CURVE_PALETTE[request.colorIndex % CHART_CURVE_PALETTE.length]!;
   const chart: Polyline[] = [];
   const onSurface: Polyline[] = [];
   const point = makeSurfacePoint();
