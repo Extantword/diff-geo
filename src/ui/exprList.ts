@@ -105,7 +105,11 @@ export interface ExprList {
   /** The floating properties card, for the caller to mount over the scene. */
   readonly card: HTMLElement;
   /** Show a row's properties, or `null` to close the card. Also driven by picking in 3D. */
-  select(id: RowId | null): void;
+  /**
+   * Select a row. `reveal` opens the properties window at the pointer; a click in the LIST passes
+   * false, because the window would then cover the very cell being edited.
+   */
+  select(id: RowId | null, reveal?: boolean): void;
   selected(): RowId | null;
   /**
    * Where the properties live: the strip along the top, or a window at the pointer.
@@ -218,6 +222,13 @@ export function createExprList(options: ExprListOptions): ExprList {
 
   let selectedId: RowId | null = null;
   let placement: "bar" | "cursor" = "bar";
+  /**
+   * Whether the window is open, as distinct from whether something is selected.
+   *
+   * Clicking a cell selects it — that is what the highlight means — but must not pop a window
+   * over the cell being typed into. Only a click in the SCENE asks to see an object's controls.
+   */
+  let revealed = false;
   let cursorX = 0;
   let cursorY = 0;
 
@@ -256,8 +267,10 @@ export function createExprList(options: ExprListOptions): ExprList {
    * drive it interchangeably: clicking a surface in 3D and clicking its row are the same act, and
    * both have to land in one place or the highlight and the card can disagree.
    */
-  const select = (id: RowId | null) => {
+  const select = (id: RowId | null, reveal = true) => {
     selectedId = id;
+    if (!reveal) revealed = false;
+    else if (id !== null) revealed = true;
     for (const [rowId, view] of views) {
       const chosen = rowId === id;
       view.details.classList.toggle("props__body--hidden", !chosen);
@@ -265,7 +278,10 @@ export function createExprList(options: ExprListOptions): ExprList {
       if (chosen) cardTitle.textContent = view.detailsTitle.textContent ?? "properties";
     }
     // The strip stays in the layout either way; only its CONTENTS change. See the placeholder.
-    card.classList.toggle("props--empty", id === null || !views.has(id));
+    card.classList.toggle(
+      "props--empty",
+      id === null || !views.has(id) || (placement === "cursor" && !revealed),
+    );
     positionAtCursor();
   };
 
@@ -558,8 +574,8 @@ export function createExprList(options: ExprListOptions): ExprList {
       class: "row row--editing",
       onClick: (event: Event) => {
         // Selecting is always right — clicking a row's slider is still a statement about which
-        // object you are working on. Entering edit mode is not.
-        select(id);
+        // object you are working on. Opening the window over it is not.
+        select(id, false);
         if (isControl(event.target)) return;
         if (!root.classList.contains("row--editing")) enterEdit();
       },
@@ -620,13 +636,16 @@ export function createExprList(options: ExprListOptions): ExprList {
 
     const detailsTitle = el("span", { class: "props__kind", text: "expression" });
 
+    /**
+     * Split in two: the window holds the domain, everything else floats beside it.
+     *
+     * The sliders are what you reach for constantly and what needs room; the chips and menus are
+     * occasional and already carry their own outlines, so they read as buttons without a panel
+     * around them. Keeping them out of the box is what lets the box be small.
+     */
     const details = el("div", { class: "props__body" }, [
-      notes,
-      colorSwatch,
-      chartHost,
-      domainHost,
-      overlayHost,
-      frameHost,
+      el("div", { class: "props__panel-body" }, [domainHost]),
+      el("div", { class: "props__tray" }, [notes, colorSwatch, chartHost, overlayHost, frameHost]),
     ]);
 
     return {
@@ -1024,7 +1043,15 @@ export function createExprList(options: ExprListOptions): ExprList {
          * debounces, and a debounce waits for quiet: a held slider produced nothing at all until
          * release and then jumped.
          */
-        const track = (which: "min" | "max") =>
+        /**
+         * ONE control per variable, with a thumb at each end.
+         *
+         * An interval is a single thing, and giving it two separate sliders made it look like two
+         * unrelated numbers as well as taking twice the room. Two ranges are stacked on a shared
+         * track: the inputs ignore the pointer and only their thumbs accept it, which is what lets
+         * both be grabbed even though one lies on top of the other.
+         */
+        const thumb = (which: "min" | "max") =>
           movingSlider({
             min: lo,
             max: hi,
@@ -1039,8 +1066,7 @@ export function createExprList(options: ExprListOptions): ExprList {
 
         return el("div", { class: "domain" }, [
           el("span", { class: "domain__var" }, [tex(name)]),
-          track("min"),
-          track("max"),
+          el("div", { class: "domain__range" }, [thumb("min"), thumb("max")]),
         ]);
       }),
     );
@@ -1778,7 +1804,16 @@ function substituteValues(expr: Expr, values: ReadonlyMap<string, number>): Expr
       return expr;
     case "var": {
       const value = values.get(expr.name);
-      return value === undefined ? expr : ctx.num(value);
+      if (value === undefined) return expr;
+      /**
+       * Rounded, because this tree is only ever read.
+       *
+       * A slider step of 0.0001 lands on values like 1.0487039999999947, and printing that in
+       * place of `c` trades one unreadable thing for another. Six significant figures is far more
+       * than the geometry can be seen to depend on. Nothing computed uses this tree — the scene is
+       * built from the unrounded parameter — so the rounding cannot reach the mathematics.
+       */
+      return ctx.num(Number(value.toPrecision(6)));
     }
     case "add":
       return ctx.add(...expr.terms.map((term) => substituteValues(term, values)));

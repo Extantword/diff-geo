@@ -955,32 +955,83 @@ option {
 }
 
 /*
- * The same controls as a window at the pointer.
+ * The same controls as a window at the pointer, in frosted glass.
  *
  * `position: fixed` rather than moving the element: reparenting would detach whatever control had
- * focus, and the two placements are meant to be swapped between freely while deciding which is
- * better. The bar rules above still apply — these only override what has to change.
+ * focus, and the two placements are meant to be swapped between freely.
+ *
+ * The Aero look is three layers, and all three are load-bearing rather than decorative. A blurred
+ * backdrop keeps the surface behind the window legible as CONTEXT while making the controls
+ * readable over it — the point of glass, when the thing underneath is the thing you are editing.
+ * A bright inner hairline gives the pane an edge without a hard border. A gloss along the top
+ * reads as a light source and stops the panel looking like a flat translucent rectangle.
  */
 .props--at-cursor {
   position: fixed;
   z-index: 20;
   flex-direction: column;
   align-items: stretch;
-  width: 320px;
+  width: 292px;
   height: auto;
   max-height: 70vh;
-  overflow-y: auto;
-  padding: 8px 10px 10px;
-  border: 1px solid var(--panel-border);
-  border-radius: 8px;
-  box-shadow: 0 8px 28px rgba(20, 30, 45, 0.18);
+  gap: 6px;
+  padding: 0;
+  /* The box lives on the inner panel, so the tray beside it can float free of any background. */
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  overflow: visible;
+}
+
+.props--at-cursor .props__head,
+.props--at-cursor .props__panel-body {
+  background: linear-gradient(
+    to bottom,
+    rgba(255, 255, 255, 0.82),
+    rgba(238, 244, 250, 0.62)
+  );
+  backdrop-filter: blur(18px) saturate(150%);
+  -webkit-backdrop-filter: blur(18px) saturate(150%);
+  border: 1px solid rgba(255, 255, 255, 0.85);
+  box-shadow:
+    0 10px 30px rgba(20, 40, 70, 0.22),
+    inset 0 1px 0 rgba(255, 255, 255, 0.95);
+}
+
+.props--at-cursor .props__head {
+  border-radius: 10px 10px 0 0;
+  border-bottom: none;
+  padding: 6px 10px 4px;
+  /* The gloss: a highlight over the top half only, as a glass pane catches light. */
+  background-image:
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.95) 0%, rgba(255, 255, 255, 0.45) 52%, rgba(255, 255, 255, 0.12) 53%),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.82), rgba(238, 244, 250, 0.62));
+}
+
+.props--at-cursor .props__panel-body {
+  border-radius: 0 0 10px 10px;
+  border-top: none;
+  padding: 6px 10px 9px;
+}
+
+/* The tray: no panel at all. Each chip already carries its own outline, so they read as floating
+   buttons rather than as a second box. */
+.props--at-cursor .props__tray {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  padding: 0 2px;
 }
 
 /* A window has room to wrap, so the controls stack instead of scrolling sideways. */
 .props--at-cursor .props__body {
-  flex-wrap: wrap;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  flex-wrap: nowrap;
   overflow-x: visible;
-  gap: 6px 10px;
+  gap: 6px;
 }
 
 .props--at-cursor .props__body > * {
@@ -1345,6 +1396,39 @@ option {
 
 .row__move:hover {
   color: var(--text);
+}
+
+/*
+ * An interval as one control: two thumbs on a shared track.
+ *
+ * The inputs are stacked and made transparent to the pointer so the lower one is still reachable;
+ * only the thumbs accept it. Both vendor thumb rules are needed — there is no shared selector, and
+ * omitting either makes the control dead in that browser rather than merely different.
+ */
+.domain__range {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 130px;
+  height: 26px;
+}
+
+.domain__range .vslider {
+  position: absolute;
+  inset: 0;
+  padding-top: 13px;
+}
+
+.domain__range .vslider__input {
+  background: none;
+  pointer-events: none;
+}
+
+.domain__range .vslider__input::-webkit-slider-thumb {
+  pointer-events: auto;
+}
+
+.domain__range .vslider__input::-moz-range-thumb {
+  pointer-events: auto;
 }
 
 /* ---- domain, as sliders ---- */

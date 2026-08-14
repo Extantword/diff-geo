@@ -401,3 +401,60 @@ describe("the properties window", () => {
     expect(list.card.parentElement).toBe(parent);
   });
 });
+
+describe("the window in cursor placement", () => {
+  beforeEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  it("stays shut when a cell is clicked, and opens when the scene is", () => {
+    /**
+     * Selecting and revealing are different acts. Clicking a cell says which object you are
+     * working on — that is what the highlight means — but popping a window over the cell being
+     * typed into makes it uneditable. Only a click in the SCENE asks to see the controls.
+     */
+    const { store, list } = makeList(["X(u,v) = (u, v, 0)"]);
+    document.body.append(list.root, list.card);
+    list.refresh([]);
+    list.setPlacement("cursor");
+    const id = store.rows()[0]!.id;
+
+    list.select(id, false);
+    expect(list.card.classList.contains("props--empty")).toBe(true);
+    // ...and the row is still selected, so the highlight and the card agree about what is chosen.
+    expect(list.selected()).toBe(id);
+
+    list.select(id, true);
+    expect(list.card.classList.contains("props--empty")).toBe(false);
+  });
+
+  it("gives each domain variable one control with two thumbs", () => {
+    // An interval is a single thing; two separate sliders made it look like two unrelated
+    // numbers and took twice the room.
+    const { store, list } = makeList(["X(u,v) = (u, v, 0)"]);
+    document.body.append(list.root, list.card);
+    list.refresh([]);
+    list.select(store.rows()[0]!.id);
+
+    const ranges = list.card.querySelectorAll(".domain__range");
+    expect(ranges).toHaveLength(2);
+    for (const range of ranges) {
+      expect(range.querySelectorAll(".vslider__input")).toHaveLength(2);
+    }
+  });
+
+  it("keeps the occasional controls out of the panel", () => {
+    // The panel holds what needs room; the chips already carry their own outlines, so they float
+    // beside it. Keeping them out is what lets the panel be small.
+    const { store, list } = makeList(["X(u,v) = (u, v, 0)"]);
+    document.body.append(list.root, list.card);
+    list.refresh([]);
+    list.select(store.rows()[0]!.id);
+
+    const panel = list.card.querySelector(".props__panel-body")!;
+    const tray = list.card.querySelector(".props__tray")!;
+    expect(panel.querySelector(".row__domain")).not.toBeNull();
+    expect(panel.querySelector(".chip")).toBeNull();
+    expect(tray.querySelectorAll(".chip").length).toBeGreaterThan(0);
+  });
+});
