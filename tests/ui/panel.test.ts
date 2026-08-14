@@ -109,3 +109,40 @@ describe("the properties card", () => {
     expect(field.value).toBe("X(u,v) = (u, v, 0)");
   });
 });
+
+describe("the toolbar's contents", () => {
+  beforeEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  it("puts a surface's controls in the strip, not the row", () => {
+    /**
+     * The division of labour the layout depends on: a cell holds its formula and the sliders for
+     * the values it introduces; everything describing the OBJECT belongs to the toolbar. If a
+     * control drifts back into the row the cell column grows and the toolbar empties, which is
+     * exactly the shape the top bar exists to avoid.
+     */
+    const { store, list } = makeList(["X(u,v) = (u, v, 0)"]);
+    document.body.append(list.root, list.card);
+    list.refresh([]);
+    list.select(store.rows()[0]!.id);
+
+    const shown = list.card.querySelector(".props__body:not(.props__body--hidden)")!;
+    expect(shown.querySelector(".props__color"), "colour").not.toBeNull();
+    expect(shown.querySelector(".row__domain"), "domain").not.toBeNull();
+    expect(shown.querySelector(".row__overlay"), "overlays").not.toBeNull();
+    // The formula and its own sliders stay in the cell.
+    expect(list.root.querySelector(".row__input")).not.toBeNull();
+    expect(list.root.querySelector(".props__color")).toBeNull();
+  });
+
+  it("gives a numeric cell a slider of its own, in the cell", () => {
+    // `R = 2` is classified as a parameter precisely because it is meant to be dragged; the
+    // slider belongs beside the definition, not in the toolbar.
+    const { store, list } = makeList(["R = 2"]);
+    document.body.append(list.root, list.card);
+    list.refresh([]);
+    void store;
+    expect(list.root.querySelector(".row__value .slider__input")).not.toBeNull();
+  });
+});

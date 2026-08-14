@@ -617,58 +617,173 @@ option {
  * that corner clear — the two are the only things competing for that side.
  */
 /*
- * A strip along the top rather than a card over the scene.
+ * A toolbar, not a panel: one dense row of controls with hairline rules between groups.
  *
- * Hidden it occupies no row at all, so an unselected scene is full height; shown it spans the
- * whole width, which is what lets the controls sit side by side instead of stacking into a
- * column that has to be scrolled.
+ * Compactness here is not cosmetic — every pixel of height comes straight off the geometry, which
+ * is the thing worth looking at. So labels shrink to the smallest that stays readable, tracks are
+ * short, and the prose hints are dropped: their content is already in the control labels beside
+ * them, and a sentence costs more room than the control it describes.
  */
 .props {
   display: flex;
-  align-items: flex-start;
-  gap: 14px;
-  max-height: 30vh;
-  overflow-y: auto;
+  align-items: center;
+  gap: 0;
   background: var(--panel);
   border-bottom: 1px solid var(--panel-border);
-  padding: 8px 12px;
+  padding: 3px 8px;
+  font-size: 11px;
 }
 
-/* Every control laid out in a row. The hosts are wrapping flex rows themselves, so a surface's
-   domain, sliders and toggles flow across the strip rather than down it. */
+/*
+ * ONE row, never two.
+ *
+ * Wrapping is what turns a toolbar back into a panel: a second line doubles the height the moment
+ * a surface has a few controls, and the height is the whole point. Overflow scrolls sideways
+ * instead, so the bar's height is fixed no matter how much it holds.
+ */
 .props__body {
   display: flex;
-  flex-wrap: wrap;
-  align-items: flex-start;
-  gap: 8px 16px;
+  flex-wrap: nowrap;
+  align-items: center;
   flex: 1;
   min-width: 0;
+  overflow-x: auto;
 }
 
+/* Each host is a group, divided by a rule — the one visual device that makes a dense row of
+   unrelated controls readable. */
 .props__body > * {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px 16px;
-}
-
-.props__body .slider {
-  min-width: 180px;
-}
-
-.props__body .domain {
-  min-width: 210px;
-}
-
-/* The strip's label and its close button, held to a fixed width so the controls beside them
-   start at the same place whatever the object is called. */
-.props__head {
-  flex-direction: row;
+  flex-wrap: nowrap;
   align-items: center;
   gap: 6px;
+  /* Groups keep their size rather than compressing into illegibility when the bar is full. */
   flex: 0 0 auto;
-  width: 118px;
+  padding: 1px 9px;
+  border-left: 1px solid var(--panel-border);
+}
+
+.props__body > *:first-child,
+.props__body > *:empty {
+  border-left: none;
+}
+
+.props__body > *:empty {
+  display: none;
+}
+
+.props__head {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
   margin-bottom: 0;
+  padding-right: 8px;
+}
+
+.props__title {
+  flex: 0 0 auto;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+}
+
+/* ---- everything inside the toolbar, shrunk ---- */
+
+.props .slider {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  margin: 0;
+}
+
+.props .slider__label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0;
+  font-size: 11px;
+}
+
+.props .slider__input {
+  width: 88px;
+  margin: 0;
+}
+
+.props .slider__value {
+  min-width: 30px;
+  font-size: 11px;
+}
+
+.props .row__domain {
+  gap: 12px;
+}
+
+.props .domain {
+  flex-direction: row;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  margin: 0;
+}
+
+.props .domain__head {
+  gap: 4px;
+  margin: 0;
+}
+
+.props .slider__input--tight {
+  width: 56px;
+}
+
+.props .field--tiny {
+  width: 48px;
+}
+
+.props .toggle {
+  gap: 4px;
+  margin: 0;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.props .props__row {
+  gap: 5px;
+  padding: 0;
+  border: none;
+}
+
+.props .props__color {
+  width: 30px;
+  height: 18px;
+}
+
+.props .props__select {
+  font-size: 11px;
+  padding: 1px 2px;
+}
+
+.props .props__button {
+  padding: 1px 6px;
+}
+
+/*
+ * The prose hints are for the panel, not the toolbar. Each one restates what the control next to
+ * it already says — "drag to aim a geodesic" is the checkbox's own label — and a sentence is
+ * several times the width of the thing it explains.
+ */
+.props .overlay__hint {
+  display: none;
+}
+
+.props .row__notes {
+  gap: 6px;
+}
+
+.props .diag {
+  padding: 1px 6px;
+  font-size: 11px;
 }
 
 .props--hidden {
@@ -677,13 +792,6 @@ option {
 
 .props__row {
   flex-wrap: nowrap;
-}
-
-.props__head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
 }
 
 .props__title {
