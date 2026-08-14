@@ -958,83 +958,61 @@ option {
 }
 
 /*
- * The same controls as a window at the pointer, in frosted glass.
+ * The controls as floating things at the pointer — no window around them.
  *
- * `position: fixed` rather than moving the element: reparenting would detach whatever control had
- * focus, and the two placements are meant to be swapped between freely.
+ * A pane, glass or otherwise, is a frame; and a frame around two sliders is mostly frame. What is
+ * wanted is the controls themselves appearing where the mouse was, so the container carries no
+ * background, border or shadow at all and each row of sliders sits on its own small pill.
  *
- * The Aero look is three layers, and all three are load-bearing rather than decorative. A blurred
- * backdrop keeps the surface behind the window legible as CONTEXT while making the controls
- * readable over it — the point of glass, when the thing underneath is the thing you are editing.
- * A bright inner hairline gives the pane an edge without a hard border. A gloss along the top
- * reads as a light source and stops the panel looking like a flat translucent rectangle.
+ * The pill is not decoration: these float over a rendered surface of arbitrary colour, and a bare
+ * track on top of a dark patch is unreadable. It is the least backing that keeps them legible.
  */
 .props--at-cursor {
   position: fixed;
   z-index: 20;
   flex-direction: column;
-  align-items: stretch;
-  width: 292px;
+  align-items: flex-start;
+  width: auto;
+  min-width: 250px;
   height: auto;
   max-height: 70vh;
-  gap: 6px;
+  gap: 4px;
   padding: 0;
-  /* The box lives on the inner panel, so the tray beside it can float free of any background. */
   background: transparent;
   border: none;
   box-shadow: none;
   overflow: visible;
 }
 
-.props--at-cursor .props__head,
-.props--at-cursor .props__panel-body {
-  background: linear-gradient(
-    to bottom,
-    rgba(255, 255, 255, 0.82),
-    rgba(238, 244, 250, 0.62)
-  );
-  /* Heavier than a typical frosted pane: what is behind this window is the surface being
-     edited, so the blur has to be deep enough that the controls stay legible over any part of
-     it, however busy. */
-  backdrop-filter: blur(30px) saturate(165%);
-  -webkit-backdrop-filter: blur(30px) saturate(165%);
-  border: 1px solid rgba(255, 255, 255, 0.85);
-  box-shadow:
-    0 10px 30px rgba(20, 40, 70, 0.22),
-    inset 0 1px 0 rgba(255, 255, 255, 0.95);
-}
-
-/* Only the close button remains in the header, so it collapses to a thin cap on the pane. */
-.props--at-cursor .props__head {
-  justify-content: flex-end;
-  min-height: 0;
-  border-radius: 10px 10px 0 0;
-  border-bottom: none;
-  padding: 6px 10px 4px;
-  /* The gloss: a highlight over the top half only, as a glass pane catches light. */
-  background-image:
-    linear-gradient(to bottom, rgba(255, 255, 255, 0.95) 0%, rgba(255, 255, 255, 0.45) 52%, rgba(255, 255, 255, 0.12) 53%),
-    linear-gradient(to bottom, rgba(255, 255, 255, 0.82), rgba(238, 244, 250, 0.62));
-}
-
-.props--at-cursor .props__panel-body {
-  border-radius: 0 0 10px 10px;
-  border-top: none;
-  padding: 6px 10px 9px;
+.props--at-cursor .domain {
+  padding: 3px 9px 4px;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid var(--panel-border);
+  border-radius: 999px;
+  box-shadow: 0 2px 10px rgba(20, 30, 45, 0.16);
 }
 
 /*
- * In the window: the sliders and nothing else.
+ * Floating: the sliders and nothing else.
  *
  * The readouts, the colour, the colour map and the overlay tools are all still built and all
  * still reachable — the top-bar placement shows every one of them. They are hidden HERE because
- * a window that opens on a surface should do one thing well, and two sliders surrounded by
- * chips did that job worse than two sliders alone.
+ * what should appear under the pointer is the thing being adjusted, not a control panel.
  */
 .props--at-cursor .props__tray,
+.props--at-cursor .props__head,
 .props--at-cursor .props__title,
 .props--at-cursor .props__placeholder {
   display: none;
+}
+
+.props--at-cursor .props__panel-body {
+  padding: 0;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 
 /*
@@ -1418,53 +1396,23 @@ option {
 }
 
 /*
- * An interval as one control: two thumbs on a shared track.
+ * An interval as two tracks, side by side.
  *
- * The inputs are stacked and made transparent to the pointer so the lower one is still reachable;
- * only the thumbs accept it. Both vendor thumb rules are needed — there is no shared selector, and
- * omitting either makes the control dead in that browser rather than merely different.
+ * They were stacked on one track with a thumb each, which is compact and reads as broken: one
+ * control visibly sitting on top of another, with the lower one reachable only by its thumb.
+ * Beside each other they take the same single line and nothing overlaps.
  */
 .domain__range {
-  position: relative;
+  display: flex;
   flex: 1 1 auto;
-  min-width: 130px;
-  height: 26px;
+  align-items: center;
+  gap: 8px;
+  min-width: 150px;
 }
 
 .domain__range .vslider {
-  position: absolute;
-  inset: 0;
-  padding-top: 13px;
-}
-
-/*
- * The two ends' labels sit on different lines.
- *
- * Both thumbs can be anywhere on the track, including on top of each other, and two numbers at the
- * same height then overprint into something unreadable — which is exactly when you most need to
- * see them, since it is where the interval is about to collapse.
- */
-.domain__range .vslider:first-child .vslider__bubble,
-.domain__range .vslider:first-child .vslider__exact {
-  top: -11px;
-}
-
-.domain__range {
-  height: 38px;
-  padding-top: 11px;
-}
-
-.domain__range .vslider__input {
-  background: none;
-  pointer-events: none;
-}
-
-.domain__range .vslider__input::-webkit-slider-thumb {
-  pointer-events: auto;
-}
-
-.domain__range .vslider__input::-moz-range-thumb {
-  pointer-events: auto;
+  flex: 1 1 0;
+  min-width: 0;
 }
 
 /* ---- domain, as sliders ---- */

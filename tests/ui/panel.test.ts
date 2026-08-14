@@ -428,9 +428,9 @@ describe("the window in cursor placement", () => {
     expect(list.card.classList.contains("props--empty")).toBe(false);
   });
 
-  it("gives each domain variable one control with two thumbs", () => {
-    // An interval is a single thing; two separate sliders made it look like two unrelated
-    // numbers and took twice the room.
+  it("gives each domain variable one row with both ends on it", () => {
+    // An interval is a single thing, so its two ends share a row — but side by side rather than
+    // stacked on one track, which read as one control sitting on top of another.
     const { store, list } = makeList(["X(u,v) = (u, v, 0)"]);
     document.body.append(list.root, list.card);
     list.refresh([]);
