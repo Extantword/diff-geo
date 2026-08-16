@@ -1,7 +1,7 @@
 import { freeVars, type Expr } from "../core/expr/ast.ts";
 import { error, hint, type Diagnostic } from "../core/expr/diagnostics.ts";
 import { lookupFn } from "../core/expr/fns.ts";
-import { parseRow, type ParsedRow } from "../core/expr/parse.ts";
+import { parseRow, splitHost, type ParsedRow } from "../core/expr/parse.ts";
 import {
   inlineDefinitions,
   type InlineFailure,
@@ -47,6 +47,10 @@ export type ItemKind =
   | "implicitPlaneCurve"
   | "point"
   | "vectorField"
+  /** `T_(u₀, v₀) X`: the tangent plane to a patch at a point of its chart */
+  | "tangentPlane"
+  /** `X: VectorField(a, b, c)`: a vector field along a patch, in ambient components */
+  | "surfaceField"
   | "functionDefinition"
   /** `f(u) = …`: the graph v = f(u) drawn in the chart and on the surface */
   | "chartGraph"
@@ -74,6 +78,14 @@ export interface Item {
    * A guess at intent, taken from the variable names, and overridable in the UI.
    */
   readonly chartByDefault?: boolean;
+  /**
+   * The patch whose chart this row is stated in, named by a `X:` prefix.
+   *
+   * A guess this is not: the row says it. Which is the point — `(u − a)² + (v − b)² = 1` is a
+   * curve in *someone's* chart, and with several patches on screen nothing in the formula can
+   * say whose. Written in the text, it is visible, saved, and undone along with the row.
+   */
+  readonly host?: string | null;
 }
 
 export interface Resolution {
@@ -266,13 +278,19 @@ export function resolve(rows: readonly Row[]): Resolution {
 
   // ---- pass 1: parse every row ----
   const userFunctionNames = new Set<string>();
+  const hosts = new Map<RowId, string>();
   for (const row of rows) {
     const text = row.source();
-    if (text.trim() === "") {
+    // `X:` on its own is a row being written, not a broken one — the same as an empty cell.
+    if (splitHost(text).body.trim() === "") {
       diagnostics.set(row.id, []);
       continue;
     }
-    const { row: parsed, diags } = parseRow(text);
+    // The host comes off the PARSE, not off the prefix: `T_(1,2) X` names its patch after the
+    // point, and both spellings have to end up in one field or half the machinery reads the
+    // wrong one.
+    const { row: parsed, diags, host } = parseRow(text);
+    if (host !== undefined) hosts.set(row.id, host);
     diagnostics.set(row.id, [...diags]);
     if (parsed) {
       parsedRows.set(row.id, parsed);
@@ -291,8 +309,11 @@ export function resolve(rows: readonly Row[]): Resolution {
   if (userFunctionNames.size > 0) {
     for (const row of rows) {
       const text = row.source();
-      if (text.trim() === "") continue;
-      const { row: parsed, diags } = parseRow(text, { userFunctions: userFunctionNames });
+      if (splitHost(text).body.trim() === "") continue;
+      const { row: parsed, diags, host } = parseRow(text, {
+        userFunctions: userFunctionNames,
+      });
+      if (host !== undefined) hosts.set(row.id, host);
       diagnostics.set(row.id, [...diags]);
       if (parsed) parsedRows.set(row.id, parsed);
       else parsedRows.delete(row.id);
@@ -374,7 +395,15 @@ export function resolve(rows: readonly Row[]): Resolution {
     const item = classify(id, parsed, values, functions, push);
     if (!item) continue;
 
-    items.set(id, item);
+    const host = hosts.get(id);
+    items.set(
+      id,
+      host === undefined
+        ? item
+        : // Naming a chart is also saying the row is stated IN one, so a two-component curve
+          // written in t reads as a curve in (u, v) without the toggle being found first.
+          { ...item, host, chartByDefault: true },
+    );
     for (const name of item.params) freeParameters.add(name);
 
     // Publish this row's definition for the rows that depend on it.
@@ -443,6 +472,11 @@ function bodyExpressions(parsed: ParsedRow): readonly Expr[] {
       return parsed.comps;
     case "equation":
       return [parsed.lhs, parsed.rhs];
+    case "tangentPlane":
+      // The point's coordinates, so `T_(a, 0) X` depends on the row declaring a.
+      return parsed.at;
+    case "surfaceField":
+      return parsed.comps;
   }
 }
 
@@ -865,6 +899,65 @@ function classify(
       return {
         rowId,
         kind: "point",
+        name: null,
+        vars: [],
+        comps,
+        params: paramsOf(comps, new Set(), values, functions),
+      };
+    }
+
+    case "surfaceField": {
+      /**
+       * A field along a patch is a function of that patch's u and v, so those are the variables
+       * it keeps — everything else free is a parameter, exactly as for a curve or a surface. A
+       * field written with neither u nor v is a constant vector, which is a perfectly good field
+       * (a wind, a gravity) and is left alone rather than reclassified.
+       */
+      const comps = inlineAll([...parsed.comps]);
+      if (!comps) return null;
+      const keep = new Set(SURFACE_VARS);
+      return {
+        rowId,
+        kind: "surfaceField",
+        name: null,
+        vars: [...SURFACE_VARS],
+        comps,
+        params: paramsOf(comps, keep, values, functions),
+      };
+    }
+
+    case "tangentPlane": {
+      const comps = inlineAll([...parsed.at]);
+      if (!comps) return null;
+
+      /**
+       * The point is a point, so it cannot be written in the coordinates it is a point OF.
+       *
+       * `T_(u, 0) X` looks reasonable and means nothing: u is what varies over the domain, and a
+       * tangent plane is attached at one value of it. Left alone, u would fall through as a name
+       * nothing defines, be excluded from the sliders as a coordinate, and evaluate to nothing —
+       * a row that draws silently nothing. Saying so is the whole difference.
+       */
+      const used = new Set(comps.flatMap((comp) => freeVars(comp)));
+      const coordinates = [...used].filter((name) => name === "u" || name === "v");
+      if (coordinates.length > 0) {
+        push(
+          rowId,
+          error(
+            "E_CLASSIFY",
+            `${coordinates.join(" and ")} ${coordinates.length === 1 ? "is" : "are"} the ` +
+              `chart's own coordinate${coordinates.length === 1 ? "" : "s"}, so the point a ` +
+              `tangent plane sits at cannot be written in ${
+                coordinates.length === 1 ? "it" : "them"
+              } — give a number or a parameter, as in T_(1, 2) X`,
+          ),
+        );
+        return null;
+      }
+
+      return {
+        rowId,
+        kind: "tangentPlane",
         name: null,
         vars: [],
         comps,

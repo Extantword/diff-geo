@@ -13,6 +13,27 @@ import { createRenderer } from "./gl/renderer.ts";
 import { createAnimator } from "./ui/animate.ts";
 import { createExprList, type SliderSpec } from "./ui/exprList.ts";
 import { createTemplatePicker, TEMPLATE_ENTRIES } from "./ui/templates.ts";
+import { createPiecePicker } from "./ui/pieces.ts";
+import {
+  pruneJoints,
+  rootOf,
+  sameSocket,
+  type Joint,
+  type Socket,
+} from "./state/assembly.ts";
+import { portOutline } from "./core/geom/ports.ts";
+import { createHistory } from "./state/history.ts";
+import { createSceneFile } from "./ui/sceneFile.ts";
+import {
+  captureSession,
+  makeSceneFile,
+  restoreSession,
+  sessionKey,
+  type SessionSlots,
+  type SessionState,
+} from "./state/session.ts";
+import type { SceneFlow, ScenePort } from "./state/scene.ts";
+import type { FlowState } from "./core/geom/flow.ts";
 import { installHotReloadGate, takeHotSession } from "./dev/hot.ts";
 import type { Vec3 } from "./core/geom/types.ts";
 import {
@@ -55,6 +76,7 @@ const EMPTY_MESH = {
   baseColors: new Float32Array(0),
   chart: new Float32Array(0),
   ids: new Float32Array(0),
+  style: new Float32Array(0),
   curvature: new Float64Array(0),
   indices: new Uint32Array(0),
   vertexCount: 0,
@@ -95,12 +117,25 @@ function main() {
   const rowSliders = new Map<RowId, SliderSpec>();
   const inChart = new Set<RowId>();
   const overlays = new Map<RowId, SurfaceOverlay>();
+  /** Where each surface's coordinates start repeating, as the last build measured them. */
+  const periods = new Map<RowId, readonly [number | null, number | null]>();
   /** Per-row colour, set from the properties card and used everywhere that row is drawn. */
   const colors = new Map<RowId, Vec3>();
   /** Where each object sits. Arrangement only — it never touches a curvature. */
   const translations = new Map<RowId, Vec3>();
   /** How each object is turned. Arrangement, like the translation — never a curvature. */
   const rotations = new Map<RowId, Quat>();
+  /**
+   * Which objects are plugged into which.
+   *
+   * A jointed row's placement is derived from its parent's every rebuild, so nothing here is a
+   * transform — it is the statement that two boundaries are the same boundary.
+   */
+  const joints = new Map<RowId, Joint>();
+  /** The free boundary a new piece will attach to, or null to drop pieces loose. */
+  let activeSocket: Socket | null = null;
+  /** Every free boundary in the scene, as last measured; the hit test reads this. */
+  let scenePorts: readonly ScenePort[] = [];
   /** Chart coordinates of the last successful pick, for the diagnostics readout. */
   let pickedAt: { u: number; v: number } | null = null;
   const animator = createAnimator();
@@ -114,6 +149,24 @@ function main() {
   let framedOnce = false;
   let chartVisible = true;
 
+  /**
+   * Whose chart the inset is showing: the last PATCH that was selected, and nothing else.
+   *
+   * Selection moves for all sorts of reasons — clicking a cell to edit it, selecting a curve,
+   * selecting a number — and none of them are a request to look at a different chart. Following
+   * the selection literally meant that clicking into a cell swapped the corner back to the first
+   * surface, which reads as the chart disappearing. So it changes when you click another surface
+   * and at no other time.
+   */
+  let shownChart: RowId | null = null;
+
+  /** Is this row a patch — something with a chart of its own to show? */
+  const isPatch = (id: RowId | null): boolean => {
+    if (id === null) return false;
+    const kind = store.resolution().items.get(id)?.kind;
+    return kind === "parametricSurface" || kind === "graphSurface";
+  };
+
   const render = (resolution: number, refit: boolean, fullRefresh: boolean) => {
     const resolved = store.resolution();
 
@@ -121,6 +174,11 @@ function main() {
     // the document's parameter store, so reading it covers them uniformly.
     const parameters = new Map<string, number>(store.parameters());
     for (const [name, spec] of sliders) parameters.set(name, spec.value);
+
+    // A deleted row cannot hold anything: its children come loose rather than following a ghost.
+    pruneJoints(joints, new Set(store.rows().map((row) => row.id)));
+    // The chart's patch may have been deleted or retyped into something else since it was chosen.
+    if (shownChart !== null && !isPatch(shownChart)) shownChart = null;
 
     const scene = buildScene({
       items: [...resolved.items.values()],
@@ -134,14 +192,58 @@ function main() {
       colors,
       translations,
       rotations,
+      joints,
+      // Click a patch and the corner shows ITS chart, with the rows stated in it drawn flat.
+      // A deleted patch hands the chart back to the first surface rather than to nothing.
+      chartRow: shownChart,
+      activeSocket,
+      showPorts: assembling(),
     });
+
+    /**
+     * The sockets, as the scene measured them this build.
+     *
+     * Held rather than recomputed on demand, because the hit test runs on every pointerdown and
+     * measuring a boundary means evaluating the parametrization sixty-four times per side.
+     */
+    scenePorts = scene.ports;
+    periods.clear();
+    for (const [rowId, pair] of scene.periods) periods.set(rowId, pair);
+    // A socket whose boundary stopped existing — the formula changed, the row was deleted —
+    // silently stops being the target rather than pointing at nothing.
+    const chosen = activeSocket;
+    if (chosen && !scenePorts.some((entry) => entry.free && sameSocket(chosen, socketOf(entry)))) {
+      activeSocket = null;
+    }
 
     renderer.setSurfaceMesh(scene.mesh ?? EMPTY_MESH);
     lastScene = scene;
-    sceneLines = scene.lines;
+    /**
+     * The steppers are rebuilt with the scene; the particles are not.
+     *
+     * A stepper holds the compiled surface and field this build made, so it must not outlive it.
+     * The state it steps is only chart coordinates and their images, so it survives — which is
+     * what lets a flow keep running while its own formula is being edited.
+     */
+    flowRunners = new Map();
+    for (const rowId of [...flowStates.keys()]) {
+      if (scene.flowFor(rowId)) continue;
+      // The row stopped being a field: its particles have nowhere to be.
+      flowStates.delete(rowId);
+      flowLines.delete(rowId);
+      flowChartLines.delete(rowId);
+    }
+    // The grid first, so a curve drawn on a surface sits over its grid rather than under it.
+    sceneLines = [...scene.gridLines, ...scene.lines];
     paintLines();
-    renderer.setChartLines(scene.chartLines);
-    renderer.setChartBounds(chartVisible ? scene.chartBounds : null);
+    chartLines = scene.chartLines;
+    paintChartLines();
+    /**
+     * The inset frames `chartView`, which is the domain widened to hold the curves drawn in it —
+     * so a chart curve that leaves the surface is visible going where it goes, instead of the
+     * chart looking exactly as small as the surface.
+     */
+    renderer.setChartBounds(chartVisible ? scene.chartView ?? scene.chartBounds : null);
 
     if (scene.bounds && (refit || !framedOnce)) {
       renderer.camera.frame(scene.bounds.center, scene.bounds.radius);
@@ -195,9 +297,38 @@ function main() {
     // A parameter change cannot alter any row's text or structure, so it only needs the
     // readouts. Reparsing and re-typesetting every row on each frame of a slider drag was the
     // bulk of the jank.
-    if (fullRefresh) list.refresh(scene.reports);
+    if (fullRefresh) list.refresh(scene.reports, scene.usedColors);
     else list.refreshReports(scene.reports);
+    pieces.refresh();
+
+    /**
+     * Notice what changed, after everything else has settled.
+     *
+     * Nothing announces its own edits: the history compares the state it is handed against the
+     * one on top of its stack, so a control added later is undoable without being told to be.
+     * Here rather than at each mutation site for that reason, and cheap enough to run per frame.
+     */
+    history.observe(captureSession(slots));
   };
+
+  /** A scene port as the socket that names it. */
+  const socketOf = (entry: ScenePort): Socket => ({
+    rowId: entry.rowId,
+    boundary: entry.port.boundary,
+  });
+
+  /**
+   * Whether the scene is being assembled, which decides both whether handles are drawn and
+   * whether a press near one means anything.
+   *
+   * The two have to agree. A ring that is clickable but not drawn is a press that does something
+   * unexplained; one drawn but not clickable is worse. So the parts bin being open, a socket
+   * being chosen, or anything already being joined all count, and nothing else does.
+   */
+  const assembling = () =>
+    joints.size > 0 ||
+    activeSocket !== null ||
+    !piecesPanel.classList.contains("tool-popover--hidden");
 
   /**
    * A row's text changed: **debounce**.
@@ -248,6 +379,22 @@ function main() {
     animator,
     overlays,
     colors,
+    periods,
+    /**
+     * Selecting another PATCH moves the chart, and only that.
+     *
+     * The rebuild is what redraws the inset, and it costs a tessellation — so it is asked for
+     * only when the answer would differ. Selecting a curve, a number, or the same patch again
+     * changes nothing about the scene and is left alone.
+     */
+    onFlowTick,
+    onFlowRewind,
+    onFlowToggle,
+    onSelect: (id) => {
+      if (!isPatch(id) || id === shownChart) return;
+      shownChart = id;
+      onEdit(false);
+    },
   });
   /**
    * The properties strip is a sibling of the panel and the stage, not a child of either.
@@ -256,31 +403,164 @@ function main() {
    * the stage it could only ever have been an overlay on top of the geometry.
    */
   document.querySelector(".app__props")?.append(list.card);
+  /**
+   * Put a new object beside whatever is already there.
+   *
+   * Both the gallery and the parts bin add to the document rather than replacing it, so without
+   * this a second surface would be created inside the first — two objects sharing an origin,
+   * which reads as one broken object rather than as two.
+   */
+  const placeBeside = (rowId: RowId) => {
+    const bounds = lastScene?.bounds;
+    if (!bounds || (translations.size === 0 && store.rows().length <= 2)) return;
+    const right = renderer.camera.basis().right;
+    const step = bounds.radius * 2.2;
+    translations.set(rowId, [
+      bounds.center[0] + right[0] * step,
+      bounds.center[1] + right[1] * step,
+      bounds.center[2] + right[2] * step,
+    ]);
+  };
+
   const templates = createTemplatePicker({
     document: store,
     sliders,
     domains,
     requestRender: (refit: boolean) => onEdit(refit),
     invalidateSliders: () => list.invalidateSliders(),
-    /**
-     * Put a template beside whatever is already there.
-     *
-     * Templates add to the document now rather than replacing it, so without this a second
-     * surface would be created inside the first — two objects sharing an origin, which reads as
-     * one broken object rather than as two.
-     */
-    onCreated: (rowId: RowId) => {
-      const bounds = lastScene?.bounds;
-      if (!bounds || translations.size === 0 && store.rows().length <= 2) return;
-      const right = renderer.camera.basis().right;
-      const step = bounds.radius * 2.2;
-      translations.set(rowId, [
-        bounds.center[0] + right[0] * step,
-        bounds.center[1] + right[1] * step,
-        bounds.center[2] + right[2] * step,
-      ]);
+    onCreated: placeBeside,
+  });
+
+  /**
+   * The parts bin: pieces that snap to a chosen boundary.
+   *
+   * Given the same `onCreated` as the template gallery, so a piece that cannot be joined — no
+   * socket chosen, or one of the wrong shape — still lands somewhere with room rather than inside
+   * whatever is already there.
+   */
+  const pieces = createPiecePicker({
+    document: store,
+    domains,
+    joints,
+    socket: () => {
+      const chosen = activeSocket;
+      if (!chosen) return null;
+      return scenePorts.find((entry) => entry.free && sameSocket(chosen, socketOf(entry))) ?? null;
+    },
+    setSocket: (socket) => {
+      activeSocket = socket;
+    },
+    selected: () => list.selected(),
+    surfaceOf: (rowId) =>
+      rowId === null
+        ? null
+        : lastScene?.surfaces.find((surface) => surface.patches.includes(rowId)) ?? null,
+    detach: (rowId) => {
+      /**
+       * Unplugged, and left exactly where it was.
+       *
+       * The current placement is baked back into the hand arrangement first. Without that the
+       * piece would fall back to whatever translation it was created with — usually the origin —
+       * and jump across the scene, which reads as having deleted and re-added it.
+       */
+      const arrangement = lastScene?.arrangementOf(rowId);
+      joints.delete(rowId);
+      if (arrangement) {
+        rotations.set(rowId, arrangement.rotation);
+        translations.set(rowId, arrangement.offset);
+      }
+      onEdit(false);
+    },
+    requestRender: (refit: boolean) => onEdit(refit),
+    onParameterChange: () => onParameterChange(),
+    onCreated: (rowId: RowId) => placeBeside(rowId),
+  });
+
+  /**
+   * The live state, as one bundle.
+   *
+   * Undo and the hot-reload gate want exactly the same thing — everything the user made and
+   * nothing derived — so they share one capture and one restore (`state/session.ts`). Anything
+   * added here later is carried by both, or by neither, rather than by whichever was remembered.
+   */
+  const slots: SessionSlots = {
+    document: store,
+    sliders,
+    domains,
+    colors,
+    translations,
+    rotations,
+    overlays,
+    frames,
+    inChart,
+    joints,
+    selected: () => list.selected(),
+    select: (rowId) => list.select(rowId),
+    socket: () => activeSocket,
+    setSocket: (socket) => {
+      activeSocket = socket;
+    },
+  };
+
+  /**
+   * Undo, over whole snapshots of that bundle.
+   *
+   * A change that alters the number of rows is its own step — adding a piece, deleting a cell —
+   * while everything else merges with whatever landed just before it, so a drag or a burst of
+   * typing is one Ctrl-Z rather than four hundred.
+   */
+  const history = createHistory<SessionState>({
+    key: sessionKey,
+    boundary: (previous, next) => previous.rows.length !== next.rows.length,
+  });
+
+  const applyHistory = (state: SessionState | null) => {
+    if (!state) return;
+    restoreSession(state, slots);
+    // The slider specs were replaced wholesale, so the list has to rebuild them rather than
+    // reuse the controls it built for the old ones.
+    list.invalidateSliders();
+    onEdit(false);
+  };
+
+  /**
+   * Ctrl-Z, unless something is being typed in.
+   *
+   * A focused field owns its own undo, and taking it over would mean losing a caret's worth of
+   * typing to a keystroke that has meant "undo my last word" everywhere else for thirty years.
+   * The same rule the Escape handler follows: look at what the event landed on.
+   */
+  globalThis.addEventListener("keydown", (event: KeyboardEvent) => {
+    if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
+    const key = event.key.toLowerCase();
+    const redo = key === "y" || (key === "z" && event.shiftKey);
+    if (key !== "z" && key !== "y") return;
+
+    const target = event.target as HTMLElement | null;
+    if (target?.closest("input, textarea, select")) return;
+
+    event.preventDefault();
+    applyHistory(redo ? history.redo() : history.undo());
+  });
+
+  /**
+   * Saving to a file, and opening one.
+   *
+   * The same snapshot undo and the hot-reload gate use, tagged and versioned on the way out — so
+   * a scene is a small piece of JSON the user owns, and a figure in the eventual book can be
+   * reproduced from the file that made it rather than from a screenshot of it.
+   */
+  const sceneFile = createSceneFile({
+    capture: () => makeSceneFile(captureSession(slots), renderer.camera.state()),
+    restore: ({ scene, camera }) => {
+      restoreSession(scene as SessionState, slots);
+      list.invalidateSliders();
+      if (camera) renderer.camera.restore(camera as Parameters<typeof renderer.camera.restore>[0]);
+      // An opened scene frames itself: it was saved from a camera that may not suit this window.
+      onEdit(!camera);
     },
   });
+
 
   // A playing slider redraws through the same throttled path as a drag: one draft render per
   // animation frame, with the full-resolution pass arriving once it settles.
@@ -308,6 +588,16 @@ function main() {
         /** Dragging an object through space; see the note on placement below. */
         readonly kind: "move";
         readonly rowId: RowId;
+        /**
+         * Whose translation actually moves: the root of the assembly this row belongs to.
+         *
+         * A joined piece has no translation of its own — its placement is derived from its
+         * parent's — so moving one has to move the object at the top of the chain, and the whole
+         * assembly comes with it. Dragging a piece to pull it out of a chain would be the other
+         * reading, and it is the wrong one: the joint is a statement about the boundaries, not a
+         * hint, so breaking it is `detach`'s job and not a side effect of a drag.
+         */
+        readonly moveId: RowId;
         readonly grabbed: Vec3;
         readonly from: Vec3;
         /** Where the press started, so a click can be told from a drag on release. */
@@ -318,6 +608,8 @@ function main() {
         /** Right-dragging an object to turn it. */
         readonly kind: "rotate";
         readonly rowId: RowId;
+        /** the root of its assembly, for the same reason a move has one */
+        readonly moveId: RowId;
         readonly startRotation: Quat;
         x: number;
         y: number;
@@ -370,20 +662,211 @@ function main() {
   /** The live aiming arrow, drawn on top of the scene during a drag. */
   let previewLines: LineGroup[] = [];
 
-  const paintLines = () => {
-    renderer.setLines(previewLines.length === 0 ? sceneLines : [...sceneLines, ...previewLines]);
+  /**
+   * Which of the scene's groups reach this frame.
+   *
+   * A field's arrows are left out while its flow is playing — a current read through a hedge of
+   * arrows is neither — and whenever the row's own switch says so. Both are decisions about the
+   * FRAME, not about the document, so they are made here by dropping a group rather than by
+   * rebuilding a scene without it: play and pause then cost a repaint instead of a tessellation.
+   */
+  const visibleSceneLines = (): readonly LineGroup[] => {
+    const arrows = lastScene?.fieldArrows;
+    if (!arrows || arrows.size === 0) return sceneLines;
+    const hidden = new Set<LineGroup>();
+    for (const [rowId, group] of arrows) {
+      const wanted = overlays.get(rowId)?.arrows ?? true;
+      if (!wanted || animator.playing(`flow:${rowId}`)) hidden.add(group);
+    }
+    return hidden.size === 0 ? sceneLines : sceneLines.filter((group) => !hidden.has(group));
   };
 
-  const rect0 = (_event: PointerEvent) => canvas.getBoundingClientRect();
+  /**
+   * The inset's groups, filtered by the same rule the stage's are.
+   *
+   * A field's arrows are drawn in the chart as well — its components in the basis {∂/∂u, ∂/∂v} —
+   * so they have to come and go with the ones on the surface, or playing a flow would clear the
+   * arrows in space and leave a hedge of them downstairs.
+   */
+  const visibleChartLines = (): readonly LineGroup[] => {
+    const arrows = lastScene?.fieldChartArrows;
+    const flows = flowChartLines.size === 0 ? [] : [...flowChartLines.values()].flat();
+    if (!arrows || arrows.size === 0) {
+      return flows.length === 0 ? chartLines : [...chartLines, ...flows];
+    }
+    const hidden = new Set<LineGroup>();
+    for (const [rowId, group] of arrows) {
+      const wanted = overlays.get(rowId)?.arrows ?? true;
+      if (!wanted || animator.playing(`flow:${rowId}`)) hidden.add(group);
+    }
+    const base = hidden.size === 0 ? chartLines : chartLines.filter((g) => !hidden.has(g));
+    return flows.length === 0 ? base : [...base, ...flows];
+  };
 
-  const pickAt = (event: PointerEvent) => {
+  const paintChartLines = () => {
+    renderer.setChartLines(visibleChartLines());
+  };
+
+  const paintLines = () => {
+    // Flows over the scene and under the preview: the streaks belong to the objects, the aiming
+    // arrow belongs to the hand.
+    const flows = flowLines.size === 0 ? [] : [...flowLines.values()].flat();
+    const base = visibleSceneLines();
+    renderer.setLines(
+      flows.length === 0 && previewLines.length === 0
+        ? base
+        : [...base, ...flows, ...previewLines],
+    );
+  };
+
+  /**
+   * ---- flows ----
+   *
+   * The particles of every playing field, kept **here** rather than in the scene, and for the
+   * same reason the aimed geodesics are: the scene is rebuilt whenever anything is edited, and a
+   * flow that emptied and reseeded every time a slider moved would be a picture of the rebuild
+   * rather than of the field. Their positions are chart coordinates, which go on meaning the same
+   * thing across a rebuild.
+   */
+  const flowStates = new Map<RowId, FlowState>();
+  /** The flow machinery from the current scene, one per row, dropped when the scene is replaced. */
+  let flowRunners = new Map<RowId, SceneFlow>();
+  /** The streaks as last advanced, drawn over the scene like the aiming preview. */
+  const flowLines = new Map<RowId, LineGroup[]>();
+  /** And the same streaks flat, for the inset. */
+  const flowChartLines = new Map<RowId, LineGroup[]>();
+  /** The scene's own inset content, held so a flow frame can be composed over it. */
+  let chartLines: readonly LineGroup[] = [];
+
+  const runnerFor = (rowId: RowId): SceneFlow | null => {
+    const existing = flowRunners.get(rowId);
+    if (existing) return existing;
+    const made = lastScene?.flowFor(rowId) ?? null;
+    // Cached because building one allocates a jet buffer, and this is asked for once per frame.
+    if (made) flowRunners.set(rowId, made);
+    return made;
+  };
+
+  // Function declarations, so the expression list built above can be handed them: they are
+  // called only once an animation is running, long after everything here is in place.
+  function onFlowTick(rowId: RowId, seconds: number): void {
+    const runner = runnerFor(rowId);
+    if (!runner) return;
+    let state = flowStates.get(rowId);
+    if (!state) {
+      state = runner.seed();
+      flowStates.set(rowId, state);
+    }
+    runner.advance(state, seconds);
+    flowLines.set(rowId, runner.lines(state));
+    flowChartLines.set(rowId, runner.chartLines(state));
+    paintLines();
+    paintChartLines();
+    renderer.invalidate();
+  }
+
+  /** Played, paused or rewound: the arrows come or go, so the frame is composed again. */
+  function onFlowToggle(_rowId: RowId): void {
+    paintLines();
+    paintChartLines();
+    renderer.invalidate();
+  }
+
+  function onFlowRewind(rowId: RowId): void {
+    const runner = runnerFor(rowId);
+    if (!runner) return;
+    const state = runner.seed();
+    flowStates.set(rowId, state);
+    flowLines.set(rowId, runner.lines(state));
+    flowChartLines.set(rowId, runner.chartLines(state));
+    paintLines();
+    paintChartLines();
+    renderer.invalidate();
+  }
+
+  const rect0 = (_event: MouseEvent) => canvas.getBoundingClientRect();
+
+  const pickAt = (event: MouseEvent) => {
     const rect = rect0(event);
     return renderer.pick(event.clientX - rect.left, event.clientY - rect.top);
   };
 
+  /**
+   * How near a free boundary the pointer has to be, in CSS pixels, to mean it.
+   *
+   * Measured against the ring **as drawn**, not against its centre: the handle you see is what you
+   * click, which for a wide rim is a long way from the middle of it.
+   */
+  const SOCKET_HIT_PX = 16;
+  /** Coarse: enough to follow the ring, cheap enough to run on every press. */
+  const SOCKET_HIT_SAMPLES = 24;
+
+  const socketAt = (event: PointerEvent): ScenePort | null => {
+    const rect = rect0(event);
+    const x = event.clientX - rect.left;
+    const y = event.clientY - rect.top;
+    let best: ScenePort | null = null;
+    let bestDepth = Infinity;
+
+    for (const entry of scenePorts) {
+      if (!entry.free) continue;
+      let near = false;
+      let depth = Infinity;
+      for (const point of portOutline(entry.port, SOCKET_HIT_SAMPLES)) {
+        const screen = renderer.project(point);
+        if (!screen) continue;
+        if (Math.hypot(screen.x - x, screen.y - y) > SOCKET_HIT_PX) continue;
+        near = true;
+        depth = Math.min(depth, screen.distance);
+      }
+      // The nearest ring wins where several overlap, which is what "the one in front" means.
+      if (near && depth < bestDepth) {
+        best = entry;
+        bestDepth = depth;
+      }
+    }
+    return best;
+  };
+
+  /**
+   * Double click: the controls, over the thing they control.
+   *
+   * The second half of the split above. A double click has already selected the object through
+   * the first click's pointerup, so this only has to reveal the card — which is why it can be an
+   * ordinary listener rather than part of the gesture machine.
+   */
+  canvas.addEventListener("dblclick", (event: MouseEvent) => {
+    const hit = pickAt(event);
+    if (!hit) return;
+    list.placeAt(event.clientX, event.clientY);
+    list.select(hit.rowId, true);
+  });
+
   canvas.addEventListener(
     "pointerdown",
     (event: PointerEvent) => {
+      /**
+       * A press on a free boundary chooses it, before anything else looks at the event.
+       *
+       * The handles are drawn ON the surfaces they belong to, so a press near one would otherwise
+       * be read as a press on the object and start dragging it. Sockets come first because they
+       * are small, deliberate targets and the surface behind them is a large one.
+       */
+      if (event.button === 0 && assembling()) {
+        const socket = socketAt(event);
+        if (socket) {
+          const chosen = socketOf(socket);
+          // Clicking the chosen one again lets it go, so a piece can be dropped loose without
+          // hunting for empty space to click.
+          activeSocket = sameSocket(activeSocket, chosen) ? null : chosen;
+          gesture = { kind: "idle" };
+          onParameterChange();
+          event.stopPropagation();
+          event.preventDefault();
+          return;
+        }
+      }
+
       const hit = pickAt(event);
       const overlay = hit ? overlays.get(hit.rowId) : undefined;
 
@@ -411,10 +894,12 @@ function main() {
        * on EMPTY space still opens it, because there is no object there to turn.
        */
       if (hit && event.button === 2) {
+        const moveId = rootOf(hit.rowId, joints);
         gesture = {
           kind: "rotate",
           rowId: hit.rowId,
-          startRotation: rotations.get(hit.rowId) ?? QUAT_IDENTITY,
+          moveId,
+          startRotation: rotations.get(moveId) ?? QUAT_IDENTITY,
           x: event.clientX,
           y: event.clientY,
         };
@@ -441,10 +926,12 @@ function main() {
           surfacePointAt(hit.rowId, hit.u, hit.v) ?? lastScene.bounds?.center ?? [0, 0, 0],
         );
         if (from) {
+          const moveId = rootOf(hit.rowId, joints);
           gesture = {
             kind: "move",
             rowId: hit.rowId,
-            grabbed: translations.get(hit.rowId) ?? [0, 0, 0],
+            moveId,
+            grabbed: translations.get(moveId) ?? [0, 0, 0],
             from,
             x: event.clientX,
             y: event.clientY,
@@ -487,8 +974,8 @@ function main() {
           quatFromAxisAngle(right, dy * RADIANS_PER_PIXEL),
         );
         rotations.set(
-          gesture.rowId,
-          quatMultiply(spin, rotations.get(gesture.rowId) ?? QUAT_IDENTITY),
+          gesture.moveId,
+          quatMultiply(spin, rotations.get(gesture.moveId) ?? QUAT_IDENTITY),
         );
         onParameterChange();
         event.stopPropagation();
@@ -509,7 +996,7 @@ function main() {
           gesture.from,
         );
         if (!to) return;
-        translations.set(gesture.rowId, [
+        translations.set(gesture.moveId, [
           gesture.grabbed[0] + to[0] - gesture.from[0],
           gesture.grabbed[1] + to[1] - gesture.from[1],
           gesture.grabbed[2] + to[2] - gesture.from[2],
@@ -594,9 +1081,10 @@ function main() {
          */
         const travelled = Math.hypot(event.clientX - finished.x, event.clientY - finished.y);
         if (travelled <= CLICK_SLOP) {
-          translations.set(finished.rowId, finished.grabbed);
+          translations.set(finished.moveId, finished.grabbed);
+          // Focus, not open: see the pointerup handler below on why the two are different acts.
           list.placeAt(event.clientX, event.clientY);
-          list.select(finished.rowId, true);
+          list.select(finished.rowId, false);
           pickedAt = null;
           onEdit(false);
           return;
@@ -640,11 +1128,19 @@ function main() {
         return;
       }
 
-      // Selecting an object opens its properties. This is the same act as clicking its row, and
-      // both land in the list so the highlight and the card can never disagree.
-      // The window opens where the click happened; the bar placement ignores this.
+      /**
+       * A single click **focuses** an object; it does not open its controls.
+       *
+       * Clicking a surface is the ordinary way to ask "which one am I looking at" — it turns the
+       * inset into that patch's chart and highlights its row, and both are answers you want while
+       * still holding the camera. A panel of sliders under the pointer is not: it covers the
+       * object you just pointed at, and it appears every time you glance at something. So the
+       * sliders wait for a **double click**, which is a deliberate second act rather than a side
+       * effect of looking. Both go through the list, so the highlight, the inset and the card can
+       * never disagree about what is selected.
+       */
       list.placeAt(event.clientX, event.clientY);
-      list.select(hit.rowId);
+      list.select(hit.rowId, false);
       pickedAt = { u: hit.u, v: hit.v };
 
       /**
@@ -771,6 +1267,21 @@ function main() {
     if (!menu.contains(event.target as Node)) closeMenu();
   });
 
+  /**
+   * Escape lets the chosen socket go.
+   *
+   * Choosing one changes what every piece button does, so there has to be a way out that is not
+   * "find the ring again and click it exactly". Typing is left alone: a field owns its own
+   * Escape, and stealing it here would break the context menu's.
+   */
+  globalThis.addEventListener("keydown", (event: KeyboardEvent) => {
+    if (event.key !== "Escape" || !activeSocket) return;
+    const target = event.target as HTMLElement | null;
+    if (target?.closest("input, textarea, select")) return;
+    activeSocket = null;
+    onParameterChange();
+  });
+
   canvas.addEventListener("pointercancel", () => {
     if (gesture.kind !== "idle" && gesture.kind !== "camera") renderer.camera.setAiming(false);
     gesture = { kind: "idle" };
@@ -850,7 +1361,7 @@ function main() {
   const templatesPanel = el("div", { class: "tool-popover tool-popover--hidden" }, [templates]);
   const templatesButton = el("button", {
     class: "tool-button",
-    title: "surface and curve templates",
+    title: "coordinate patches and curves",
     html:
       '<svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" ' +
       'stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">' +
@@ -863,9 +1374,43 @@ function main() {
   });
   templatesButton.addEventListener("click", () => {
     templatesPanel.classList.toggle("tool-popover--hidden");
+    piecesPanel.classList.add("tool-popover--hidden");
   });
+
+  /**
+   * The parts bin, under its own button beside the gallery.
+   *
+   * The icon is two pieces meeting at a rim, because that is the thing being built: a ring where
+   * one surface ends and the next begins.
+   */
+  const piecesPanel = el("div", { class: "tool-popover tool-popover--hidden" }, [pieces.root]);
+  const piecesButton = el("button", {
+    class: "tool-button",
+    title: "pieces that snap together",
+    html:
+      '<svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" ' +
+      'stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">' +
+      '<path d="M4 8 L 4 16"/><path d="M11 8 L 11 16"/>' +
+      '<ellipse cx="11" cy="12" rx="1.9" ry="4"/>' +
+      '<path d="M13 9.2 L 20 7"/><path d="M13 14.8 L 20 17"/>' +
+      '<ellipse cx="20" cy="12" rx="1.6" ry="5" opacity="0.55"/>' +
+      "</svg>",
+  });
+  piecesButton.addEventListener("click", () => {
+    piecesPanel.classList.toggle("tool-popover--hidden");
+    templatesPanel.classList.add("tool-popover--hidden");
+    // Opening the bin is what makes the handles appear, so the scene has to be redrawn for it.
+    onParameterChange();
+  });
+
   canvas.parentElement?.append(
-    el("div", { class: "stage-tools" }, [templatesButton, templatesPanel]),
+    el("div", { class: "stage-tools" }, [
+      // The buttons stay side by side so opening one panel cannot push the other button down
+      // the screen while the user is reaching for it.
+      el("div", { class: "stage-tools__row" }, [templatesButton, piecesButton]),
+      templatesPanel,
+      piecesPanel,
+    ]),
   );
 
   /**
@@ -879,7 +1424,7 @@ function main() {
       el("span", { class: "roadmap__label", text: "A continuación" }),
       el("span", {
         class: "roadmap__items",
-        text: "Campos vectoriales · métricas · piezas ensamblables",
+        text: "Campos vectoriales · métricas · pantalón (cobordismos)",
       }),
     ]),
   );
@@ -907,6 +1452,7 @@ function main() {
     ]),
     el("section", { class: "panel-section" }, [
       el("h2", { class: "section-title", text: "Scene" }),
+      sceneFile.root,
       stats,
     ]),
   ]);
@@ -928,53 +1474,23 @@ function main() {
   /**
    * Carry the scene across a hot reload.
    *
-   * Only what the user made: the rows they typed, the values they dragged to, where they put
-   * things, and the angle they are looking from. Everything else is derived and will be rebuilt.
+   * The same snapshot undo uses, plus the camera — which is not part of the document and so is
+   * not something to undo, but is very much part of where you were.
    */
   installHotReloadGate(() => ({
-    rows: store.rows().map((row) => row.source()),
-    parameters: [...store.parameters()],
-    sliders: [...sliders].map(([name, spec]) => [name, { ...spec }]),
-    domains: [...domains].map(([id, ranges]) => [id, ranges.map((r) => ({ ...r }))]),
-    colors: [...colors],
-    translations: [...translations],
-    overlays: [...overlays].map(([id, overlay]) => [id, { ...overlay }]),
+    scene: captureSession(slots),
     camera: renderer.camera.state(),
-    selected: list.selected(),
   }));
 
   const session = takeHotSession();
   if (session) {
-    const rowSources = session["rows"] as string[] | undefined;
-    if (rowSources?.length) store.setRows(rowSources);
-    const rows = store.rows();
-    /**
-     * Row ids are reassigned on `setRows`, so anything keyed by id is remapped by POSITION.
-     * Saving the ids themselves would look more faithful and be wrong: they are identities within
-     * one run of the document, not names that survive it.
-     */
-    const remap = <T>(saved: unknown): Map<RowId, T> => {
-      const out = new Map<RowId, T>();
-      const entries = (saved as [number, T][] | undefined) ?? [];
-      for (const [index, [, value]] of entries.entries()) {
-        const row = rows[index];
-        if (row) out.set(row.id, value);
-      }
-      return out;
-    };
-    for (const [id, value] of remap<Vec3>(session["colors"])) colors.set(id, value);
-    for (const [id, value] of remap<Vec3>(session["translations"])) translations.set(id, value);
-    for (const [id, value] of remap<DomainRange[]>(session["domains"])) domains.set(id, value);
-    for (const [id, value] of remap<SurfaceOverlay>(session["overlays"])) overlays.set(id, value);
-    for (const [name, spec] of (session["sliders"] as [string, SliderSpec][] | undefined) ?? []) {
-      sliders.set(name, spec);
-    }
-    for (const [name, value] of (session["parameters"] as [string, number][] | undefined) ?? []) {
-      store.setParameter(name, value);
+    const saved = session["scene"] as SessionState | undefined;
+    if (saved) {
+      restoreSession(saved, slots);
+      list.invalidateSliders();
     }
     const camera = session["camera"] as Parameters<typeof renderer.camera.restore>[0] | undefined;
     if (camera) renderer.camera.restore(camera);
-    list.invalidateSliders();
   }
 
   render(FULL_RESOLUTION, true, true);

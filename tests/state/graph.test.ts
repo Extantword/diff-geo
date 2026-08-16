@@ -420,3 +420,76 @@ describe("topologicalOrder", () => {
     }
   });
 });
+
+describe("a tangent plane is a row about someone else's chart", () => {
+  it("classifies T_(1, 2) X, and hosts it on the patch it names", () => {
+    const { document, resolution } = documentOf("X(u,v) = (u, v, u v)", "T_(1, 2) X");
+    const item = resolution.items.get(document.rows()[1]!.id);
+    expect(item?.kind).toBe("tangentPlane");
+    expect(item?.host).toBe("X");
+    // The point is data, not a parametrization: nothing varies over it.
+    expect(item?.vars).toEqual([]);
+    expect(item?.comps.map((c) => toSource(c))).toEqual(["1", "2"]);
+  });
+
+  it("offers a slider for a point written with a free name", () => {
+    const { document, resolution } = documentOf("X(u,v) = (u, v, u v)", "T_(a, 0) X");
+    expect(resolution.items.get(document.rows()[1]!.id)?.params).toEqual(["a"]);
+    expect(resolution.freeParameters).toEqual(["a"]);
+  });
+
+  it("depends on the row declaring the parameter that moves it", () => {
+    // `a` stays symbolic — it is a declared number, so it compiles to a slot — but the edge has
+    // to exist, or a document could resolve the tangent plane before the row it reads.
+    const { document, resolution } = documentOf("a = 1", "X(u,v) = (u, v, u v)", "T_(a, 0) X");
+    const [declaration, , tangent] = document.rows();
+    expect(resolution.order.indexOf(declaration!.id)).toBeLessThan(
+      resolution.order.indexOf(tangent!.id),
+    );
+    expect(resolution.declaredParameters.get("a")).toBe(1);
+  });
+
+  it("refuses a point written in the coordinates it is a point of", () => {
+    // `T_(u, 0) X` looks reasonable and means nothing: u is what varies over the domain.
+    expect(codesFor(["X(u,v) = (u, v, u v)", "T_(u, 0) X"], 1)).toContain("E_CLASSIFY");
+    expect(kindsOf("X(u,v) = (u, v, u v)", "T_(u, 0) X")[1]).toBeUndefined();
+  });
+
+  it("reads the prefix spelling into the same host", () => {
+    const { document, resolution } = documentOf("X(u,v) = (u, v, u v)", "X: T_(1, 2)");
+    const item = resolution.items.get(document.rows()[1]!.id);
+    expect(item?.kind).toBe("tangentPlane");
+    expect(item?.host).toBe("X");
+  });
+});
+
+describe("a vector field along a patch", () => {
+  it("classifies VectorField(a, b, c) as a field over that patch's chart", () => {
+    const { document, resolution } = documentOf(
+      "X(u,v) = (sin u cos v, sin u sin v, cos u)",
+      "X: VectorField(-sin u sin v, sin u cos v, 0)",
+    );
+    const item = resolution.items.get(document.rows()[1]!.id);
+    expect(item?.kind).toBe("surfaceField");
+    expect(item?.host).toBe("X");
+    // A function of the patch's own coordinates, with three ambient components.
+    expect(item?.vars).toEqual(["u", "v"]);
+    expect(item?.comps).toHaveLength(3);
+  });
+
+  it("offers sliders for the constants in it, and never for u or v", () => {
+    const { document, resolution } = documentOf(
+      "X(u,v) = (u, v, 0)",
+      "X: VectorField(k sin u, 0, 0)",
+    );
+    expect(resolution.items.get(document.rows()[1]!.id)?.params).toEqual(["k"]);
+    expect(resolution.freeParameters).toEqual(["k"]);
+  });
+
+  it("takes a constant field, which is a field like any other", () => {
+    // `(0, 0, 1)` mentions neither u nor v and is still a field along the patch — tangent to a
+    // cylinder everywhere, and to a sphere almost nowhere. Which is measured, not classified.
+    const { document, resolution } = documentOf("X(u,v) = (u, v, 0)", "X: VectorField(0, 0, 1)");
+    expect(resolution.items.get(document.rows()[1]!.id)?.kind).toBe("surfaceField");
+  });
+});

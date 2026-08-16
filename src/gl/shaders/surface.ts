@@ -12,25 +12,32 @@ precision highp float;
 
 in vec3 aPosition;
 in vec3 aNormal;
-in vec2 aChart;
 in vec3 aColor;
 in vec3 aBaseColor;
+in float aStyle;
 
 uniform mat4 uView;
 uniform mat4 uProjection;
 
 out vec3 vWorldPosition;
 out vec3 vNormal;
-out vec2 vChart;
 out vec3 vColor;
 out vec3 vBaseColor;
+/**
+ * What of this patch is drawn, carried per vertex and NOT interpolated.
+ *
+ * flat, because it is a set of flags rather than a quantity: every vertex of a triangle belongs
+ * to the same patch, so there is nothing to blend, and interpolating would turn "fill" and "grid"
+ * into fractions somewhere in between.
+ */
+flat out float vStyle;
 
 void main() {
   vWorldPosition = aPosition;
   vNormal = aNormal;
-  vChart = aChart;
   vColor = aColor;
   vBaseColor = aBaseColor;
+  vStyle = aStyle;
   gl_Position = uProjection * uView * vec4(aPosition, 1.0);
 }
 `;
@@ -40,16 +47,13 @@ precision highp float;
 
 in vec3 vWorldPosition;
 in vec3 vNormal;
-in vec2 vChart;
 in vec3 vColor;
 in vec3 vBaseColor;
+flat in float vStyle;
 
 uniform vec3 uEye;
-uniform float uGridOpacity;
-uniform vec2 uGridSpacing;
 /** 0 = flat base colour, 1 = per-vertex curvature colour */
 uniform float uCurvatureMix;
-
 out vec4 fragColor;
 
 const vec3 LIGHT_KEY_DIR   = normalize(vec3( 5.0, 8.0,  3.0));
@@ -66,16 +70,16 @@ const float AMBIENT = 0.52;
 const float KEY     = 0.36;
 const float FILL    = 0.12;
 
-/* Chart grid lines, drawn as a screen-space-derivative-antialiased overlay so the
-   parametrization stays visible without a separate wireframe pass. */
-float chartGrid(vec2 uv, vec2 spacing) {
-  vec2 t = uv / spacing;
-  vec2 w = fwidth(t);
-  vec2 d = abs(fract(t - 0.5) - 0.5) / max(w, vec2(1e-5));
-  return 1.0 - min(min(d.x, d.y), 1.0);
-}
-
 void main() {
+  /**
+   * Bit 1 is the shaded face — per patch, not per scene. Bit 2, the chart grid, is not this
+   * pass's business any more: the grid is drawn as real curves through the line pass, which is
+   * what makes it as smooth as the surface and lets the domain border be part of it. So with the
+   * face off there is nothing HERE to draw, and the patch reads as a wireframe you can see
+   * through — and, more usefully, see other objects through.
+   */
+  if (mod(vStyle, 2.0) < 0.5) discard;
+
   vec3 n = normalize(vNormal);
   /* The base colour arrives per vertex, not as a uniform: every surface is concatenated into one
      draw call, so a uniform could only give them all the same colour. */
@@ -101,11 +105,6 @@ void main() {
   float rim = pow(1.0 - max(dot(n, viewDir), 0.0), 3.0) * 0.30;
 
   vec3 color = albedo * (AMBIENT + KEY * key + FILL * fill) * (1.0 - rim);
-
-  float grid = chartGrid(vChart, uGridSpacing) * uGridOpacity;
-  /* Grid lines darker than any albedo, for the same reason as the rim: a near-white line was
-     legible on a dark surface and vanishes on a pale one. */
-  color = mix(color, vec3(0.20, 0.26, 0.33), grid * 0.38);
 
   fragColor = vec4(color, 1.0);
 }

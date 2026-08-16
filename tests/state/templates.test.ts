@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { CURVE_CATALOG } from "../../src/core/catalog/curves.ts";
-import { CATALOG } from "../../src/core/catalog/surfaces.ts";
+import { CATALOG, CATALOG_FIELDS } from "../../src/core/catalog/surfaces.ts";
 import { sampleBounds } from "../../src/core/geom/types.ts";
 import { createDocument, type RowId } from "../../src/state/graph.ts";
 import { buildScene, type DomainRange } from "../../src/state/scene.ts";
@@ -29,6 +29,42 @@ function loadSurface(id: string) {
   const items = [...document.resolution().items.values()];
   const scene = buildScene({ items, parameters, domains, resolution: 40 });
   return { spec, document, items, scene };
+}
+
+/** The same, plus one of that surface's example fields — what the field gallery loads. */
+function loadField(surfaceId: string, fieldId: string) {
+  const spec = CATALOG.find((entry) => entry.id === surfaceId)!;
+  const field = (spec.fields ?? []).find((entry) => entry.id === fieldId)!;
+  const document = createDocument([
+    `X(u,v) = (${spec.components.join(", ")})`,
+    `X: VectorField(${field.components.join(", ")})`,
+  ]);
+  const [surfaceRow, fieldRow] = document.rows();
+
+  const [u0, u1] = sampleBounds(spec.u);
+  const [v0, v1] = sampleBounds(spec.v);
+  const domains = new Map<RowId, DomainRange[]>([
+    [surfaceRow!.id, [{ min: u0, max: u1 }, { min: v0, max: v1 }]],
+  ]);
+  const parameters = new Map(spec.params.map((p) => [p.key, p.default]));
+
+  const resolved = document.resolution();
+  const scene = buildScene({
+    items: [...resolved.items.values()],
+    parameters,
+    declaredParameters: resolved.declaredParameters,
+    domains,
+    resolution: 40,
+  });
+  return {
+    spec,
+    field,
+    document,
+    scene,
+    diagnostics: resolved.diagnostics.get(fieldRow!.id) ?? [],
+    report: scene.reports.find((entry) => entry.rowId === fieldRow!.id),
+    arrows: scene.lines.find((group) => group.rowId === surfaceRow!.id),
+  };
 }
 
 function loadCurve(id: string) {
@@ -173,5 +209,55 @@ describe("curve templates", () => {
     let invalid = 0;
     for (let i = 0; i < cuspLine.count; i++) if (!cuspLine.valid?.[i]) invalid++;
     expect(invalid).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * The catalog's example fields, checked against the one property that makes them fields **on**
+ * their surface rather than near it.
+ *
+ * A field is written in ambient components, so tangency is a claim about the formula and the
+ * parametrization together — exactly the kind of claim that survives being edited into being
+ * false. Every entry is combination of the patch's own coordinate fields, so ⟨V, N⟩ must vanish
+ * identically, and the scene's own check is what reports it.
+ */
+describe("vector field templates", () => {
+  for (const { spec, field } of CATALOG_FIELDS) {
+    describe(`${spec.id} · ${field.id}`, () => {
+      it("parses and classifies as a field on the patch", () => {
+        const { document, diagnostics } = loadField(spec.id, field.id);
+        expect(
+          diagnostics.filter((d) => d.severity === "error"),
+          `${field.id}: ${diagnostics.map((d) => d.message).join("; ")}`,
+        ).toEqual([]);
+        const item = document.resolution().items.get(document.rows()[1]!.id);
+        expect(item?.kind).toBe("surfaceField");
+        expect(item?.host).toBe("X");
+      });
+
+      it("is tangent everywhere it is drawn", () => {
+        const { report } = loadField(spec.id, field.id);
+        // The scene measures |⟨V,N⟩|/|V| at every arrow and warns past a quarter of a degree.
+        expect(report?.warnings ?? [], `${field.id} is not tangent`).toEqual([]);
+        expect(report?.errors ?? []).toEqual([]);
+      });
+
+      it("draws arrows, all of them finite", () => {
+        const { arrows } = loadField(spec.id, field.id);
+        expect(arrows, `${field.id} drew nothing`).toBeDefined();
+        expect(arrows!.polylines.length).toBeGreaterThan(50);
+        for (const arrow of arrows!.polylines) {
+          for (const value of arrow.points) expect(Number.isFinite(value)).toBe(true);
+        }
+      });
+    });
+  }
+
+  it("gives every catalog surface at least one field to look at", () => {
+    // Not a rule about the catalog so much as a check that none was dropped in editing: each
+    // surface's own coordinate fields are always available, so there is no excuse for a blank.
+    for (const spec of CATALOG) {
+      expect((spec.fields ?? []).length, `${spec.id} has no example field`).toBeGreaterThan(0);
+    }
   });
 });

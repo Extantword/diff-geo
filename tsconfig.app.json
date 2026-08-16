@@ -24,5 +24,8 @@
 
     "types": ["vitest/globals", "vite/client"]
   },
-  "include": ["src", "tests"]
+  // `docs` is in the program so that the reference page's `Record<ItemKind, …>` tables are
+  // checked for exhaustiveness: adding a kind of row, a diagnostic or a geodesic stop reason then
+  // fails the build until it is documented.
+  "include": ["src", "tests", "docs"]
 }

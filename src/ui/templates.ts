@@ -1,5 +1,11 @@
 import { CURVE_CATALOG, type CurveSpec } from "../core/catalog/curves.ts";
-import { CATALOG, type ParamDef, type SurfaceSpec } from "../core/catalog/surfaces.ts";
+import {
+  CATALOG,
+  CATALOG_FIELDS,
+  type FieldSpec,
+  type ParamDef,
+  type SurfaceSpec,
+} from "../core/catalog/surfaces.ts";
 import { sampleBounds } from "../core/geom/types.ts";
 import type { DocumentStore, RowId } from "../state/graph.ts";
 import type { DomainRange } from "../state/scene.ts";
@@ -82,7 +88,7 @@ export function createTemplatePicker(options: TemplateOptions): HTMLElement {
 
   const blurb = el("p", { class: "blurb" });
 
-  const loadSurface = (spec: SurfaceSpec) => {
+  const loadSurface = (spec: SurfaceSpec): { rowId: RowId; name: string } => {
     /**
      * ADDED to the document, not substituted for it.
      *
@@ -92,7 +98,8 @@ export function createTemplatePicker(options: TemplateOptions): HTMLElement {
      */
     // A name nobody is using: two rows declaring `X` is not two surfaces, it is one definition
     // overwritten by the other.
-    const rowId = store.addRow(surfaceRow(spec, nextName(SURFACE_NAMES, usedNames(store)))).id;
+    const name = nextName(SURFACE_NAMES, usedNames(store));
+    const rowId = store.addRow(surfaceRow(spec, name)).id;
 
     // Parameters stay symbolic and become sliders, seeded with the catalog's ranges. Existing
     // ones are left alone: another surface may be using them, and a template must not reach into
@@ -115,6 +122,22 @@ export function createTemplatePicker(options: TemplateOptions): HTMLElement {
     blurb.textContent = spec.blurb;
     options.invalidateSliders();
     options.onCreated?.(rowId);
+    options.requestRender(true);
+    return { rowId, name };
+  };
+
+  /**
+   * A surface **and** a field on it, as one entry.
+   *
+   * A vector field has nowhere to live without a patch — it is written in that patch's u and v
+   * and is drawn along it — so loading one alone would be loading half an object. Loading the
+   * pair is also how the examples teach the notation: the patch's name appears in front of the
+   * field, which is the whole binding, and both rows are ordinary text to edit afterwards.
+   */
+  const loadField = (spec: SurfaceSpec, field: FieldSpec) => {
+    const { name } = loadSurface(spec);
+    store.addRow(`${name}: VectorField(${field.components.join(", ")})`);
+    blurb.textContent = field.blurb;
     options.requestRender(true);
   };
 
@@ -174,15 +197,28 @@ export function createTemplatePicker(options: TemplateOptions): HTMLElement {
       blurb: spec.blurb,
       load: () => loadCurve(spec),
     })),
+    ...CATALOG_FIELDS.map(({ spec, field }) => ({
+      name: `${spec.name} · ${field.label}`,
+      blurb: field.blurb,
+      load: () => loadField(spec, field),
+    })),
   ];
 
   return el("div", { class: "templates" }, [
-    el("h2", { class: "section-title", text: "Surfaces" }),
+    el("h2", { class: "section-title", text: "Coordinate patches" }),
     el("div", { class: "templates__grid" },
       CATALOG.map((spec) => entry(spec.name, spec.blurb, () => loadSurface(spec)))),
     el("h2", { class: "section-title", text: "Curves" }),
     el("div", { class: "templates__grid" },
       CURVE_CATALOG.map((spec) => entry(spec.name, spec.blurb, () => loadCurve(spec)))),
+    /**
+     * Fields come with their surface, so each entry loads a patch and a row stated in its chart.
+     * Listed apart from the patches because that is what they are: a second object, drawn ON one.
+     */
+    el("h2", { class: "section-title", text: "Vector fields" }),
+    el("div", { class: "templates__grid" },
+      CATALOG_FIELDS.map(({ spec, field }) =>
+        entry(`${spec.name} · ${field.label}`, field.blurb, () => loadField(spec, field)))),
     blurb,
   ]);
 }

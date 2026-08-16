@@ -1,13 +1,23 @@
 import { describe, expect, it } from "vitest";
 import { createDocument, type RowId } from "../../src/state/graph.ts";
 import { buildScene, type DomainRange } from "../../src/state/scene.ts";
-import { chartGrid, chartLift } from "../../src/state/chart.ts";
+import {
+  chartGrid,
+  chartLift,
+  GRID_DIVISIONS,
+  surfaceGridLines,
+} from "../../src/state/chart.ts";
 import { marchingSquares } from "../../src/core/mesh/contour.ts";
+import type { Vec3 } from "../../src/core/geom/types.ts";
 
 const closeRel = (a: number, b: number, rel = 1e-6) =>
   expect(Math.abs(a - b)).toBeLessThan(rel * Math.max(1, Math.abs(a), Math.abs(b)));
 
-function sceneWithChart(sources: readonly string[], chartRows: number[] = []) {
+function sceneWithChart(
+  sources: readonly string[],
+  chartRows: number[] = [],
+  extra: { translations?: Map<RowId, Vec3>; domains?: Map<RowId, DomainRange[]> } = {},
+) {
   const document = createDocument(sources);
   const resolved = document.resolution();
   const items = [...resolved.items.values()];
@@ -17,9 +27,10 @@ function sceneWithChart(sources: readonly string[], chartRows: number[] = []) {
     items,
     parameters: new Map(),
     declaredParameters: resolved.declaredParameters,
-    domains: new Map<RowId, DomainRange[]>(),
+    domains: extra.domains ?? new Map<RowId, DomainRange[]>(),
     resolution: 24,
     inChart,
+    translations: extra.translations,
   });
   return { document, scene, rows };
 }
@@ -45,6 +56,101 @@ describe("the chart inset", () => {
     expect(border.count).toBe(5);
     expect(border.points[0]).toBe(border.points[12]);
     expect(border.points[1]).toBe(border.points[13]);
+  });
+});
+
+describe("the grid drawn on the surface", () => {
+  /**
+   * The grid used to be a fragment-shader overlay at a fixed (u, v) spacing. It followed the
+   * facets rather than the surface, it drew the border of the domain only by coincidence, and
+   * with the face turned off it thresholded its own antialiasing away. These tests are about the
+   * three things that replaced it.
+   */
+  it("draws the interior and the four edges of every patch", () => {
+    const { scene } = sceneWithChart(["X(u,v) = (u, v, 0)"]);
+    const [interior, border] = scene.gridLines;
+    expect(interior).toBeDefined();
+    // Both families, minus the two edges of each: those are the border.
+    expect(interior!.polylines).toHaveLength(2 * (GRID_DIVISIONS - 1));
+    expect(border!.polylines).toHaveLength(4);
+    // The border is drawn heavier than what is inside it, or a patch reads as hatching.
+    expect(border!.style!.widthPx!).toBeGreaterThan(interior!.style!.widthPx!);
+  });
+
+  it("follows the surface instead of cutting across it", () => {
+    /**
+     * The whole complaint: "the grid looks like line-segments". The line at u = π/2 on a sphere
+     * is the equator, and a polyline that really is that circle recovers its circumference in
+     * chords. Two-point segments across the chart would report a diameter at most.
+     */
+    const document = createDocument(["X(u,v) = (sin u cos v, sin u sin v, cos u)"]);
+    const resolved = document.resolution();
+    const rowId = document.rows()[0]!.id;
+    const scene = buildScene({
+      items: [...resolved.items.values()],
+      parameters: new Map(),
+      declaredParameters: resolved.declaredParameters,
+      domains: new Map<RowId, DomainRange[]>([
+        [rowId, [{ min: 0, max: Math.PI }, { min: 0, max: 2 * Math.PI }]],
+      ]),
+      resolution: 24,
+    });
+
+    const interior = scene.gridLines[0]!;
+    // The u-lines come first, at u = kπ/8; the fourth of them is the equator.
+    const equator = interior.polylines[3]!;
+    let chords = 0;
+    for (let i = 1; i < equator.count; i++) {
+      chords += Math.hypot(
+        equator.points[i * 3]! - equator.points[(i - 1) * 3]!,
+        equator.points[i * 3 + 1]! - equator.points[(i - 1) * 3 + 1]!,
+        equator.points[i * 3 + 2]! - equator.points[(i - 1) * 3 + 2]!,
+      );
+    }
+    // Within a percent of 2π at resolution 24. Falling short is the numeric signature of
+    // faceting, which is what a grid drawn per fragment across flat triangles produced.
+    expect(chords).toBeGreaterThan(2 * Math.PI * 0.99);
+    expect(chords).toBeLessThan(2 * Math.PI * 1.01);
+  });
+
+  it("lifts the grid clear of the surface it lies on", () => {
+    // Drawn at the surface exactly, the line z-fights with the triangles under it.
+    const { scene } = sceneWithChart(["X(u,v) = (u, v, 0)"]);
+    const line = scene.gridLines[0]!.polylines[0]!;
+    expect(line.points[2]!).toBeGreaterThan(0);
+  });
+
+  it("is a patch's own choice, and drawing nothing is one of the choices", () => {
+    const document = createDocument(["X(u,v) = (u, v, 0)"]);
+    const resolved = document.resolution();
+    const rowId = document.rows()[0]!.id;
+    const scene = buildScene({
+      items: [...resolved.items.values()],
+      parameters: new Map(),
+      declaredParameters: resolved.declaredParameters,
+      domains: new Map<RowId, DomainRange[]>(),
+      resolution: 24,
+      overlays: new Map([[rowId, { grid: false } as never]]),
+    });
+    expect(scene.gridLines).toHaveLength(0);
+  });
+
+  it("breaks a line at a vertex with no tangent plane rather than drawing through it", () => {
+    /**
+     * The non-finite contract, as the line pass states it. A zero normal is the tessellator's
+     * mark for a vertex it could not place, and nothing can be lifted off a surface that has no
+     * normal there.
+     */
+    const positions = new Float32Array(9 * 3);
+    const normals = new Float32Array(9 * 3);
+    for (let k = 0; k < 9; k++) {
+      positions[k * 3] = k;
+      normals[k * 3 + 2] = k === 4 ? 0 : 1;
+    }
+    const { interior, border } = surfaceGridLines({ positions, normals }, 2, 2, 0.1, 2);
+    const marks = [...interior, ...border].flatMap((line) => [...line.valid!]);
+    expect(marks).toContain(0);
+    expect(marks).toContain(1);
   });
 });
 
@@ -429,5 +535,232 @@ describe("the surface's own parameters reach the push-forward", () => {
     const five = radialError(scene, 5);
     expect(five.checked).toBeGreaterThan(50);
     expect(five.worst).toBeLessThan(0.05);
+  });
+});
+
+describe("a curve in the chart stays on the surface it charts", () => {
+  it("takes the surface's placement, not its own row's", () => {
+    /**
+     * The push-forward evaluates X, which knows nothing about arrangement — so its image has to
+     * be moved by whatever moved the SURFACE. Owned by the curve's row instead, the image of a
+     * moved surface's curve was drawn where the formula alone would have put it: a curve of
+     * exactly the right shape, hanging in space beside the object it belongs to.
+     */
+    const document = createDocument(["X(u,v) = (u, v, 0)", "c(t) = (t, t)"]);
+    const rows = document.rows();
+    const translations = new Map<RowId, Vec3>([[rows[0]!.id, [10, 0, 5]]]);
+    const resolved = document.resolution();
+    const scene = buildScene({
+      items: [...resolved.items.values()],
+      parameters: new Map(),
+      declaredParameters: resolved.declaredParameters,
+      domains: new Map<RowId, DomainRange[]>(),
+      resolution: 24,
+      inChart: new Set<RowId>([rows[1]!.id]),
+      translations,
+    });
+
+    const onSurface = scene.lines.at(-1)!.polylines[0]!;
+    let checked = 0;
+    for (let i = 0; i < onSurface.count; i += 31) {
+      if (!onSurface.valid?.[i]) continue;
+      const x = onSurface.points[i * 3]!;
+      const y = onSurface.points[i * 3 + 1]!;
+      const z = onSurface.points[i * 3 + 2]!;
+      // The plane is at (u + 10, v, 5), and the curve is u = v = t on it — lifted clear of the
+      // mesh along the normal, which for this plane is z, so z sits a sagitta above 5.
+      closeRel(y, x - 10, 1e-6);
+      expect(Math.abs(z - 5)).toBeLessThan(0.05);
+      checked++;
+    }
+    expect(checked).toBeGreaterThan(5);
+  });
+
+  it("draws the part outside the domain in the chart, and nowhere else", () => {
+    /**
+     * The chart is the whole (u, v) plane; the domain is only the part of it the parametrization
+     * has been given. So a line that leaves the rectangle keeps being drawn flat — dashed, in the
+     * inset — and simply stops having an image on the surface.
+     */
+    const { scene } = sceneWithChart(["X(u,v) = (u, v, 0)", "f(u) = 4 + u"]);
+
+    // Two curve groups in the inset now: the part over the domain, and the part beyond it.
+    const groups = scene.chartLines.slice(-2);
+    const inside = groups[0]!.polylines[0]!;
+    const beyond = groups[1]!.polylines[0]!;
+    expect(groups[1]!.style?.dashPeriod).toBeGreaterThan(0);
+
+    const usable = (line: typeof inside) => {
+      let n = 0;
+      for (let i = 0; i < line.count; i++) if (line.valid?.[i]) n++;
+      return n;
+    };
+    expect(usable(inside)).toBeGreaterThan(0);
+    expect(usable(beyond)).toBeGreaterThan(0);
+    // Every sample is in exactly one of the two.
+    for (let i = 0; i < inside.count; i++) {
+      expect(Boolean(inside.valid?.[i]) === Boolean(beyond.valid?.[i]), `sample ${i}`).toBe(false);
+    }
+
+    // v = 4 + u over u ∈ [0, 2π] leaves v ∈ [0, 2π] partway along, and only what is left of it
+    // reaches the surface.
+    const onSurface = scene.lines.at(-1)!.polylines[0]!;
+    for (let i = 0; i < onSurface.count; i++) {
+      if (!onSurface.valid?.[i]) continue;
+      expect(onSurface.points[i * 3 + 1]!).toBeLessThanOrEqual(2 * Math.PI + 1e-9);
+    }
+  });
+
+  it("widens the inset to hold the curve, without shrinking the domain out of sight", () => {
+    const { scene } = sceneWithChart(["X(u,v) = (u, v, 0)", "f(u) = 4 + u"]);
+    // The domain still reads as the domain: the view contains it whole.
+    expect(scene.chartView!.v[0]).toBeLessThanOrEqual(scene.chartBounds!.v[0]);
+    expect(scene.chartView!.v[1]).toBeGreaterThan(scene.chartBounds!.v[1]);
+
+    // And a curve that runs away does not shrink it to a dot.
+    const wild = sceneWithChart(["X(u,v) = (u, v, 0)", "f(u) = 10000 u"]).scene;
+    const domainSpan = wild.chartBounds!.v[1] - wild.chartBounds!.v[0];
+    const viewSpan = wild.chartView!.v[1] - wild.chartView!.v[0];
+    expect(viewSpan / domainSpan).toBeLessThanOrEqual(7);
+  });
+});
+
+describe("which chart a curve lives in", () => {
+  it("draws a curve on the patch its row names, not on the first one", () => {
+    /**
+     * With one surface the first-surface convention is invisible; with two it is a coin flip. A
+     * curve is a curve IN A CHART, and which chart cannot be read off the formula — so the row
+     * says it, with a `Y:` prefix, and the binding is the text itself.
+     */
+    const document = createDocument([
+      "X(u,v) = (u, v, 0)",
+      "Y(u,v) = (u, v, 5)",
+      "Y: c(t) = (t, t)",
+    ]);
+    const rows = document.rows();
+    const resolved = document.resolution();
+    const scene = buildScene({
+      items: [...resolved.items.values()],
+      parameters: new Map(),
+      declaredParameters: resolved.declaredParameters,
+      domains: new Map<RowId, DomainRange[]>(),
+      resolution: 24,
+      inChart: new Set<RowId>([rows[2]!.id]),
+    });
+
+    const onSurface = scene.lines.at(-1)!.polylines[0]!;
+    let checked = 0;
+    for (let i = 0; i < onSurface.count; i += 31) {
+      if (!onSurface.valid?.[i]) continue;
+      // The second plane sits at z = 5; the first is at z = 0, so this cannot pass by accident.
+      expect(Math.abs(onSurface.points[i * 3 + 2]! - 5)).toBeLessThan(0.05);
+      checked++;
+    }
+    expect(checked).toBeGreaterThan(5);
+  });
+
+  it("draws a relation on the patch its row names", () => {
+    // The same for a relation, which is the form a curve on a surface is usually written in.
+    const document = createDocument([
+      "X(u,v) = (u, v, 0)",
+      "Y(u,v) = (u, v, 5)",
+      "Y: (u - 3)^2 + (v - 3)^2 = 1",
+    ]);
+    const resolved = document.resolution();
+    const scene = buildScene({
+      items: [...resolved.items.values()],
+      parameters: new Map(),
+      declaredParameters: resolved.declaredParameters,
+      domains: new Map<RowId, DomainRange[]>(),
+      resolution: 24,
+    });
+    const segments = scene.lines.at(-1)!.polylines;
+    expect(segments.length).toBeGreaterThan(20);
+    for (const segment of segments) expect(segment.points[2]!).toBeCloseTo(5, 1);
+  });
+
+  it("says so when the named patch is not there, and still draws the curve", () => {
+    /**
+     * A renamed or deleted patch leaves rows pointing at a name nobody has. Dropping the curve
+     * would be the harshest possible reading of a typo; drawing it on the first surface and
+     * saying which one is used keeps the document readable while it is being fixed.
+     */
+    const document = createDocument(["X(u,v) = (u, v, 0)", "Z: (u - 3)^2 + (v - 3)^2 = 1"]);
+    const resolved = document.resolution();
+    const rowId = document.rows()[1]!.id;
+    const scene = buildScene({
+      items: [...resolved.items.values()],
+      parameters: new Map(),
+      declaredParameters: resolved.declaredParameters,
+      domains: new Map<RowId, DomainRange[]>(),
+      resolution: 24,
+    });
+    const report = scene.reports.find((entry) => entry.rowId === rowId)!;
+    expect(report.warnings.join(" ")).toContain("no patch called Z");
+    expect(scene.lines.at(-1)!.polylines.length).toBeGreaterThan(20);
+  });
+
+  it("shows the selected patch's chart, and the relations stated in it", () => {
+    /**
+     * Clicking a patch asks "what does *this* one look like flat", and the answer is its domain
+     * with the rows stated in it drawn on top. The first-surface convention is the fallback, not
+     * the rule — with several patches it would answer a question nobody asked.
+     */
+    const document = createDocument([
+      "X(u,v) = (u, v, 0)",
+      "Y(u,v) = (2 u, v, 5)",
+      "Y: (u - 3)^2 + (v - 3)^2 = 1",
+    ]);
+    const rows = document.rows();
+    const resolved = document.resolution();
+    const build = (chartRow: RowId | null) =>
+      buildScene({
+        items: [...resolved.items.values()],
+        parameters: new Map(),
+        declaredParameters: resolved.declaredParameters,
+        domains: new Map<RowId, DomainRange[]>([
+          [rows[1]!.id, [{ min: 0, max: 3 }, { min: 0, max: 4 }]],
+        ]),
+        resolution: 24,
+        chartRow,
+      });
+
+    // Unselected: the first surface's own domain, and nothing of Y's in the inset.
+    const first = build(null);
+    closeRel(first.chartBounds!.u[1], 2 * Math.PI, 1e-9);
+    expect(first.chartLines).toHaveLength(2);
+
+    // Y selected: Y's domain, and the relation stated in Y drawn flat in it.
+    const second = build(rows[1]!.id);
+    closeRel(second.chartBounds!.u[1], 3, 1e-9);
+    closeRel(second.chartBounds!.v[1], 4, 1e-9);
+    expect(second.chartLines.length).toBeGreaterThan(2);
+
+    // A row with no chart of its own leaves the inset where it was.
+    const third = build(rows[2]!.id);
+    closeRel(third.chartBounds!.u[1], 2 * Math.PI, 1e-9);
+  });
+
+  it("keeps the inset showing one chart, not two at once", () => {
+    // Two patches have two different (u, v) planes; drawing both in one square is a picture of
+    // neither. The curve is on its own surface in 3D and simply absent from the other's inset.
+    const document = createDocument([
+      "X(u,v) = (u, v, 0)",
+      "Y(u,v) = (u, v, 5)",
+      "Y: c(t) = (t, t)",
+    ]);
+    const rows = document.rows();
+    const resolved = document.resolution();
+    const scene = buildScene({
+      items: [...resolved.items.values()],
+      parameters: new Map(),
+      declaredParameters: resolved.declaredParameters,
+      domains: new Map<RowId, DomainRange[]>(),
+      resolution: 24,
+      inChart: new Set<RowId>([rows[2]!.id]),
+    });
+
+    // Only the grid and the border: no curve was added to the first patch's chart.
+    expect(scene.chartLines).toHaveLength(2);
   });
 });

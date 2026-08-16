@@ -206,7 +206,7 @@ describe("animation speed", () => {
       const spec = { value: 0, min: 0, max: 4, step: 0.01 };
       animator.register("k", spec, (value) => (spec.value = value));
       animator.play("k");
-      animator.setSpeed(speed);
+      animator.setSpeed("k", speed);
       animator.step(0.02);
       return spec.value;
     };
@@ -219,11 +219,118 @@ describe("animation speed", () => {
     // Direction is owned by the ping-pong; letting speed go negative would give two things
     // authority over it, and zero would look like a bug rather than a setting.
     const animator = createAnimator();
-    animator.setSpeed(0);
-    expect(animator.speed()).toBeGreaterThan(0);
-    animator.setSpeed(-3);
-    expect(animator.speed()).toBeGreaterThan(0);
-    animator.setSpeed(1e6);
-    expect(animator.speed()).toBeLessThanOrEqual(20);
+    animator.setSpeed("k", 0);
+    expect(animator.speed("k")).toBeGreaterThan(0);
+    animator.setSpeed("k", -3);
+    expect(animator.speed("k")).toBeGreaterThan(0);
+    animator.setSpeed("k", 1e6);
+    expect(animator.speed("k")).toBeLessThanOrEqual(20);
+  });
+
+  it("gives each thing its own rate", () => {
+    /**
+     * One dial for the whole animation was the first design, on the reasoning that two things
+     * playing together are being compared. Usually they are not — a document has several sliders
+     * and several flows, about different questions — so a single rate made every choice a
+     * compromise between unrelated animations.
+     */
+    const animator = createAnimator();
+    const a = { value: 0, min: 0, max: 4, step: 0.01 };
+    const b = { value: 0, min: 0, max: 4, step: 0.01 };
+    animator.register("a", a, (value) => (a.value = value));
+    animator.register("b", b, (value) => (b.value = value));
+    animator.play("a");
+    animator.play("b");
+
+    animator.setSpeed("a", 4);
+    expect(animator.speed("b")).toBe(1);
+    animator.step(0.02);
+    expect(a.value).toBeCloseTo(b.value * 4, 9);
+  });
+
+  it("keeps a rate through the rebuild of the control that set it", () => {
+    // Held apart from the entries, like play state: a parameter that goes away and comes back
+    // resumes at the rate it was given.
+    const animator = createAnimator();
+    const spec = { value: 0, min: 0, max: 4, step: 0.01 };
+    animator.setSpeed("k", 2);
+    animator.register("k", spec, () => {});
+    expect(animator.speed("k")).toBe(2);
+    animator.unregister("k");
+    animator.register("k", spec, () => {});
+    expect(animator.speed("k")).toBe(2);
+  });
+});
+
+describe("tickers: things that advance rather than sweep", () => {
+  it("advances only while playing, and at its own speed", () => {
+    const animator = createAnimator();
+    let total = 0;
+    animator.registerTicker("flow:1", { advance: (seconds) => (total += seconds) });
+
+    // Registered is not playing: a flow appears paused, like every other transport.
+    animator.step(1);
+    expect(total).toBe(0);
+
+    animator.play("flow:1");
+    animator.step(0.02);
+    expect(total).toBeCloseTo(0.02, 12);
+
+    // Its own rate, like every other transport: a flow can run fast while a radius creeps.
+    animator.setSpeed("flow:1", 2);
+    animator.step(0.02);
+    expect(total).toBeCloseTo(0.06, 12);
+  });
+
+  it("reports no movement, so a flow does not rebuild the scene sixty times a second", () => {
+    /**
+     * `step` returns whether a SLIDER moved, because that is what the tick callback rebuilds the
+     * scene for. A flow paints its own frame — the particles are not in the document — and
+     * reporting it as movement would drag a full retessellation along behind every frame.
+     */
+    const animator = createAnimator();
+    animator.registerTicker("flow:1", { advance: () => {} });
+    animator.play("flow:1");
+    expect(animator.step(0.02)).toBe(false);
+  });
+
+  it("plays, pauses and rewinds through the same transport as a slider", () => {
+    const animator = createAnimator();
+    let rewound = 0;
+    animator.registerTicker("flow:1", { advance: () => {}, rewind: () => rewound++ });
+
+    expect(animator.playing("flow:1")).toBe(false);
+    animator.toggle("flow:1");
+    expect(animator.playing("flow:1")).toBe(true);
+    animator.toggle("flow:1");
+    expect(animator.playing("flow:1")).toBe(false);
+
+    animator.rewind("flow:1");
+    expect(rewound).toBe(1);
+  });
+
+  it("keeps playing across a re-registration, so a refresh does not stop the flow", () => {
+    const animator = createAnimator();
+    animator.registerTicker("flow:1", { advance: () => {} });
+    animator.play("flow:1");
+    let advanced = 0;
+    animator.registerTicker("flow:1", { advance: () => advanced++ });
+    expect(animator.playing("flow:1")).toBe(true);
+    animator.step(0.02);
+    expect(advanced).toBe(1);
+  });
+
+  it("stops with everything else, and can be dropped", () => {
+    const animator = createAnimator();
+    let advanced = 0;
+    animator.registerTicker("flow:1", { advance: () => advanced++ });
+    animator.play("flow:1");
+    animator.stopAll();
+    expect(animator.playing("flow:1")).toBe(false);
+
+    animator.play("flow:1");
+    animator.unregisterTicker("flow:1");
+    animator.step(0.02);
+    expect(advanced).toBe(0);
   });
 });

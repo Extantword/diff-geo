@@ -6,12 +6,15 @@ import {
   type ColormapName,
 } from "../core/geom/colormaps.ts";
 import { toLatex } from "../core/expr/latex.ts";
-import { parse, parseRow } from "../core/expr/parse.ts";
+import { parse, parseRow, splitHost } from "../core/expr/parse.ts";
 import { toSource } from "../core/expr/print.ts";
+import { diff } from "../core/expr/diff.ts";
+import { simplify } from "../core/expr/simplify.ts";
 import {
   CURVE_NAMES,
   SURFACE_NAMES,
   nextName,
+  rehost,
   renameDeclaration,
   usedNames,
 } from "../state/naming.ts";
@@ -52,8 +55,8 @@ const KIND_LABEL: Readonly<Record<string, string>> = {
   scalar: "scalar",
   planeCurve: "plane curve",
   spaceCurve: "space curve",
-  parametricSurface: "surface",
-  graphSurface: "graph",
+  parametricSurface: "coordinate patch",
+  graphSurface: "graph patch",
   implicitSurface: "implicit surface",
   implicitPlaneCurve: "implicit curve",
   point: "point",
@@ -61,6 +64,8 @@ const KIND_LABEL: Readonly<Record<string, string>> = {
   functionDefinition: "definition",
   chartGraph: "chart graph",
   chartRelation: "chart relation",
+  tangentPlane: "tangent plane",
+  surfaceField: "vector field",
   unknown: "?",
 };
 
@@ -88,6 +93,19 @@ export interface ExprListOptions {
    * stopped and then jump.
    */
   readonly onParameterChange: () => void;
+  /**
+   * A field's flow advanced by `seconds`: draw the next frame of it.
+   *
+   * Deliberately NOT `onParameterChange`: nothing about the document has changed, and rebuilding
+   * the scene sixty times a second to move some particles would cost a hundred times what moving
+   * them does. The app owns the particles — like the aimed shots — so that a rebuild does not
+   * empty the picture being watched.
+   */
+  readonly onFlowTick?: (rowId: RowId, seconds: number) => void;
+  /** Start that flow again: fresh particles, spread over the domain. */
+  readonly onFlowRewind?: (rowId: RowId) => void;
+  /** A flow was played, paused or rewound: what is drawn has changed, repaint. */
+  readonly onFlowToggle?: (rowId: RowId) => void;
   /** Per-row domain ranges, mutated in place by the domain inputs. */
   readonly domains: Map<RowId, DomainRange[]>;
   /** Slider state, mutated in place. */
@@ -102,8 +120,23 @@ export interface ExprListOptions {
   readonly animator: Animator;
   /** Per-surface overlays: geodesic sprays, lines of curvature, the Gauss map. */
   readonly overlays: Map<RowId, SurfaceOverlay>;
+  /**
+   * Per row, where each coordinate starts repeating itself — filled in by the app after every
+   * scene build, since only the compiled surface can say.
+   *
+   * A domain wider than this does not show more surface, it shows the same surface twice drawn
+   * over itself, so it is where the controls stop.
+   */
+  readonly periods?: Map<RowId, readonly [number | null, number | null]>;
   /** Per-row colour, for every part of the scene that row draws. */
   readonly colors: Map<RowId, Vec3>;
+  /**
+   * The selection changed.
+   *
+   * The scene depends on it — the chart inset shows the selected patch's own (u, v) plane — so
+   * selecting a row has to be able to ask for a rebuild, exactly as editing one does.
+   */
+  readonly onSelect?: (id: RowId | null) => void;
 }
 
 export interface ExprList {
@@ -112,8 +145,13 @@ export interface ExprList {
   readonly card: HTMLElement;
   /** Show a row's properties, or `null` to close the card. Also driven by picking in 3D. */
   /**
-   * Select a row. `reveal` opens the properties window at the pointer; a click in the LIST passes
-   * false, because the window would then cover the very cell being edited.
+   * Select a row, and say whether that also **opens** its controls.
+   *
+   * The two are different acts. Selecting decides what the inset charts and which cell is
+   * highlighted — the answer to "which one am I looking at", which you want while still holding
+   * the camera. Opening puts a panel of sliders under the pointer, over the object just pointed
+   * at. So a click in the list passes false (the window would cover the cell being edited), a
+   * single click on an object in 3D passes false, and a double click there passes true.
    */
   select(id: RowId | null, reveal?: boolean): void;
   selected(): RowId | null;
@@ -127,8 +165,14 @@ export interface ExprList {
   setPlacement(mode: "bar" | "cursor"): void;
   /** Remember where to open the window, for the cursor placement. */
   placeAt(x: number, y: number): void;
-  /** Full refresh: echoes, badges, controls, diagnostics. For structural changes. */
-  refresh(reports: readonly RowReport[]): void;
+  /**
+   * Full refresh: echoes, badges, controls, diagnostics. For structural changes.
+   *
+   * `drawn` is the colour each row was actually rendered in, which the scene reports because the
+   * defaults are not one rule — a curve takes a palette entry by document order, a patch the
+   * shade under its curvature map. Without it the dot on the cell would be a guess.
+   */
+  refresh(reports: readonly RowReport[], drawn?: ReadonlyMap<RowId, Vec3>): void;
   /**
    * Update only the per-row readouts.
    *
@@ -148,10 +192,60 @@ export interface ExprList {
   invalidateSliders(): void;
 }
 
+interface MovingSliderOptions {
+  readonly min: number;
+  readonly max: number;
+  readonly step: number;
+  readonly value: number;
+  /** How the bubble renders the number. */
+  readonly format?: (value: number) => string;
+  readonly title?: string;
+  /** Continuous, while dragging. */
+  readonly onInput: (value: number) => void;
+}
+
+interface MovingSlider {
+  readonly root: HTMLElement;
+  readonly input: HTMLInputElement;
+  /** Push a value in from outside — the animator, or a reformat. */
+  set(value: number): void;
+  /** Move the ends of the track. The bubble rides on them, so they cannot be set on the input. */
+  setRange(min: number, max: number, step: number): void;
+}
+
+/**
+ * A slider whose value rides above the thumb, with no number box beside it.
+ *
+ * Two things bought at once. The readout used to sit in a fixed column and the exact-value box
+ * in another, so on a toolbar the TRACK — the only part you actually manipulate — got whatever
+ * was left, which was almost nothing. Putting the number on the thumb and dropping the box
+ * gives the track the full width.
+ *
+ * Exact entry is double-click: the bubble becomes a field, and a value outside the current
+ * range widens it rather than being refused. Since a drag no longer moves the track's ends,
+ * this is the one place a range changes — deliberately, by typing a number, rather than as a
+ * side effect of overshooting a drag.
+ */
+
+/**
+ * The overlay a patch has before anything is switched on.
+ *
+ * The chips write into the same record the overlay controls own, so they need something to spread
+ * over when a row has never had one — and it has to be the values those controls treat as "off",
+ * or switching a face back on would silently arm a geodesic spray.
+ */
+const EMPTY_OVERLAY: SurfaceOverlay = {
+  geodesics: 0,
+  geodesicLength: 1.5,
+  curvatureLines: false,
+};
+
 interface RowView {
   readonly id: RowId;
   readonly root: HTMLElement;
   readonly input: HTMLTextAreaElement;
+  /** Swap this cell to its raw text and focus it, as a click on it does. */
+  enterEdit(): void;
   readonly echo: HTMLElement;
   readonly badge: HTMLElement;
   readonly notes: HTMLElement;
@@ -159,12 +253,22 @@ interface RowView {
   readonly frameHost: HTMLElement;
   /** the variables the domain fields were built for, so they are not rebuilt needlessly */
   domainVars: string;
+  /** the two thumbs per variable, min then max, for putting values back */
+  domainThumbs: MovingSlider[];
+  /** the two typed bounds per variable, min then max, in the same order */
+  domainLimits: HTMLInputElement[];
   /** host for the inline slider a numeric row gets */
   readonly valueHost: HTMLElement;
   /** host for the chart toggle a plane-curve row gets */
   readonly chartHost: HTMLElement;
   /** host for the geodesic and curvature-line controls a surface row gets */
   readonly overlayHost: HTMLElement;
+  /** host for the transport a vector field gets, so its flow can be played */
+  readonly flowHost: HTMLElement;
+  /** whether that transport is built, so it is not rebuilt under a running flow */
+  flowBuilt: boolean;
+  /** the arrows switch, once a field row has one; the dot writes the same flag */
+  arrowChip: HTMLButtonElement | null;
   /**
    * This row's properties, shown in the floating card when the row is selected.
    *
@@ -175,8 +279,23 @@ interface RowView {
    */
   readonly details: HTMLElement;
   readonly colorSwatch: HTMLInputElement;
+  /** the dot on the cell that reports the colour the object is drawn in */
+  readonly colorDot: HTMLElement;
+  /** the pencil's colour input, opened by it and never shown */
+  readonly colorField: HTMLInputElement;
+  /** the gutter holding both, hidden on a row that draws nothing */
+  readonly gutter: HTMLElement;
   /** the K toggle beside the colour, kept in step with the colour-map menu */
   readonly curvatureChip: HTMLButtonElement;
+  /** what of this patch is drawn: its face and its chart grid */
+  readonly fillChip: HTMLButtonElement;
+  readonly gridChip: HTMLButtonElement;
+  /** makes a relation in this patch's chart; shown only on rows that have one */
+  readonly addRelation: HTMLButtonElement;
+  /** makes a tangent plane at a point of this patch's chart, likewise */
+  readonly addTangent: HTMLButtonElement;
+  /** makes a vector field along this patch; only a parametric patch can seed one */
+  readonly addField: HTMLButtonElement;
   /** this row's colour-map menu, once its surface controls exist */
   colormapSelect: HTMLSelectElement | null;
   readonly detailsTitle: HTMLElement;
@@ -276,6 +395,7 @@ export function createExprList(options: ExprListOptions): ExprList {
    * both have to land in one place or the highlight and the card can disagree.
    */
   const select = (id: RowId | null, reveal = true) => {
+    const moved = selectedId !== id;
     selectedId = id;
     if (!reveal) revealed = false;
     else if (id !== null) revealed = true;
@@ -291,9 +411,39 @@ export function createExprList(options: ExprListOptions): ExprList {
       id === null || !views.has(id) || (placement === "cursor" && !revealed),
     );
     positionAtCursor();
+    // Only on a real change, and last, so the handler sees the selection it is being told about.
+    // The scene reads it — the chart inset shows the selected patch — so a click on a cell and a
+    // click on the object itself have to arrive the same way.
+    if (moved) options.onSelect?.(id);
   };
 
   const views = new Map<RowId, RowView>();
+
+  /**
+   * Everything about a row that is not its text, copied onto another row.
+   *
+   * A copied surface that came back on the default domain in a different colour with its face
+   * turned back on is not the object that was copied — the settings ARE half of what the user
+   * built. Deep copies throughout: sharing a domain array would make the two rows one control
+   * with two thumbs on screen.
+   */
+  const carryRowState = (from: RowId, to: RowId) => {
+    const domain = options.domains.get(from);
+    if (domain) options.domains.set(to, domain.map((range) => ({ ...range })));
+    const color = options.colors.get(from);
+    if (color) options.colors.set(to, [color[0], color[1], color[2]]);
+    const overlay = options.overlays.get(from);
+    if (overlay) options.overlays.set(to, { ...overlay });
+    const frame = options.frames.get(from);
+    if (frame) options.frames.set(to, { ...frame });
+    if (options.inChart.has(from)) {
+      options.inChart.add(to);
+      // Marked as seen, or the next refresh would apply the classifier's default over the top of
+      // what was just copied.
+      seenChartRows.add(to);
+    }
+  };
+
   /** the parameter list the sliders were built for */
   let renderedSliders = "\u0000";
   /** Rows whose chart default has already been applied, so a later edit does not re-apply it. */
@@ -335,13 +485,28 @@ export function createExprList(options: ExprListOptions): ExprList {
        */
       if (views.get(id)?.input === globalThis.document.activeElement) continue;
       store.removeRow(id);
-      views.get(id)?.root.remove();
-      views.get(id)?.details.remove();
-      views.delete(id);
-      if (selectedId === id) select(null);
+      dropView(id);
       changed = true;
     }
     return changed;
+  };
+
+  /**
+   * Forget a row entirely: its DOM, its card, and anything it registered with the animator.
+   *
+   * The animator outlives the row list, so a ticker left behind goes on asking for frames for a
+   * row that no longer exists — which keeps the frame loop running for nothing. Dropping a view
+   * is the one place that can know, so it is the one place that does it.
+   */
+  const dropView = (id: RowId) => {
+    const view = views.get(id);
+    if (!view) return;
+    view.root.remove();
+    view.details.remove();
+    views.delete(id);
+    options.animator.unregisterTicker(`flow:${id}`);
+    options.animator.unregister(`row:${id}`);
+    if (selectedId === id) select(null);
   };
 
   const syncRows = () => {
@@ -362,32 +527,30 @@ export function createExprList(options: ExprListOptions): ExprList {
         cardBody.append(view.details);
       }
     }
-    for (const [id, view] of views) {
-      if (!seen.has(id)) {
-        view.root.remove();
-        view.details.remove();
-        views.delete(id);
-        if (selectedId === id) select(null);
-      }
+    for (const id of [...views.keys()]) {
+      if (!seen.has(id)) dropView(id);
     }
     /**
-     * Reorder only when the order is actually wrong.
+     * Move only the rows that are actually in the wrong place.
      *
      * `append` on an element that is already a child is a **move**: the browser detaches and
-     * reinserts it, which blurs any focused descendant. Doing that unconditionally on every
-     * refresh meant the formula input lost focus after each keystroke — the same class of bug
-     * as replacing the input outright, arriving by a different route. So the DOM is only
-     * touched when the desired order genuinely differs from the current one, which is almost
-     * never.
+     * reinserts it, which blurs any focused descendant. An earlier version re-appended every view
+     * whenever the order differed at all — and typing the first letter into the trailing cell
+     * creates the next one, so the order differed on that keystroke and the focused input was
+     * detached out from under the caret. That is the bug where a cell defocused as soon as you
+     * typed in it.
+     *
+     * So this walks the two lists together and inserts only where they disagree. Appending a new
+     * cell at the end now touches nothing else, which is the overwhelmingly common case.
      */
     const desired = rows.map((row) => views.get(row.id)).filter((view) => view !== undefined);
-    const current = Array.from(rowHost.children);
-    const alreadyOrdered =
-      desired.length === current.length &&
-      desired.every((view, index) => view!.root === current[index]);
-
-    if (!alreadyOrdered) {
-      for (const view of desired) rowHost.append(view!.root);
+    let cursor = rowHost.firstChild;
+    for (const view of desired) {
+      if (cursor === view!.root) {
+        cursor = cursor.nextSibling;
+        continue;
+      }
+      rowHost.insertBefore(view!.root, cursor);
     }
   };
 
@@ -429,6 +592,7 @@ export function createExprList(options: ExprListOptions): ExprList {
     const valueHost = el("div", { class: "row__value" });
     const chartHost = el("div", { class: "row__chart" });
     const overlayHost = el("div", { class: "row__overlay" });
+    const flowHost = el("div", { class: "row__flow" });
 
     const remove = el("button", {
       class: "row__remove",
@@ -439,25 +603,28 @@ export function createExprList(options: ExprListOptions): ExprList {
         // that is about to stop existing.
         event.stopPropagation();
         store.removeRow(id);
-        views.get(id)?.root.remove();
-        views.get(id)?.details.remove();
-        views.delete(id);
-        if (selectedId === id) select(null);
+        dropView(id);
         options.onEdit(false);
       },
     });
 
     /**
-     * Duplicate this cell, right below itself.
+     * Duplicate this cell, and everything that is drawn on it, right below itself.
      *
      * A surface is usually explored by variation — the same map with one component changed — and
-     * retyping a parametrization to compare two of them is the slowest thing in the tool. The copy
-     * carries the row's TEXT only; its colour, domain and overlays start fresh, because a
-     * duplicate is a new object rather than a second view of the same one.
+     * retyping a parametrization to compare two of them is the slowest thing in the tool. So the
+     * copy is a copy of the *object*, not of the line of text: its domain, its colour, what of it
+     * is drawn, its overlays, and every row stated in its chart, re-pointed at the copy. A copy
+     * that came back as a bare formula on the default domain was not the surface you were looking
+     * at, and reproducing it by hand is the work this exists to avoid.
+     *
+     * What is deliberately NOT copied is the parameters. `X: (u − a)² + (v − b)² = r²` copied onto
+     * the new patch still reads `a`, `b` and `r`, so one slider moves both circles — which is what
+     * makes the two objects comparable, and is the reason for copying a surface in the first place.
      */
     const duplicate = el("button", {
       class: "row__move",
-      title: "duplicate this expression",
+      title: "duplicate this expression and everything drawn on it",
       text: "\u29c9",
       onClick: (event: Event) => {
         event.stopPropagation();
@@ -471,15 +638,50 @@ export function createExprList(options: ExprListOptions): ExprList {
          */
         const parsed = parseRow(source).row;
         const isCurve = parsed?.kind === "vectorFunction" && parsed.args.length === 1;
-        const copy = store.addRow(
-          renameDeclaration(
-            source,
-            nextName(isCurve ? CURVE_NAMES : SURFACE_NAMES, usedNames(store)),
-          ),
-        );
-        // Straight below the original rather than at the end, so a comparison stays side by side.
+        const named = parsed && "name" in parsed ? parsed.name : null;
+        const newName = nextName(isCurve ? CURVE_NAMES : SURFACE_NAMES, usedNames(store));
+        const copy = store.addRow(renameDeclaration(source, newName));
+        carryRowState(id, copy.id);
+
+        /**
+         * The rows stated in this patch's chart, re-pointed at the copy.
+         *
+         * Found by the name they name, which is the whole binding — nothing else has to be kept in
+         * step. Each keeps its own domain and colour, and one that declares a name gets a fresh
+         * one, since two `alpha`s is one curve overwritten.
+         */
+        const drawn: RowId[] = [];
+        if (named !== null) {
+          for (const other of store.rows()) {
+            if (other.id === id) continue;
+            const text = other.source();
+            if (parseRow(text).host !== named) continue;
+            const body = parseRow(text).row;
+            const renamed =
+              body && "name" in body
+                ? renameDeclaration(
+                    text,
+                    nextName(
+                      body.kind === "vectorFunction" && body.args.length === 1
+                        ? CURVE_NAMES
+                        : SURFACE_NAMES,
+                      usedNames(store),
+                    ),
+                  )
+                : text;
+            const made = store.addRow(rehost(renamed, newName));
+            carryRowState(other.id, made.id);
+            drawn.push(made.id);
+          }
+        }
+
+        // Straight below the original rather than at the end, so a comparison stays side by side,
+        // and its own curves straight below it in the order they were written.
         const index = store.rows().findIndex((candidate) => candidate.id === id);
-        store.moveRow(copy.id, index + 1 - (store.rows().length - 1));
+        for (const [offset, moving] of [copy.id, ...drawn].entries()) {
+          const at = store.rows().findIndex((candidate) => candidate.id === moving);
+          store.moveRow(moving, index + 1 + offset - at);
+        }
         syncRows();
         options.onEdit(false);
         select(copy.id);
@@ -592,6 +794,56 @@ export function createExprList(options: ExprListOptions): ExprList {
       syncEditing(views.get(id));
     });
 
+    /**
+     * The colour the object is drawn in, shown on the cell that defines it.
+     *
+     * A dot in a gutter down the left, the way a graphing calculator does it — because the
+     * question "which of these is the blue one" is asked constantly and answering it should not
+     * require selecting a row and reading a panel. The dot is a **readout**: it shows the colour
+     * the scene actually used, which for a curve is a palette entry decided by document order and
+     * for a patch is the shade under the curvature map. Changing it is the pencil's job, so that
+     * a stray click on a cell cannot repaint an object.
+     */
+    const colorDot = el("button", {
+      class: "gutter__dot",
+      title: "draw this object",
+      onClick: (event: Event) => {
+        event.stopPropagation();
+        toggleDrawn(id);
+      },
+    }) as HTMLButtonElement;
+
+    const colorField = el("input", {
+      type: "color",
+      class: "gutter__input",
+      // Off-screen rather than `display: none`: a hidden input cannot be opened by `click()` in
+      // every browser, and this one exists precisely to be opened by the pencil.
+      value: toHex(options.colors.get(id) ?? defaultColorFor(id)),
+      onInput: () => applyColor(id, fromHex(colorField.value)),
+    }) as HTMLInputElement;
+
+    /**
+     * Drawn rather than typed.
+     *
+     * `✎` is a text glyph, and a text glyph is only there if the reader's font has it — which is
+     * how this arrived as an invisible button. An inline SVG is the same fourteen pixels in every
+     * font on every platform.
+     */
+    const pencil = el("button", {
+      class: "gutter__pencil",
+      title: "change this object's colour",
+      html:
+        '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">' +
+        '<path fill="currentColor" d="M11.6 1.6a1.4 1.4 0 0 1 2 0l.8.8a1.4 1.4 0 0 1 0 2' +
+        'l-.9.9-2.8-2.8.9-.9zM9.8 3.4l2.8 2.8-6.5 6.5-3.5.7.7-3.5 6.5-6.5z"/></svg>',
+      onClick: (event: Event) => {
+        event.stopPropagation();
+        colorField.click();
+      },
+    }) as HTMLButtonElement;
+
+    const gutter = el("div", { class: "row__gutter" }, [colorDot, pencil, colorField]);
+
     const root = el("div", {
       class: "row row--editing",
       onClick: (event: Event) => {
@@ -602,6 +854,8 @@ export function createExprList(options: ExprListOptions): ExprList {
         if (!root.classList.contains("row--editing")) enterEdit();
       },
     }, [
+      gutter,
+      el("div", { class: "row__body" }, [
       input,
       echo,
       el("div", { class: "row__tools" }, [
@@ -610,9 +864,21 @@ export function createExprList(options: ExprListOptions): ExprList {
         shift(1, "\u2193", "move down"),
         remove,
       ]),
+      /**
+       * The flow transport lives **on the cell**, like the sliders.
+       *
+       * It was in the properties card first, which was wrong twice: the floating card hides its
+       * tray on purpose, so the button was invisible in the default placement — and even in the
+       * top bar it is a control you reach for while looking at the row it belongs to. A field's
+       * flow is to that row what a slider is to a numeric one: the thing the row does, offered
+       * where the row is. Only one copy exists, because a second would paint its own play/pause
+       * state and the two would disagree the moment either was pressed.
+       */
+      flowHost,
       // Sliders belong to the cell that introduced them, directly beneath it.
       valueHost,
       paramHost,
+      ]),
     ]);
 
     /**
@@ -627,33 +893,7 @@ export function createExprList(options: ExprListOptions): ExprList {
       class: "props__color",
       title: "this object's colour; choosing one paints the surface solid",
       value: toHex(options.colors.get(id) ?? defaultColorFor(id)),
-      onInput: () => {
-        options.colors.set(id, fromHex(colorSwatch.value));
-
-        /**
-         * Choosing a colour also switches the surface to the solid map.
-         *
-         * Otherwise the swatch appears broken: a surface is painted with its curvature by
-         * default, and that colour is drawn OVER the object's own, so picking one changed
-         * something completely hidden. Asking for a colour is a statement that you want to see
-         * that colour, and the map menu is right there to go back to K.
-         */
-        const select = views.get(id)?.colormapSelect;
-        if (select && select.value !== "solid") {
-          /**
-           * Driven through the menu rather than written to the overlay directly.
-           *
-           * The overlay controls hold their state in closure locals and write ALL of them on
-           * every commit, so setting the map behind the menu's back would leave that local stale
-           * and the next slider drag would quietly put the old map back — the same staleness that
-           * already cost the picked start point and the aimed shots.
-           */
-          select.value = "solid";
-          select.dispatchEvent(new Event("change"));
-          return;
-        }
-        options.onParameterChange();
-      },
+      onInput: () => applyColor(id, fromHex(colorSwatch.value)),
     }) as HTMLInputElement;
 
     /**
@@ -679,6 +919,175 @@ export function createExprList(options: ExprListOptions): ExprList {
       select.dispatchEvent(new Event("change"));
       curvatureChip.classList.toggle("chip--on", turningOn);
     });
+
+    /**
+     * What of THIS patch is drawn: its shaded face, its chart grid.
+     *
+     * Per patch rather than per scene, which is the whole point: hiding one tube's face is how
+     * you see the geodesic running inside it, or the far wall of a cobordism, while everything
+     * around it stays solid. Both off draws nothing at all, and the patch's curves stay.
+     */
+    const styleChip = (
+      key: "fill" | "grid",
+      label: string,
+      title: string,
+    ): HTMLButtonElement => {
+      const chip = el("button", {
+        class: "chip chip--on",
+        text: label,
+        title,
+      }) as HTMLButtonElement;
+      chip.addEventListener("click", (event: Event) => {
+        event.stopPropagation();
+        const overlay = options.overlays.get(id) ?? EMPTY_OVERLAY;
+        const next = !(overlay[key] ?? true);
+        options.overlays.set(id, { ...overlay, [key]: next });
+        chip.classList.toggle("chip--on", next);
+        // Nothing reparses: only what is drawn changed, so this takes the throttled path.
+        options.onParameterChange();
+      });
+      return chip;
+    };
+
+    /**
+     * Glyphs, not words — a filled square for the face, a ruled one for the grid.
+     *
+     * The same rule the overlay tools follow: the symbol IS the label, and what makes that
+     * legitimate rather than merely terse is that each carries its full description on hover. Two
+     * short words either side of a coloured swatch read as a sentence fragment; two squares that
+     * look like what they turn on read as a pair of switches, which is what they are.
+     */
+    const fillChip = styleChip(
+      "fill",
+      "\u25fc",
+      "the face \u2014 draw this patch's surface; off leaves its grid alone, drawn through",
+    );
+    const gridChip = styleChip(
+      "grid",
+      "\u25a6",
+      "the grid \u2014 draw the (u, v) grid, and the border of the domain, on this patch",
+    );
+
+    /**
+     * A curve on this patch, written the way one is written: **a relation in (u, v)**.
+     *
+     * `(u − a)² + (v − b)² = 1` is a curve on the surface, and it is a curve *nothing else can
+     * say* — a parametrized `t ↦ (u(t), v(t))` has to be solved for by hand, while a relation
+     * lets you state the condition and drag its constants around. The level set is traced by
+     * marching squares over the chart and pushed forward, so a relation with no closed form is no
+     * harder than a circle.
+     *
+     * All the button does is open a cell with `X:` already in it, in edit mode. Which chart a
+     * relation lives in is not something the formula can say — so the *row* says it, and the
+     * button's whole job is writing the part that names this patch and leaving the caret after
+     * it. Nothing is bound behind the scenes: the binding is the text, which means it is visible,
+     * editable, saved with the document and undone with it.
+     */
+    const addRelation = el("button", {
+      class: "chip",
+      text: "+ relation",
+      title: "a curve in this patch's chart, as a relation between u and v",
+      onClick: (event: Event) => {
+        event.stopPropagation();
+        const parsed = parseRow(row.source());
+        const name = parsed.row && "name" in parsed.row ? parsed.row.name : null;
+        if (name === null) return;
+        const opened = store.addRow(`${name}: `);
+        syncRows();
+        options.onEdit(false);
+        select(opened.id);
+        const view = views.get(opened.id);
+        if (!view) return;
+        view.enterEdit();
+        // After the prefix, not over it: the patch is settled and the relation is what is being
+        // written.
+        view.input.setSelectionRange(view.input.value.length, view.input.value.length);
+      },
+    }) as HTMLButtonElement;
+
+    /**
+     * The tangent plane at a point of this patch, `T_(u₀, v₀) X`.
+     *
+     * Opened at the **centre of the domain**, for the same reason the geodesic spray starts
+     * there: a control that needs a point picked before it shows anything is a control that shows
+     * nothing, and the centre needs no interaction and is reproducible from the document alone.
+     * Like the relation button, all this writes is text — the point is two numbers in the row, so
+     * it can be edited, given a parameter to slide along, saved and undone like anything else.
+     */
+    const addTangent = el("button", {
+      class: "chip",
+      text: "+ tangent",
+      title: "the tangent plane at a point of this patch's chart",
+      onClick: (event: Event) => {
+        event.stopPropagation();
+        const parsed = parseRow(row.source());
+        const name = parsed.row && "name" in parsed.row ? parsed.row.name : null;
+        if (name === null) return;
+        const ranges = options.domains.get(id);
+        const centre = (index: number, fallback: readonly [number, number]) => {
+          const range = ranges?.[index];
+          const middle = range
+            ? (range.min + range.max) / 2
+            : (fallback[0] + fallback[1]) / 2;
+          return Number(middle.toFixed(3));
+        };
+        const opened = store.addRow(
+          `T_(${centre(0, DEFAULT_DOMAIN["u"]!)}, ${centre(1, DEFAULT_DOMAIN["v"]!)}) ${name}`,
+        );
+        syncRows();
+        options.onEdit(false);
+        select(opened.id);
+        const view = views.get(opened.id);
+        if (!view) return;
+        view.enterEdit();
+        view.input.setSelectionRange(view.input.value.length, view.input.value.length);
+      },
+    }) as HTMLButtonElement;
+
+    /**
+     * A vector field along this patch, opened as its own **coordinate field** ∂X/∂v.
+     *
+     * A field has to be tangent to mean anything on a surface, and no generic default is: the
+     * only vectors that are tangent to an arbitrary patch are the ones built from its own
+     * derivatives. So the button differentiates the row's formula — symbolically, through the
+     * same CAS the geometry runs on — and writes the result as ambient components. `∂X/∂v` is
+     * exactly the coordinate field do Carmo calls X_v, it is tangent by construction, and it is
+     * the field you want to see first on any patch: the v-curves it flows along are the chart's
+     * own grid lines.
+     *
+     * What is written is ordinary text with no closed-form dependence on the row it came from —
+     * edit either afterwards and they part company, which is the honest behaviour for something
+     * the user is meant to take over.
+     */
+    const addField = el("button", {
+      class: "chip",
+      text: "+ field",
+      title: "a vector field along this patch, written in the coordinates of R³",
+      onClick: (event: Event) => {
+        event.stopPropagation();
+        const parsed = parseRow(row.source()).row;
+        if (!parsed || parsed.kind !== "vectorFunction" || parsed.args.length !== 2) return;
+        const along = parsed.args[1] ?? "v";
+        const derivative = parsed.comps.map((comp) => toSource(simplify(diff(comp, along))));
+        /**
+         * A patch built on a user-defined function cannot be differentiated symbolically — the
+         * CAS answers NaN there, keeping the non-finite contract — so rather than opening a row
+         * that says NaN, the field falls back to a constant one. It is not tangent, and the
+         * scene will say so, which is a better starting point than a formula that draws nothing.
+         */
+        const usable = derivative.every((text) => !text.includes("NaN"));
+        const opened = store.addRow(
+          `${parsed.name}: VectorField(${usable ? derivative.join(", ") : "0, 0, 1"})`,
+        );
+        syncRows();
+        options.onEdit(false);
+        select(opened.id);
+        const view = views.get(opened.id);
+        if (!view) return;
+        view.enterEdit();
+        view.input.setSelectionRange(view.input.value.length, view.input.value.length);
+      },
+    }) as HTMLButtonElement;
 
     const detailsTitle = el("span", { class: "props__kind", text: "expression" });
 
@@ -707,7 +1116,30 @@ export function createExprList(options: ExprListOptions): ExprList {
     const details = el("div", { class: "props__body" }, [
       el("div", { class: "props__panel-body" }, [
         domainHost,
-        el("div", { class: "props__swatches" }, [colorSwatch, curvatureChip]),
+        /**
+         * The buttons sit to the RIGHT of the sliders, in two rows of their own.
+         *
+         * The domain is two wide tracks stacked; beside them there is exactly the room for two
+         * short rows, and putting them there costs no height at all — the block is shorter than
+         * the sliders it stands next to. Below them it added a third line to a panel that floats
+         * under the pointer, which is the one place height is expensive.
+         */
+        el("div", { class: "props__chips" }, [
+          el("div", { class: "props__swatches" }, [colorSwatch, curvatureChip]),
+          /**
+           * What of the patch is drawn, on the second row rather than the first.
+           *
+           * They answer a different question from the two above them: those are how this object
+           * looks, these are what there is to look at.
+           */
+          el("div", { class: "props__swatches props__tools" }, [
+            fillChip,
+            gridChip,
+            addRelation,
+            addTangent,
+            addField,
+          ]),
+        ]),
       ]),
       el("div", { class: "props__tray" }, [notes, chartHost, overlayHost, frameHost]),
     ]);
@@ -716,6 +1148,7 @@ export function createExprList(options: ExprListOptions): ExprList {
       id,
       root,
       input,
+      enterEdit,
       echo,
       badge,
       notes,
@@ -724,15 +1157,28 @@ export function createExprList(options: ExprListOptions): ExprList {
       valueHost,
       chartHost,
       overlayHost,
+      flowHost,
+      flowBuilt: false,
+      arrowChip: null,
       details,
       colorSwatch,
+      colorDot,
+      colorField,
+      gutter,
       curvatureChip,
+      fillChip,
+      gridChip,
+      addRelation,
+      addTangent,
+      addField,
       colormapSelect: null,
       detailsTitle,
       paramHost,
       overlayBuilt: false,
       paramNames: "\u0000",
       domainVars: "",
+      domainLimits: [],
+      domainThumbs: [],
       valueName: "",
     };
   }
@@ -751,7 +1197,6 @@ export function createExprList(options: ExprListOptions): ExprList {
    * but the control has to appear beside each play button, because that is where anyone looks
    * for it. One value, several views of it, kept in step here.
    */
-  const speedSelects = new Set<HTMLSelectElement>();
   const SPEEDS: readonly number[] = [0.25, 0.5, 1, 2, 4];
 
   /**
@@ -779,6 +1224,73 @@ export function createExprList(options: ExprListOptions): ExprList {
       onToggle(next);
     });
     return button;
+  };
+
+  /**
+   * The dot turns the object's drawing off, and what that MEANS depends on the object.
+   *
+   * A patch answers by taking its face off and keeping its grid — the outline is the more useful
+   * half of a surface, and it is what you want left behind while looking at whatever the face was
+   * covering. A field takes its arrows off, which is the same switch the → chip holds. Everything
+   * else — a curve, a point, a tangent plane — has nothing to keep, so it stops being drawn.
+   *
+   * Every one of these lands in the overlays record, which is keyed by row, snapshotted by undo
+   * and saved with the document, so "switched off" is part of the figure rather than a mood the
+   * session is in.
+   */
+  const toggleDrawn = (id: RowId) => {
+    const kind = store.resolution().items.get(id)?.kind;
+    const current = options.overlays.get(id) ?? EMPTY_OVERLAY;
+    if (kind === "parametricSurface" || kind === "graphSurface") {
+      options.overlays.set(id, { ...current, fill: !(current.fill ?? true) });
+    } else if (kind === "surfaceField") {
+      options.overlays.set(id, { ...current, arrows: !(current.arrows ?? true) });
+    } else {
+      options.overlays.set(id, { ...current, hidden: !(current.hidden ?? false) });
+    }
+    options.onEdit(false);
+  };
+
+  /**
+   * Give a row a colour, from whichever control asked.
+   *
+   * One function because there are two ways in — the pencil on the cell and the swatch in the
+   * card — and a value with two controls has to be written in one place or they drift. Both are
+   * pushed back afterwards, along with the dot that reports the result.
+   */
+  const applyColor = (id: RowId, color: Vec3) => {
+    options.colors.set(id, color);
+    const view = views.get(id);
+    if (view) {
+      const hex = toHex(color);
+      if (view.colorField.value !== hex) view.colorField.value = hex;
+      if (view.colorSwatch.value !== hex) view.colorSwatch.value = hex;
+      view.colorDot.style.background = hex;
+    }
+
+    /**
+     * Choosing a colour also switches the surface to the solid map.
+     *
+     * Otherwise the swatch appears broken: a surface is painted with its curvature by default,
+     * and that colour is drawn OVER the object's own, so picking one changed something completely
+     * hidden. Asking for a colour is a statement that you want to see that colour, and the map
+     * menu is right there to go back to K.
+     */
+    const select = view?.colormapSelect;
+    if (select && select.value !== "solid") {
+      /**
+       * Driven through the menu rather than written to the overlay directly.
+       *
+       * The overlay controls hold their state in closure locals and write ALL of them on every
+       * commit, so setting the map behind the menu's back would leave that local stale and the
+       * next slider drag would quietly put the old map back — the same staleness that already
+       * cost the picked start point and the aimed shots.
+       */
+      select.value = "solid";
+      select.dispatchEvent(new Event("change"));
+      return;
+    }
+    options.onParameterChange();
   };
 
   const transport = (key: string): HTMLElement => {
@@ -810,19 +1322,28 @@ export function createExprList(options: ExprListOptions): ExprList {
       title: "animation speed",
     }) as HTMLSelectElement;
     for (const value of SPEEDS) {
-      speed.append(
-        el("option", {
-          value: String(value),
-          text: `${value}\u00d7`,
-          selected: value === options.animator.speed(),
-        }),
-      );
+      speed.append(el("option", { value: String(value), text: `${value}\u00d7` }));
     }
+    /**
+     * The value is set as a **property**, after the options exist.
+     *
+     * `selected` through `setAttribute` sets an option's *default*, which is not the same thing
+     * and is not honoured everywhere — the same trap as a textarea's `value`, which `dom.ts`
+     * special-cases for exactly this reason. Assigning the select's value afterwards is the one
+     * form that means "this is the current choice" in every environment.
+     */
+    speed.value = String(options.animator.speed(key));
+    /**
+     * Each transport sets its own rate.
+     *
+     * They were kept in step first, on the reasoning that two things playing together are being
+     * compared. Usually they are not: a document has several sliders and several flows, about
+     * different questions, and one dial made every choice a compromise between unrelated
+     * animations.
+     */
     speed.addEventListener("change", () => {
-      options.animator.setSpeed(Number(speed.value));
-      for (const other of speedSelects) other.value = speed.value;
+      options.animator.setSpeed(key, Number(speed.value));
     });
-    speedSelects.add(speed);
 
     return el("div", { class: "transport" }, [speed, rewind, play]);
   };
@@ -834,12 +1355,45 @@ export function createExprList(options: ExprListOptions): ExprList {
    * that declares them, and showing a second one for the same name would be two controls
    * fighting over one value.
    */
+  /**
+   * Where a new parameter's track should run, when the row using it says which chart it is in.
+   *
+   * `X: (u − a)² + (v − b)² = r²` puts `a` and `b` in X's chart, so ±5 is the wrong track twice
+   * over: it hides most of a domain that runs to 2π and wastes most of one that runs to 1. The
+   * reach past each end is a third of the smaller side — the size of a curve that fits the patch
+   * — which is about where the last of such a curve leaves the chart and there is nothing more to
+   * see. The first name gets the u range and the second the v range: right for a circle, a guess
+   * for anything else, and a cheap guess now that both ends of a track can be typed.
+   */
+  const seededSpec = (name: string): SliderSpec | null => {
+    for (const item of store.resolution().items.values()) {
+      if (!item.host || !item.params.includes(name)) continue;
+      const patch = [...store.resolution().items.values()].find(
+        (candidate) => candidate.name === item.host,
+      );
+      const ranges = patch ? options.domains.get(patch.rowId) : undefined;
+      const u = ranges?.[0];
+      const v = ranges?.[1];
+      if (!u || !v) return null;
+      const range = item.params.indexOf(name) % 2 === 0 ? u : v;
+      const reach = Math.min(Math.abs(u.max - u.min), Math.abs(v.max - v.min)) / 3 || 1;
+      const lo = Math.min(range.min, range.max) - reach;
+      const hi = Math.max(range.min, range.max) + reach;
+      return { value: (range.min + range.max) / 2, min: lo, max: hi, step: (hi - lo) / 200 };
+    }
+    return null;
+  };
+
   const syncSliders = (names: readonly string[]) => {
     for (const name of names) {
       if (!options.sliders.has(name)) {
         // A fresh parameter starts at 1 over a symmetric range — usable for a radius, a
         // pitch or a coefficient without asking the user to specify bounds first.
-        options.sliders.set(name, { value: 1, min: -5, max: 5, step: 0.01 });
+        options.sliders.set(
+          name,
+          seededSpec(name) ?? { value: 1, min: -5, max: 5, step: 0.01 },
+        );
+        store.setParameter(name, options.sliders.get(name)!.value);
       }
     }
     for (const name of [...options.sliders.keys()]) {
@@ -873,39 +1427,14 @@ export function createExprList(options: ExprListOptions): ExprList {
     // input being dragged.
     if (signature === view.paramNames) return;
     view.paramNames = signature;
-    replace(view.paramHost, names.map((name) => sliderRow(name, options.sliders.get(name)!)));
+    // This cell's old controls are about to be thrown away; nothing should keep pushing at them.
+    for (const group of paramControls.values()) group.delete(view.id);
+    replace(
+      view.paramHost,
+      names.map((name) => sliderRow(view.id, name, options.sliders.get(name)!)),
+    );
   };
 
-  interface MovingSliderOptions {
-    readonly min: number;
-    readonly max: number;
-    readonly step: number;
-    readonly value: number;
-    /** How the bubble renders the number. */
-    readonly format?: (value: number) => string;
-    readonly title?: string;
-    /** Continuous, while dragging. */
-    readonly onInput: (value: number) => void;
-  }
-
-  interface MovingSlider {
-    readonly root: HTMLElement;
-    readonly input: HTMLInputElement;
-    /** Push a value in from outside — the animator, or a reformat. */
-    set(value: number): void;
-  }
-
-  /**
-   * A slider whose value rides above the thumb, with no number box beside it.
-   *
-   * Two things bought at once. The readout used to sit in a fixed column and the exact-value box
-   * in another, so on a toolbar the TRACK — the only part you actually manipulate — got whatever
-   * was left, which was almost nothing. Putting the number on the thumb and dropping the box
-   * gives the track the full width.
-   *
-   * Exact entry survives as double-click: the bubble becomes a field, and a value outside the
-   * current range WIDENS it rather than being refused, which is what the bounds boxes were for.
-   */
   const movingSlider = (config: MovingSliderOptions): MovingSlider => {
     const format = config.format ?? ((value: number) => formatValue(value));
     let min = config.min;
@@ -948,50 +1477,18 @@ export function createExprList(options: ExprListOptions): ExprList {
     place(config.value);
 
     /**
-     * Dragging past the end grows the range.
+     * The track's ends are walls, and a drag stops at them.
      *
-     * A track has to cover some interval, and any interval it covers is a guess about what will
-     * be wanted. Rather than making that guess binding — a wall you hit and then have to go and
-     * type your way around — pushing against it moves it: while the thumb is pinned at an end and
-     * the pointer keeps travelling outward, the end travels with it.
-     *
-     * Growth is proportional to how far past the track the pointer has gone, measured as a
-     * fraction of the track's own width, so a small nudge extends a little and a firm push
-     * extends a lot. That makes the reach self-scaling: the further out you get, the wider the
-     * span becomes and the faster the same gesture covers ground.
+     * They used to move: pushing the thumb against an end and travelling further outward carried
+     * the end along, so the range grew under the pointer. It reads well in a sentence and badly
+     * in the hand — the same gesture does something different depending on where the thumb
+     * happened to already be, a drag that overshoots silently redefines what the whole track
+     * means, and the range you carefully set is undone by the next fling of the mouse. A range is
+     * now changed only when you say so: double-click the bubble and type, past an end if you like.
      */
-    let dragging = false;
-    const EPSILON = 1e-9;
-
     const followPointer = (event: PointerEvent) => {
       const box = input.getBoundingClientRect();
       const raw = event.clientX - box.left;
-
-      if (dragging && box.width > 0) {
-        const value = Number(input.value);
-        const span = max - min;
-        const overshoot = raw > box.width ? raw - box.width : raw < 0 ? raw : 0;
-        // Only when the thumb has actually run out of track: otherwise a fast drag that flings
-        // the pointer past the end would stretch a range the user was still inside.
-        const pinnedHigh = overshoot > 0 && value >= max - span * EPSILON;
-        const pinnedLow = overshoot < 0 && value <= min + span * EPSILON;
-
-        if (pinnedHigh || pinnedLow) {
-          const grow = Math.abs(overshoot / box.width) * span;
-          if (pinnedHigh) max += grow;
-          else min -= grow;
-          input.min = String(min);
-          input.max = String(max);
-          const next = pinnedHigh ? max : min;
-          input.value = String(next);
-          bubble.textContent = format(next);
-          pointerAt = Math.min(box.width, Math.max(0, raw));
-          place(next);
-          config.onInput(next);
-          return;
-        }
-      }
-
       // Clamped to the track: past its ends the value has stopped changing, so a label that kept
       // travelling would point at nothing.
       pointerAt = Math.min(box.width, Math.max(0, raw));
@@ -999,32 +1496,14 @@ export function createExprList(options: ExprListOptions): ExprList {
     };
 
     input.addEventListener("pointermove", followPointer);
-    input.addEventListener("pointerdown", (event: PointerEvent) => {
-      dragging = true;
-      /**
-       * Captured so the drag — and the stretching — survives the pointer leaving the track, which
-       * is precisely where this feature lives.
-       *
-       * Guarded because pointer capture is not universal: a DOM implementation without it should
-       * lose the capture, not the whole interaction.
-       */
-      if (typeof input.setPointerCapture === "function") {
-        input.setPointerCapture(event.pointerId);
-      }
-      followPointer(event);
-    });
-    input.addEventListener("pointerup", (event: PointerEvent) => {
-      dragging = false;
-      if (
-        typeof input.hasPointerCapture === "function" &&
-        input.hasPointerCapture(event.pointerId)
-      ) {
-        input.releasePointerCapture(event.pointerId);
-      }
-    });
-    input.addEventListener("pointercancel", () => {
-      dragging = false;
-    });
+    input.addEventListener("pointerdown", followPointer);
+    /**
+     * No pointer capture.
+     *
+     * It existed so that a drag leaving the track kept stretching the range, and the range does
+     * not stretch any more. The browser's own range input already tracks a drag past its edges
+     * for the VALUE, which is all that is left to track.
+     */
     input.addEventListener("pointerleave", () => {
       pointerAt = null;
       place(Number(input.value));
@@ -1083,9 +1562,122 @@ export function createExprList(options: ExprListOptions): ExprList {
         bubble.textContent = format(value);
         place(value);
       },
+      setRange(nextMin, nextMax, step) {
+        min = nextMin;
+        max = nextMax;
+        input.min = String(min);
+        input.max = String(max);
+        input.step = String(step);
+        // The browser clamps a range input's value into its new bounds silently; reading it back
+        // is what keeps the bubble on the thumb rather than beside it.
+        const value = Number(input.value);
+        bubble.textContent = format(value);
+        place(value);
+      },
     };
   };
-  function sliderRow(name: string, spec: SliderSpec): HTMLElement {
+  /** Short enough for a box at the end of a track: four figures, no trailing zeros. */
+  const trimNumber = (value: number): string =>
+    Number.isFinite(value) ? String(Number(value.toPrecision(4))) : "";
+
+  /**
+   * The two ends of a track, as fields.
+   *
+   * A drag moves the value and never the range — that is settled — so the range needs a place to
+   * be *said*, and the honest place is the ends themselves. Typing into the bubble already widens
+   * the track, but only far enough to hold the number typed; narrowing one, or setting a range
+   * before touching the thumb, had nowhere to happen.
+   *
+   * The value is carried into the new range rather than left outside it, and the step follows the
+   * width, so a range of 0…0.01 is not dragged in jumps of the whole track.
+   */
+  const trackEnds = (
+    name: string,
+    spec: SliderSpec,
+    slider: MovingSlider,
+    commit: (value: number) => void,
+  ): {
+    readonly min: HTMLInputElement;
+    readonly max: HTMLInputElement;
+    /** Put the spec's ends back in the boxes — for when something else changed them. */
+    show(): void;
+  } => {
+    const fields = {} as { min: HTMLInputElement; max: HTMLInputElement };
+    const show = () => {
+      for (const end of ["min", "max"] as const) {
+        const box = fields[end];
+        if (box && globalThis.document.activeElement !== box) box.value = trimNumber(spec[end]);
+      }
+    };
+
+    for (const which of ["min", "max"] as const) {
+      const field = el("input", {
+        type: "number",
+        class: "slider__limit",
+        step: "any",
+        value: trimNumber(spec[which]),
+        title: `${name} \u2014 ${which} of the track`,
+      }) as HTMLInputElement;
+      fields[which] = field;
+
+      const apply = () => {
+        // A number input sanitizes what it cannot read to the empty string, and `Number("")` is
+        // zero — so an emptied box would silently mean an end at the origin.
+        const text = field.value.trim();
+        const typed = Number(text);
+        const other = which === "min" ? spec.max : spec.min;
+        // An empty box, a word, or an end laid exactly on the other one: put back what holds.
+        if (text === "" || !Number.isFinite(typed) || typed === other) {
+          field.value = trimNumber(spec[which]);
+          return;
+        }
+        spec[which] = typed;
+        if (spec.min > spec.max) [spec.min, spec.max] = [spec.max, spec.min];
+        spec.step = (spec.max - spec.min) / 200;
+        spec.value = Math.min(spec.max, Math.max(spec.min, spec.value));
+        slider.setRange(spec.min, spec.max, spec.step);
+        slider.set(spec.value);
+        show();
+        commit(spec.value);
+      };
+      field.addEventListener("change", apply);
+      field.addEventListener("keydown", (event: KeyboardEvent) => {
+        if (event.key === "Enter") apply();
+      });
+    }
+
+    return { ...fields, show };
+  };
+
+  /**
+   * Every control on screen for one parameter, by the row whose cell it sits in.
+   *
+   * A parameter belongs to the DOCUMENT, not to a row: `k` in two surfaces is one number, and the
+   * two rows that use it each show a slider for it. Without this they drift — one card reads
+   * 5.65 and the other 8.06 for the same `k` — and since the scene draws the single stored value,
+   * at least one of them is lying about what is on screen.
+   */
+  const paramControls = new Map<
+    string,
+    Map<RowId, { slider: MovingSlider; ends: { show(): void } }>
+  >();
+
+  /** Push a parameter's value and range onto every OTHER control showing it. */
+  const broadcastParam = (name: string, from: RowId) => {
+    const spec = options.sliders.get(name);
+    const group = paramControls.get(name);
+    if (!spec || !group) return;
+    for (const [rowId, entry] of group) {
+      if (rowId === from) continue;
+      // Never over a control being held: that is the one place the user is the source of truth.
+      if (globalThis.document.activeElement === entry.slider.input) continue;
+      entry.slider.setRange(spec.min, spec.max, spec.step);
+      entry.slider.set(spec.value);
+      entry.ends.show();
+    }
+  };
+
+  function sliderRow(owner: RowId, name: string, spec: SliderSpec): HTMLElement {
     const slider = movingSlider({
       min: spec.min,
       max: spec.max,
@@ -1098,6 +1690,7 @@ export function createExprList(options: ExprListOptions): ExprList {
         spec.min = Math.min(spec.min, Number(slider.input.min));
         spec.max = Math.max(spec.max, Number(slider.input.max));
         store.setParameter(name, value);
+        broadcastParam(name, owner);
         // Parameters are compiled as slots, so this recompiles nothing.
         options.onParameterChange();
       },
@@ -1109,13 +1702,31 @@ export function createExprList(options: ExprListOptions): ExprList {
     options.animator.register(`param:${name}`, spec, (value) => {
       slider.set(value);
       store.setParameter(name, value);
+      broadcastParam(name, owner);
     });
+
+    const ends = trackEnds(name, spec, slider, (value) => {
+      store.setParameter(name, value);
+      broadcastParam(name, owner);
+      options.onParameterChange();
+    });
+
+    let group = paramControls.get(name);
+    if (!group) {
+      group = new Map();
+      paramControls.set(name, group);
+    }
+    // Keyed by row, so rebuilding one cell's sliders replaces its entry instead of stacking a
+    // second dead one behind it.
+    group.set(owner, { slider, ends });
 
     return el("div", { class: "slider" }, [
       el("span", { class: "slider__name" }, [
         tex(name.length === 1 ? name : `\\mathrm{${name}}`),
       ]),
+      ends.min,
       slider.root,
+      ends.max,
       transport(`param:${name}`),
     ]);
   }
@@ -1151,22 +1762,38 @@ export function createExprList(options: ExprListOptions): ExprList {
     }
     const stored = ranges;
 
+    /**
+     * ONE control per variable, with a thumb at each end.
+     *
+     * An interval is a single thing, and giving it two separate sliders made it look like two
+     * unrelated numbers as well as taking twice the room. Two ranges are stacked on a shared
+     * track: the inputs ignore the pointer and only their thumbs accept it, which is what lets
+     * both be grabbed even though one lies on top of the other.
+     *
+     * The track spans twice the interval's width either side of it — a domain bound has no
+     * natural range of its own, so some guess has to be made — and double-clicking a thumb types
+     * an exact value, past the end of the track if need be. What it no longer does is move that
+     * end by *dragging* against it: a drag that overshoots should not silently redefine what the
+     * whole track means.
+     */
+    const thumbs: MovingSlider[] = [];
+    const limits: HTMLInputElement[] = [];
     replace(
       view.domainHost,
       vars.map((name, index) => {
         const entry = stored[index]!;
 
-        /**
-         * Slider bounds, derived from the interval the row starts with.
-         *
-         * A domain bound has no natural range of its own — it could be anything — so the track
-         * spans twice the current width either side of it. Wide enough to explore, and
-         * double-clicking types a value past the ends when that is not enough.
-         */
         const span = Math.abs(entry.max - entry.min) || 1;
         const centre = (entry.min + entry.max) / 2;
-        const lo = centre - span * 2;
-        const hi = centre + span * 2;
+        /**
+         * The ends of the track, which are not the bounds the thumbs sit on.
+         *
+         * A domain bound has no natural range of its own, so some guess has to be made: twice the
+         * interval's width either side of it. From then on they are a **static** pair of numbers
+         * that only change when they are typed.
+         */
+        let lo = centre - span * 2;
+        let hi = centre + span * 2;
 
         /**
          * Committed through the PARAMETER path, not the edit path.
@@ -1178,32 +1805,149 @@ export function createExprList(options: ExprListOptions): ExprList {
          * release and then jumped.
          */
         /**
-         * ONE control per variable, with a thumb at each end.
+         * A bound stops where the surface starts overlapping itself.
          *
-         * An interval is a single thing, and giving it two separate sliders made it look like two
-         * unrelated numbers as well as taking twice the room. Two ranges are stacked on a shared
-         * track: the inputs ignore the pointer and only their thumbs accept it, which is what lets
-         * both be grabbed even though one lies on top of the other.
+         * Past one period the parametrization returns to material it has already drawn, so a
+         * wider domain tessellates the same surface twice — visibly, as z-fighting and doubled
+         * grid lines. The limit is measured per coordinate (`detectPeriod`) and read at the
+         * moment of the drag rather than captured, so editing the formula moves the wall with it.
          */
-        const thumb = (which: "min" | "max") =>
-          movingSlider({
+        const limit = (which: "min" | "max", value: number): number => {
+          const period = options.periods?.get(view.id)?.[index] ?? null;
+          if (period === null || !(period > 0)) return value;
+          return which === "max"
+            ? Math.min(value, entry.min + period)
+            : Math.max(value, entry.max - period);
+        };
+
+        const thumb = (which: "min" | "max") => {
+          const slider = movingSlider({
             min: lo,
             max: hi,
             step: (hi - lo) / 400,
             value: entry[which],
             title: `${name} ${which} \u2014 drag, or double-click to type an exact value`,
             onInput: (value) => {
-              entry[which] = value;
+              const limited = limit(which, value);
+              entry[which] = limited;
+              // Pushed back onto the thumb when it was stopped, so the control shows the bound
+              // the surface actually has rather than the one the pointer asked for.
+              if (limited !== value) slider.set(limited);
               options.onParameterChange();
             },
-          }).root;
+          });
+          thumbs.push(slider);
+          return slider;
+        };
 
+        const min = thumb("min");
+        const max = thumb("max");
+
+        /**
+         * The ends of the track, typed — the same control the parameter sliders carry, meaning
+         * the same thing in both places.
+         *
+         * Deliberately NOT the two bounds. A box that followed a thumb would change every time
+         * the thumb was dragged, which makes it a second readout of what the bubble already says
+         * and leaves nowhere to state the one thing a drag cannot: how far the track reaches. The
+         * bounds are the thumbs; these are the scale they are read against.
+         */
+        const boxes = {} as Record<"min" | "max", HTMLInputElement>;
+        const showEnds = () => {
+          for (const [which, value] of [["min", lo], ["max", hi]] as const) {
+            const field = boxes[which];
+            if (field && globalThis.document.activeElement !== field) {
+              field.value = trimNumber(value);
+            }
+          }
+        };
+
+        const box = (which: "min" | "max"): HTMLInputElement => {
+          const field = el("input", {
+            type: "number",
+            class: "slider__limit",
+            step: "any",
+            value: trimNumber(which === "min" ? lo : hi),
+            title: `${name} \u2014 ${which} of the track`,
+          }) as HTMLInputElement;
+          boxes[which] = field;
+          limits.push(field);
+
+          const apply = () => {
+            // A number input sanitizes what it cannot read to "", and `Number("")` is zero, so an
+            // emptied box would silently move an end to the origin.
+            const text = field.value.trim();
+            const typed = Number(text);
+            if (text === "" || !Number.isFinite(typed) || typed === (which === "min" ? hi : lo)) {
+              showEnds();
+              return;
+            }
+            if (which === "min") lo = typed;
+            else hi = typed;
+            if (lo > hi) [lo, hi] = [hi, lo];
+
+            // Both thumbs ride ONE track, so both take the new ends — and a bound left outside
+            // them would be a thumb off its own scale, so it comes along.
+            for (const [end, slider] of [["min", min], ["max", max]] as const) {
+              const held = Math.min(hi, Math.max(lo, entry[end]));
+              entry[end] = held;
+              slider.setRange(lo, hi, (hi - lo) / 400);
+              slider.set(held);
+            }
+            showEnds();
+            options.onParameterChange();
+          };
+          field.addEventListener("change", apply);
+          field.addEventListener("keydown", (event: KeyboardEvent) => {
+            if (event.key === "Enter") apply();
+          });
+          return field;
+        };
+
+        /**
+         * One box at each END of the row: the lower bound left, the upper bound right.
+         *
+         * Where a box sits is what says which bound it is — the same order as the thumbs it
+         * belongs to, read left to right like the interval itself. Put together at one end they
+         * become two numbers in a stack that have to be read to be told apart.
+         */
         return el("div", { class: "domain" }, [
           el("span", { class: "domain__var" }, [tex(name)]),
-          el("div", { class: "domain__range" }, [thumb("min"), thumb("max")]),
+          box("min"),
+          el("div", { class: "domain__range" }, [min.root, max.root]),
+          box("max"),
         ]);
       }),
     );
+    view.domainThumbs = thumbs;
+    view.domainLimits = limits;
+  };
+
+  /**
+   * Put the stored bounds back on the thumbs when something else changed them.
+   *
+   * Undo, an opened file, a template load and a placed piece all rewrite a domain without
+   * touching these controls. A value that no longer fits the track it was built for rebuilds the
+   * control instead of being clamped to it silently — and neither happens while a thumb is being
+   * held, which would fight the drag.
+   */
+  const syncDomainValues = (view: RowView) => {
+    const ranges = options.domains.get(view.id);
+    if (!ranges || view.domainThumbs.length !== ranges.length * 2) return;
+
+    for (const [index, entry] of ranges.entries()) {
+      for (const [offset, value] of [entry.min, entry.max].entries()) {
+        const slider = view.domainThumbs[index * 2 + offset];
+        if (!slider || globalThis.document.activeElement === slider.input) continue;
+        if (Number(slider.input.value) === value) continue;
+        if (value < Number(slider.input.min) || value > Number(slider.input.max)) {
+          // Off the end of its own track: rebuilding is what re-centres it on the new interval.
+          view.domainVars = "";
+          return;
+        }
+        slider.set(value);
+      }
+    }
   };
 
   /**
@@ -1263,6 +2007,166 @@ export function createExprList(options: ExprListOptions): ExprList {
    * otherwise. The centre is a defined, reproducible place to start from, and
    * moving to click-to-shoot later changes only where the start comes from.
    */
+  /**
+   * The transport a vector field gets, so its flow can be played.
+   *
+   * A field held still says where each point *would* go; played, it shows where the points
+   * actually go — the one-parameter group the field generates, which is what a field is for.
+   * The transport is the same one a slider sweep uses, keyed on the row, so one speed control
+   * governs every animation on screen and a flow can be watched beside a parameter sweeping.
+   *
+   * Built once and left alone: rebuilding it would re-register the ticker mid-flow, and the
+   * particles are not in the DOM but they are watching the same clock.
+   */
+  /**
+   * Kinds that put a colour on the screen, and therefore get a dot.
+   *
+   * A parameter, a definition or a bare number draws nothing: a swatch beside one would offer to
+   * paint something that does not exist. Stated as the set of things that DO draw, so a new kind
+   * has to say so rather than inheriting a control by accident.
+   */
+  const DRAWN_KINDS: ReadonlySet<string> = new Set([
+    "parametricSurface",
+    "graphSurface",
+    "planeCurve",
+    "spaceCurve",
+    "point",
+    "chartGraph",
+    "chartRelation",
+    "tangentPlane",
+    "surfaceField",
+  ]);
+
+  /**
+   * The dot shows what the scene drew; the pencil says what to draw next time.
+   *
+   * `drawn` is the colour actually used this build, so an object nobody has chosen a colour for
+   * still reports the palette entry it got. Once a colour IS chosen it wins, which is the same
+   * order the scene resolves them in.
+   */
+  const syncColor = (view: RowView, item: Item | null, drawn: Vec3 | undefined) => {
+    const shows = item !== null && DRAWN_KINDS.has(item.kind);
+    view.gutter.hidden = !shows;
+    if (!shows) return;
+    const color = options.colors.get(view.id) ?? drawn ?? defaultColorFor(view.id);
+    const hex = toHex(color);
+
+    /**
+     * Filled while the object is drawn, a hollow ring while it is not.
+     *
+     * The ring keeps the colour, because the row still owns it — the object is switched off, not
+     * decoloured, and it comes back in the same colour it left in.
+     */
+    const overlay = options.overlays.get(view.id);
+    const on =
+      item.kind === "parametricSurface" || item.kind === "graphSurface"
+        ? overlay?.fill ?? true
+        : item.kind === "surfaceField"
+          ? overlay?.arrows ?? true
+          : !(overlay?.hidden ?? false);
+    view.colorDot.style.borderColor = hex;
+    view.colorDot.style.background = on ? hex : "transparent";
+    view.colorDot.classList.toggle("gutter__dot--off", !on);
+    view.colorDot.title = on
+      ? item.kind === "parametricSurface" || item.kind === "graphSurface"
+        ? "hide this patch's face, keeping its grid"
+        : "stop drawing this"
+      : "draw this again";
+    // The input is only pushed while nobody is holding it open, the same rule every other
+    // control in this file follows.
+    if (view.colorField !== globalThis.document.activeElement) view.colorField.value = hex;
+  };
+
+  const syncFlowControl = (view: RowView, item: Item | null) => {
+    const isField = item?.kind === "surfaceField";
+    if (!isField) {
+      if (view.flowBuilt) {
+        replace(view.flowHost, []);
+        options.animator.unregisterTicker(`flow:${view.id}`);
+        view.flowBuilt = false;
+      }
+      return;
+    }
+    // Re-registered on every refresh so the callbacks close over nothing stale, which the
+    // animator supports precisely because play state survives it.
+    options.animator.registerTicker(`flow:${view.id}`, {
+      advance: (seconds) => options.onFlowTick?.(view.id, seconds),
+      rewind: () => options.onFlowRewind?.(view.id),
+    });
+    if (view.flowBuilt) {
+      // Built once, but its state is pushed back on every refresh: the dot writes the same flag,
+      // and a chip showing the opposite of what is drawn is worse than no chip.
+      view.arrowChip?.classList.toggle(
+        "chip--on",
+        options.overlays.get(view.id)?.arrows ?? true,
+      );
+      return;
+    }
+    view.flowBuilt = true;
+
+    /**
+     * The arrows switch, beside the transport that replaces them.
+     *
+     * A field is two pictures of one object: the arrows say where each point *would* go, the flow
+     * shows where the points do go. Playing already stands in for the arrows — they are hidden
+     * while the flow runs, because a current read through a hedge of arrows is neither — so this
+     * is for the other case: turning them off while the field is still, to look at the surface
+     * under them. The chip is the user's standing preference and playing overrides it for as long
+     * as it lasts, rather than editing it.
+     */
+    const arrowChip = el("button", {
+      class: "chip",
+      title: "the arrows \u2014 draw this field's vectors; the flow replaces them while it plays",
+      text: "\u2192",
+      onClick: (event: Event) => {
+        event.stopPropagation();
+        const current = options.overlays.get(view.id);
+        const wanted = !(current?.arrows ?? true);
+        options.overlays.set(view.id, { ...(current ?? EMPTY_OVERLAY), arrows: wanted });
+        arrowChip.classList.toggle("chip--on", wanted);
+        options.onEdit(false);
+      },
+    }) as HTMLButtonElement;
+    arrowChip.classList.toggle("chip--on", options.overlays.get(view.id)?.arrows ?? true);
+    view.arrowChip = arrowChip;
+
+    const control = transport(`flow:${view.id}`);
+    /**
+     * Any press in the transport repaints, because play and pause change what is drawn.
+     *
+     * The arrows are hidden while a flow runs and come back when it stops, and neither is a
+     * rebuild — the app leaves a group out of the frame. Listening on the container rather than
+     * on the play button keeps this true of rewind as well, which reseeds and wants the same
+     * repaint.
+     */
+    control.addEventListener("click", () => options.onFlowToggle?.(view.id));
+
+    replace(view.flowHost, [
+      el("div", { class: "flow" }, [
+        el("span", { class: "flow__label", text: "flow" }),
+        arrowChip,
+        control,
+      ]),
+    ]);
+  };
+
+  /**
+   * The parts of an overlay record that belong to **any** row, not just to a patch.
+   *
+   * `hidden` and `arrows` are answers to the dot and the arrow switch, which exist on curves and
+   * fields as much as on surfaces. Everything else in the record is a patch's business. Pulled
+   * out because two places rewrite the record wholesale — the controls below, from their own
+   * closure locals — and both have to carry these across or a refresh erases them. That is the
+   * same staleness `start` is read back from the map to avoid, and it is what made the arrow
+   * switch turn itself off again on the next rebuild.
+   */
+  const sharedOverlay = (id: RowId) => {
+    const current = options.overlays.get(id);
+    return { hidden: current?.hidden, arrows: current?.arrows };
+  };
+  const hasShared = (shared: { hidden?: boolean; arrows?: boolean }) =>
+    shared.hidden !== undefined || shared.arrows !== undefined;
+
   const syncOverlayControl = (view: RowView, item: Item | null) => {
     const isSurface = item?.kind === "parametricSurface" || item?.kind === "graphSurface";
     if (!isSurface) {
@@ -1270,7 +2174,11 @@ export function createExprList(options: ExprListOptions): ExprList {
         replace(view.overlayHost, []);
         view.overlayBuilt = false;
       }
-      options.overlays.delete(view.id);
+      // A row that is not a patch keeps no patch settings — and keeps the ones that are not
+      // about patches at all.
+      const shared = sharedOverlay(view.id);
+      if (hasShared(shared)) options.overlays.set(view.id, { ...EMPTY_OVERLAY, ...shared });
+      else options.overlays.delete(view.id);
       return;
     }
     if (view.overlayBuilt) return;
@@ -1289,16 +2197,22 @@ export function createExprList(options: ExprListOptions): ExprList {
     let colormap: ColormapName = state.colormap ?? "curvature";
 
     const commit = () => {
+      const drawn = options.overlays.get(view.id);
       if (
         geodesics === 0 &&
         !curvatureLines &&
         !gaussMap &&
         !aiming &&
         colormap === "curvature" &&
-        shotCount() === 0
+        shotCount() === 0 &&
+        (drawn?.fill ?? true) &&
+        (drawn?.grid ?? true)
       ) {
-        // Nothing is drawn, so there is no start point to remember either.
-        options.overlays.delete(view.id);
+        // Nothing is drawn, so there is no start point to remember either — but the dot's own
+        // answer is not part of "nothing is drawn", and outlives it.
+        const shared = sharedOverlay(view.id);
+        if (hasShared(shared)) options.overlays.set(view.id, { ...EMPTY_OVERLAY, ...shared });
+        else options.overlays.delete(view.id);
       } else {
         /**
          * `start` is read back from the map rather than captured in a local.
@@ -1309,6 +2223,7 @@ export function createExprList(options: ExprListOptions): ExprList {
          */
         const start = options.overlays.get(view.id)?.start;
         options.overlays.set(view.id, {
+          ...sharedOverlay(view.id),
           geodesics,
           geodesicLength,
           curvatureLines,
@@ -1318,6 +2233,11 @@ export function createExprList(options: ExprListOptions): ExprList {
           start,
           // Owned by the canvas, like `start`, so read back rather than captured.
           shots: options.overlays.get(view.id)?.shots,
+          // Owned by the chips beside the colour, and read back for the same reason: building a
+          // fresh object from these controls' own state would switch a hidden patch back on the
+          // next time any slider here moved.
+          fill: options.overlays.get(view.id)?.fill,
+          grid: options.overlays.get(view.id)?.grid,
         });
       }
       /**
@@ -1638,10 +2558,22 @@ export function createExprList(options: ExprListOptions): ExprList {
       },
     );
 
+    // Retyping an end also rewrites the row, since the value may have been carried in with it —
+    // the same reconciliation a released drag does.
+    const ends = trackEnds(name, spec, slider, (value) => {
+      const row = store.rows().find((candidate) => candidate.id === view.id);
+      if (row) row.source.set(`${name} = ${format(value)}`);
+      store.setParameter(name, value);
+      refreshEcho(views.get(view.id));
+      options.onEdit(false);
+    });
+
     replace(view.valueHost, [
       el("div", { class: "slider" }, [
         el("span", { class: "slider__name" }, [tex(name.length === 1 ? name : `\\mathrm{${name}}`)]),
+        ends.min,
         slider.root,
+        ends.max,
         transport(`row:${view.id}`),
       ]),
     ]);
@@ -1662,7 +2594,28 @@ export function createExprList(options: ExprListOptions): ExprList {
     // parseRow, not parse: a declaration like `X(u,v) = (…)` is not a bare expression, and
     // testing it with the wrong parser would leave every surface cell stuck in edit mode.
     const typeset = source.trim() !== "" && parseRow(source).row !== null;
+    const editing = view.root.classList.contains("row--editing");
     view.root.classList.toggle("row--editing", !typeset);
+    // Just revealed: the field could not be measured while it was hidden, so measure it now.
+    if (!typeset && !editing) autoSize(view.input);
+  };
+
+  /**
+   * Put the model's text back in the field when something other than typing changed it.
+   *
+   * The field is the source of truth while it is being typed in, and the model is the source of
+   * truth otherwise — undo, and anything else that rewrites a row, changes the signal and the
+   * field has to follow or the cell would show text the document no longer holds. Never while it
+   * is focused: that would fight the caret, which is the mistake this file keeps being written
+   * around.
+   */
+  const syncText = (view: RowView | undefined) => {
+    if (!view) return;
+    if (globalThis.document.activeElement === view.input) return;
+    const source = store.rows().find((row) => row.id === view.id)?.source() ?? "";
+    if (view.input.value === source) return;
+    view.input.value = source;
+    autoSize(view.input);
   };
 
   const refreshEcho = (view: RowView | undefined) => {
@@ -1744,9 +2697,20 @@ export function createExprList(options: ExprListOptions): ExprList {
     for (const [id, view] of views) renderNotes(view, reportById.get(id));
   };
 
-  const refresh = (reports: readonly RowReport[]) => {
+  const refresh = (reports: readonly RowReport[], drawn?: ReadonlyMap<RowId, Vec3>) => {
     syncRows();
     const resolution = store.resolution();
+    /**
+     * Before the per-row loop, not after it.
+     *
+     * A row's sliders are built from the names that already have specs, so creating the specs
+     * afterwards meant a brand-new parameter got no control until the NEXT refresh — and on the
+     * parameter path there is no next refresh, so a formula that introduced a name appeared to
+     * have no slider at all until something else was edited.
+     */
+    syncSliders(
+      resolution.freeParameters.filter((name) => !resolution.declaredParameters.has(name)),
+    );
     const reportById = new Map(reports.map((report) => [report.rowId, report]));
 
     for (const [id, view] of views) {
@@ -1769,25 +2733,36 @@ export function createExprList(options: ExprListOptions): ExprList {
         (item && NOT_YET_DRAWN.has(item.kind) ? " row__badge--pending" : "") +
         (label === "" ? " row__badge--empty" : "");
 
+      syncColor(view, item, drawn?.get(id));
       syncValueSlider(view, item);
       syncChartToggle(view, item);
+      syncFlowControl(view, item);
       syncOverlayControl(view, item);
       syncDomain(view, item);
+      syncDomainValues(view);
       syncFrameControl(view, item);
       syncRowParams(view, item);
       // Read back from the overlay rather than remembered, so the chip and the menu cannot drift.
+      const isPatch = item?.kind === "parametricSurface" || item?.kind === "graphSurface";
+      view.addRelation.hidden = !isPatch;
+      view.addTangent.hidden = !isPatch;
+      // Only a parametric patch: the seed is ∂X/∂v, read off a formula a graph patch does not
+      // have in that form.
+      view.addField.hidden = item?.kind !== "parametricSurface";
+      view.fillChip.hidden = !isPatch;
+      view.gridChip.hidden = !isPatch;
+      view.fillChip.classList.toggle("chip--on", options.overlays.get(id)?.fill ?? true);
+      view.gridChip.classList.toggle("chip--on", options.overlays.get(id)?.grid ?? true);
       view.curvatureChip.classList.toggle(
         "chip--on",
         (options.overlays.get(id)?.colormap ?? "curvature") !== "solid",
       );
+      syncText(view);
       syncEditing(view);
 
       renderNotes(view, reportById.get(id));
     }
 
-    syncSliders(
-      resolution.freeParameters.filter((name) => !resolution.declaredParameters.has(name)),
-    );
   };
 
   /**
@@ -1907,10 +2882,18 @@ export function fromHex(hex: string): Vec3 {
  * Height is reset to `auto` first: `scrollHeight` reports the content height only when the box is
  * not already constraining it, so measuring without the reset makes a cell that can grow but
  * never shrink.
+ *
+ * A **hidden** field reports `scrollHeight` 0, and writing that back pins the cell at zero height
+ * — which survives being shown again, because an inline height beats anything the stylesheet
+ * says. That is the collapsed cell: a row shows its typeset form (input hidden), something
+ * measures it, and the next time the row has no typeset form to show, the field it falls back to
+ * is a sliver. Measuring a box that is not laid out answers nothing, so nothing is recorded.
  */
 function autoSize(field: HTMLTextAreaElement): void {
   field.style.height = "auto";
-  field.style.height = `${field.scrollHeight}px`;
+  const height = field.scrollHeight;
+  if (height > 0) field.style.height = `${height}px`;
+  else field.style.removeProperty("height");
 }
 
 /**
@@ -1965,7 +2948,10 @@ const COMPONENT_NAMES = ["x", "y", "z"];
  */
 export function formatSurfaceSource(source: string): string | null {
   if (source.trim() === "") return null;
-  const { row } = parseRow(source);
+  const { row, host } = parseRow(source);
+  // Re-emitting the row would drop the `X:` it is stated in, and a prefix silently deleted by
+  // opening a cell is worse than a surface left on one line.
+  if (host !== undefined) return null;
   if (!row || row.kind !== "vectorFunction") return null;
   if (row.args.length !== 2 || row.comps.length !== COMPONENT_NAMES.length) return null;
 
@@ -1983,13 +2969,33 @@ function diagnosticNode(diagnostic: Diagnostic): HTMLElement {
 }
 
 /**
- * Typeset whatever the row currently says.
+ * Typeset whatever the row currently says, including which chart it says it is in.
  *
  * A declaration is echoed as `name(args) = body` so the user can see their own left-hand
  * side; a bare expression is echoed directly. An unparseable row shows a dash rather than
  * clearing, so the panel does not flicker mid-word.
+ *
+ * The `X:` prefix is echoed too. It is not decoration — it is the row's statement of which
+ * patch's u and v these are, and a typeset view that dropped it would show two rows on two
+ * different surfaces as the same formula.
  */
 function echoFor(
+  source: string,
+  liveValue: number | null = null,
+  values: ReadonlyMap<string, number> = new Map(),
+): HTMLElement {
+  const { host, body } = splitHost(source);
+  if (host === null) return echoBody(source, liveValue, values);
+  return el("span", { class: "echo-chart" }, [
+    tex(`${nameTex(host)}\\colon`),
+    // A prefix with nothing after it yet is the state the "+ relation" button opens in.
+    body.trim() === ""
+      ? el("span", { class: "echo-empty", text: "\u2026" })
+      : echoBody(body, liveValue, values),
+  ]);
+}
+
+function echoBody(
   source: string,
   liveValue: number | null = null,
   values: ReadonlyMap<string, number> = new Map(),
@@ -2039,6 +3045,22 @@ function echoFor(
       }
       case "equation":
         return tex(`${toLatex(row.lhs)} = ${toLatex(row.rhs)}`);
+      case "surfaceField": {
+        // `V⃗ = (a, b, c)`, with the patch as a subscript when the row names it after the
+        // components rather than in front of them.
+        const variable = annotatedVariable(values);
+        const comps = row.comps.map((c) => toLatex(c, { variable })).join(",\\; ");
+        const head = row.surface === null ? "\\vec{V}" : `\\vec{V}_{${nameTex(row.surface)}}`;
+        return tex(`${head} = \\left(${comps}\\right)`);
+      }
+      case "tangentPlane": {
+        // `T_{(1,2)}X`, the way do Carmo writes `T_p(S)` with the point named downstairs. The
+        // coordinates carry their live values, so dragging the parameter that moves the plane
+        // shows where it has got to.
+        const variable = annotatedVariable(values);
+        const at = row.at.map((c) => toLatex(c, { variable })).join(",\\; ");
+        return tex(`T_{\\left(${at}\\right)}${row.surface === null ? "" : nameTex(row.surface)}`);
+      }
       case "tuple":
         return tex(`\\left(${row.comps.map((c) => toLatex(c)).join(",\\; ")}\\right)`);
       case "expr":

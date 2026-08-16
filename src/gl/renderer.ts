@@ -59,6 +59,17 @@ export interface Renderer {
    * at rather than at some arbitrary distance along the ray.
    */
   unproject(cssX: number, cssY: number, through: [number, number, number]): [number, number, number] | null;
+  /**
+   * Where a point in space lands on screen, in CSS pixels, or null if it is behind the camera.
+   *
+   * The inverse of `unproject`, and it exists for handles that are drawn as geometry but must be
+   * *hit* as UI — a port ring is a polyline, and the lines pass has no id buffer to pick from, so
+   * proximity on screen is what decides. `distance` orders candidates by depth so the nearest one
+   * wins when several overlap.
+   */
+  project(
+    point: readonly [number, number, number],
+  ): { x: number; y: number; distance: number } | null;
   start(): void;
   stop(): void;
   dispose(): void;
@@ -220,6 +231,34 @@ export function createRenderer(device: Device): Renderer {
         offset[0] * forward[0] + offset[1] * forward[1] + offset[2] * forward[2];
       const t = depth / denominator;
       return [eye[0] + dir[0] * t, eye[1] + dir[1] * t, eye[2] + dir[2] * t];
+    },
+
+    project(point) {
+      const width = Math.max(1, device.canvas.clientWidth);
+      const height = Math.max(1, device.canvas.clientHeight);
+      const { forward, right, up, fov } = camera.basis();
+      const eye = camera.eye();
+
+      const offset: [number, number, number] = [
+        point[0] - eye[0],
+        point[1] - eye[1],
+        point[2] - eye[2],
+      ];
+      const depth = offset[0] * forward[0] + offset[1] * forward[1] + offset[2] * forward[2];
+      // Behind the camera, or exactly in its plane: there is no screen position to report.
+      if (!(depth > 1e-6)) return null;
+
+      const tanHalf = Math.tan(fov / 2);
+      const aspect = width / height;
+      const x = offset[0] * right[0] + offset[1] * right[1] + offset[2] * right[2];
+      const y = offset[0] * up[0] + offset[1] * up[1] + offset[2] * up[2];
+      const ndcX = x / (depth * tanHalf * aspect);
+      const ndcY = y / (depth * tanHalf);
+      return {
+        x: ((ndcX + 1) / 2) * width,
+        y: ((1 - ndcY) / 2) * height,
+        distance: depth,
+      };
     },
 
     pickAvailable() {

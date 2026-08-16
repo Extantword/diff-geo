@@ -42,6 +42,15 @@ export interface TessellatedSurface {
    * plausible row count.
    */
   ids: Float32Array;
+  /**
+   * 1 float per vertex: what of this patch is drawn — its shaded face, its chart grid, or both.
+   *
+   * Per vertex for the same reason the base colour is: every surface is concatenated into one
+   * draw call, so a uniform could only say the same thing about all of them. Bit 1 is the fill
+   * and bit 2 is the grid, which makes "neither" a value rather than a special case, and keeps
+   * the whole thing in one float32 — exact for small integers.
+   */
+  style: Float32Array;
   /** 3 floats per vertex, from the diverging curvature colormap */
   colors: Float32Array;
   /**
@@ -75,6 +84,15 @@ export interface TessellateOptions {
   baseColor?: Vec3;
   /** which colour map paints K; "solid" paints the surface's own colour instead */
   colormap?: ColormapName;
+  /** draw the shaded face of this patch */
+  fill?: boolean;
+  /** draw the chart grid on it */
+  grid?: boolean;
+}
+
+/** Bit 1 fill, bit 2 grid. Both is 3, neither is 0 — a patch that is simply not drawn. */
+export function styleCode(fill: boolean, grid: boolean): number {
+  return (fill ? 1 : 0) + (grid ? 2 : 0);
 }
 
 export function tessellate(
@@ -88,6 +106,8 @@ export function tessellate(
     objectId = 0,
     baseColor = DEFAULT_BASE_COLOR,
     colormap = "curvature",
+    fill = true,
+    grid = true,
   } = options;
   const range = options.range ?? sampleCurvatureRange(surface, params);
 
@@ -103,6 +123,7 @@ export function tessellate(
   const normals = new Float32Array(vertexCount * 3);
   const chart = new Float32Array(vertexCount * 2);
   const ids = new Float32Array(vertexCount).fill(objectId);
+  const style = new Float32Array(vertexCount).fill(styleCode(fill, grid));
   const baseColors = new Float32Array(vertexCount * 3);
   for (let k = 0; k < vertexCount; k++) {
     baseColors[k * 3] = baseColor[0];
@@ -216,6 +237,7 @@ export function tessellate(
     normals,
     chart,
     ids,
+    style,
     colors,
     baseColors,
     curvature,

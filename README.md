@@ -10,13 +10,29 @@ Concepts and conventions follow Manfredo do Carmo, _Differential Geometry of Cur
 > LaTeX, shoot geodesics and lines of curvature by clicking the surface, and put the Gauss map
 > beside it. Next: implicit surfaces. See [the milestones](#milestones).
 
+## Documentation
+
+**→ [extantword.github.io/diff-geo/docs/](https://extantword.github.io/diff-geo/docs/)** — the
+reference: the formula language, what each kind of row draws, the interface, what the engine
+computes, and the catalog.
+
+The same document is served as plain text at
+[`/llms-full.txt`](https://extantword.github.io/diff-geo/llms-full.txt), indexed by
+[`/llms.txt`](https://extantword.github.io/diff-geo/llms.txt), for pointing an agent at. Its source
+is [`docs/index.md`](docs/index.md); the tables in it are generated from the code and every example
+on it is run through the real document layer by the test suite, so the page cannot quietly go out
+of date.
+
+`CLAUDE.md` is the other half: the architecture and the invariants, for changing the code rather
+than using it.
+
 ## Develop
 
 ```bash
 npm install
 npm run dev        # http://localhost:5173
 npm run build      # typecheck + production build to dist/
-npm test           # analytic ground-truth geometry tests (Vitest) — 530 of them
+npm test           # analytic ground-truth geometry tests (Vitest), and the docs suite
 npm run oracle     # cross-check the TS CAS against sympy (needs python + sympy)
 ```
 

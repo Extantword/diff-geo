@@ -30,6 +30,8 @@ export type DiagCode =
   // advisory
   | "W_AMBIGUOUS_IMPLICIT_MUL"
   | "W_DOMAIN"
+  /** a row that says which patch it belongs to twice, and disagrees with itself */
+  | "W_TWO_HOSTS"
   | "H_PARENTHESIZE"
   | "H_ADD_SLIDER";
 

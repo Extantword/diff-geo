@@ -1,0 +1,226 @@
+/*
+ * The reference page: typography only.
+ *
+ * The app's stylesheet is a layout engine for a three-panel WebGL app — panels, a canvas, chips,
+ * sliders — and none of it applies to a page of prose, so it is not linked. The **palette** is
+ * shared though: `plugin.ts` lifts the `:root` block out of `src/style.css` and inlines it above
+ * this file, so the two cannot come to disagree about what `--accent` is.
+ *
+ * Everything is inlined into the page. One file, no requests, so `dist/docs/index.html` opened
+ * over `file://` renders exactly as it will when deployed — which is the whole authoring loop.
+ */
+
+* {
+  box-sizing: border-box;
+}
+
+body.docs {
+  margin: 0;
+  padding: 0 20px 96px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 16px;
+  line-height: 1.65;
+  color-scheme: light;
+}
+
+main {
+  /* A measure, not a width: prose past about 75 characters a line is measurably harder to read,
+     and the tables are allowed to overflow it rather than the paragraphs being stretched to it. */
+  max-width: 74ch;
+  margin: 0 auto;
+  padding-top: 40px;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+  margin: 2.2em 0 0.6em;
+}
+
+h1 {
+  margin-top: 0;
+  font-size: 2.1rem;
+}
+
+h2 {
+  font-size: 1.45rem;
+  padding-top: 0.5em;
+  border-top: 1px solid var(--panel-border);
+}
+
+h3 {
+  font-size: 1.12rem;
+}
+
+h4 {
+  font-size: 1rem;
+  color: var(--text-dim);
+}
+
+/* The heading is its own anchor: a link into the page lands on the line it names, and the
+   browser's own "copy link" gets something worth pasting. */
+a.anchor {
+  color: inherit;
+  text-decoration: none;
+}
+
+a.anchor:hover {
+  text-decoration: underline;
+  text-decoration-color: var(--panel-border);
+}
+
+p,
+ul,
+ol {
+  margin: 0 0 1em;
+}
+
+li {
+  margin-bottom: 0.35em;
+}
+
+a {
+  color: var(--accent);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+strong {
+  font-weight: 650;
+}
+
+code {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.88em;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 3px;
+  padding: 0.1em 0.32em;
+}
+
+/*
+ * The contents: a plain list, set small and quiet. It is a map, and a map that competes with the
+ * page for attention is a worse map.
+ */
+nav.toc {
+  margin: 0 0 2.4em;
+  padding: 14px 18px;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+}
+
+.toc__title {
+  margin: 0 0 6px;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
+nav.toc ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  columns: 2;
+  column-gap: 24px;
+  font-size: 0.92rem;
+}
+
+nav.toc li {
+  margin: 0 0 2px;
+  break-inside: avoid;
+}
+
+/*
+ * An example is a row of the app, so it is set like one: the field's own background and border,
+ * and the monospace the cells use.
+ */
+figure.example {
+  margin: 0 0 1.2em;
+}
+
+figure.example pre {
+  margin: 0;
+  padding: 12px 14px;
+  overflow-x: auto;
+  background: var(--field);
+  border: 1px solid var(--panel-border);
+  border-left: 3px solid var(--accent);
+  border-radius: 5px;
+}
+
+figure.example pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 0.86rem;
+  line-height: 1.55;
+}
+
+/*
+ * A deliberately wrong example is tinted the way a wrong row is, with the same left rule — so a
+ * mistake on this page looks like the mistake it describes.
+ */
+figure.example--dg-error pre {
+  background: var(--error-bg);
+  border-color: var(--error-bg);
+  border-left-color: var(--error-rule);
+}
+
+.example__note {
+  margin: 4px 0 0;
+  font-size: 0.8rem;
+  color: var(--error-fg);
+}
+
+blockquote {
+  margin: 0 0 1.2em;
+  padding: 2px 0 2px 14px;
+  border-left: 3px solid var(--panel-border);
+  color: var(--text-dim);
+}
+
+hr {
+  height: 0;
+  margin: 2.4em 0;
+  border: none;
+  border-top: 1px solid var(--panel-border);
+}
+
+/* Tables carry the generated material — the catalog, the function list — so they are the one
+   thing allowed to be wider than the measure, scrolling inside their own box. */
+table {
+  display: block;
+  width: 100%;
+  overflow-x: auto;
+  margin: 0 0 1.4em;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+th,
+td {
+  padding: 6px 12px 6px 0;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--panel-border);
+}
+
+th {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+td code {
+  white-space: pre;
+}

@@ -31,6 +31,24 @@ const DEFAULT_PERIOD_SECONDS = 4;
  */
 const MAX_FRAME_SECONDS = 0.05;
 
+/**
+ * Something that is played but is not a slider: a flow.
+ *
+ * A field's flow has no value to sweep and no range to ping-pong across — it has a *state* that
+ * advances, so what it needs from the animator is the clock and the transport, not the
+ * arithmetic. Two consequences follow, and both matter. A ticker **paints itself**: `step` reports
+ * only whether a slider moved, so the tick callback — which rebuilds the scene — is not run sixty
+ * times a second for an animation that touches no formula. And the shared speed multiplier applies
+ * to it, so turning the tempo down slows a sweep and a flow together, which is what makes them
+ * legible side by side.
+ */
+export interface Ticker {
+  /** advance by `seconds` of animation time */
+  advance(seconds: number): void;
+  /** start again from the beginning; for a flow, reseed the particles */
+  rewind?(): void;
+}
+
 interface Entry {
   readonly spec: SliderSpec;
   /** push a new value into the DOM controls for this slider */
@@ -54,6 +72,12 @@ export interface Animator {
     commit?: (value: number) => void,
   ): void;
   unregister(key: string): void;
+  /**
+   * Register something that advances rather than sweeps. Play state survives re-registration,
+   * exactly as a slider's does, so rebuilding a row's DOM mid-flow does not stop it.
+   */
+  registerTicker(key: string, ticker: Ticker): void;
+  unregisterTicker(key: string): void;
   play(key: string): void;
   pause(key: string): void;
   toggle(key: string): void;
@@ -61,15 +85,27 @@ export interface Animator {
   rewind(key: string): void;
   playing(key: string): boolean;
   /**
-   * How fast a sweep runs, as a multiple of one traversal every four seconds.
+   * How fast one thing runs, as a multiple of its own default rate — a traversal every four
+   * seconds for a slider, a crossing of its patch for a flow.
    *
-   * Global rather than per slider: when two are playing at once the interesting thing is their
-   * relative rates, and a single control changes the tempo of the whole animation without
-   * disturbing that. Values below 1 slow it down, above 1 speed it up.
+   * **Per key.** It was one number for the whole animation first, on the reasoning that when two
+   * things play together the interesting quantity is their relative rates. That is true of two
+   * things being compared and false of everything else: a document has several sliders and
+   * several flows, only some of them playing, and they are usually about different questions —
+   * a radius creeping while a flow runs at speed. One dial for all of them makes every choice a
+   * compromise between unrelated animations. Values below 1 slow it down, above 1 speed it up.
+   *
+   * Kept apart from the entries, so a slider whose DOM is rebuilt — or a parameter that goes away
+   * and comes back — resumes at the rate it was set to, exactly as its play state does.
    */
-  setSpeed(multiplier: number): void;
-  speed(): number;
-  /** Advance every playing slider. Exposed for tests; the loop calls it with real deltas. */
+  setSpeed(key: string, multiplier: number): void;
+  speed(key: string): number;
+  /**
+   * Advance every playing slider and ticker.
+   *
+   * Returns whether a **slider** moved, which is what decides a rebuild: a ticker paints itself,
+   * and rebuilding the scene for one would cost a hundred times what the animation does.
+   */
   step(seconds: number): boolean;
   /** Called once per frame after values advance, to trigger a redraw. */
   setOnTick(callback: (() => void) | null): void;
@@ -95,13 +131,17 @@ export function createAnimator(): Animator {
       : Date.now();
 
   const entries = new Map<string, Entry>();
+  const tickers = new Map<string, { ticker: Ticker; playing: boolean }>();
+  /** Per key, and outliving the entry it belongs to. */
+  const speeds = new Map<string, number>();
+  const speedOf = (key: string) => speeds.get(key) ?? 1;
   let frame = 0;
   let previous = 0;
   let onTick: (() => void) | null = null;
-  let speed = 1;
 
   const anyPlaying = () => {
     for (const entry of entries.values()) if (entry.playing) return true;
+    for (const entry of tickers.values()) if (entry.playing) return true;
     return false;
   };
 
@@ -111,8 +151,14 @@ export function createAnimator(): Animator {
     // was hidden.
     const dt = Math.min(Math.max(seconds, 0), MAX_FRAME_SECONDS);
 
+    // Tickers first, and their result deliberately not folded into `moved`: they draw their own
+    // frame, and reporting them as movement would drag the whole scene rebuild along behind them.
+    for (const [key, entry] of tickers) {
+      if (entry.playing) entry.ticker.advance(dt * speedOf(key));
+    }
+
     let moved = false;
-    for (const entry of entries.values()) {
+    for (const [key, entry] of entries) {
       if (!entry.playing) continue;
       const { min, max } = entry.spec;
       const span = max - min;
@@ -120,7 +166,8 @@ export function createAnimator(): Animator {
       if (!(span > 0)) continue;
 
       let next =
-        entry.spec.value + entry.direction * (span / DEFAULT_PERIOD_SECONDS) * speed * dt;
+        entry.spec.value +
+        entry.direction * (span / DEFAULT_PERIOD_SECONDS) * speedOf(key) * dt;
 
       /**
        * Reflect the overshoot rather than clamping to the end.
@@ -177,7 +224,23 @@ export function createAnimator(): Animator {
       entries.delete(key);
     },
 
+    registerTicker(key, ticker) {
+      const existing = tickers.get(key);
+      tickers.set(key, { ticker, playing: existing?.playing ?? false });
+      ensureRunning();
+    },
+
+    unregisterTicker(key) {
+      tickers.delete(key);
+    },
+
     play(key) {
+      const ticking = tickers.get(key);
+      if (ticking) {
+        ticking.playing = true;
+        ensureRunning();
+        return;
+      }
       const entry = entries.get(key);
       if (!entry) return;
       entry.playing = true;
@@ -185,6 +248,11 @@ export function createAnimator(): Animator {
     },
 
     pause(key) {
+      const ticking = tickers.get(key);
+      if (ticking) {
+        ticking.playing = false;
+        return;
+      }
       const entry = entries.get(key);
       if (!entry) return;
       entry.playing = false;
@@ -194,13 +262,17 @@ export function createAnimator(): Animator {
     },
 
     toggle(key) {
-      const entry = entries.get(key);
-      if (!entry) return;
-      if (entry.playing) this.pause(key);
+      if (this.playing(key)) this.pause(key);
       else this.play(key);
     },
 
     rewind(key) {
+      const ticking = tickers.get(key);
+      if (ticking) {
+        ticking.ticker.rewind?.();
+        if (onTick) onTick();
+        return;
+      }
       const entry = entries.get(key);
       if (!entry) return;
       entry.direction = 1;
@@ -211,16 +283,16 @@ export function createAnimator(): Animator {
     },
 
     playing(key) {
-      return entries.get(key)?.playing ?? false;
+      return tickers.get(key)?.playing ?? entries.get(key)?.playing ?? false;
     },
 
-    setSpeed(multiplier) {
+    setSpeed(key, multiplier) {
       // Zero or negative would stall or reverse the sweep, which the direction flag already owns;
       // clamped rather than rejected so a slider bound to this cannot wedge the animation.
-      speed = Math.min(20, Math.max(0.05, multiplier));
+      speeds.set(key, Math.min(20, Math.max(0.05, multiplier)));
     },
 
-    speed: () => speed,
+    speed: (key) => speedOf(key),
 
     step,
 
@@ -234,6 +306,7 @@ export function createAnimator(): Animator {
         entry.playing = false;
         entry.commit?.(entry.spec.value);
       }
+      for (const entry of tickers.values()) entry.playing = false;
       if (frame !== 0 && unschedule) {
         unschedule(frame);
         frame = 0;

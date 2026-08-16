@@ -22,6 +22,24 @@ import type { LineGroup, Polyline } from "../gl/passes/lines.ts";
 const BORDER_COLOR: Vec3 = [0.38, 0.45, 0.54];
 /** Interior grid lines — lighter than the border, so the frame still reads as the frame. */
 const GRID_COLOR: Vec3 = [0.80, 0.84, 0.88];
+/**
+ * How many squares the chart is drawn in, both in the inset and on the surface.
+ *
+ * One number for both, so a square in the inset is a square on the object.
+ */
+export const GRID_DIVISIONS = 8;
+
+/**
+ * Ink for the grid drawn ON the surface, which cannot be the inset's ink.
+ *
+ * The inset is a pale drawing on white, so its grid is nearly white and its border a soft grey.
+ * The same colours on a shaded object disappear: a surface is drawn darker than the page, and a
+ * line lighter than the surface reads as a highlight rather than as a rule. These are darker than
+ * any albedo, for the same reason the shader's rim term darkens instead of glowing.
+ */
+const SURFACE_GRID_COLOR: Vec3 = [0.30, 0.36, 0.44];
+const SURFACE_BORDER_COLOR: Vec3 = [0.13, 0.18, 0.24];
+
 /** Distinct colours for chart curves, matched between the inset and the surface. */
 export const CHART_CURVE_PALETTE: readonly Vec3[] = [
   [0.85, 0.50, 0.0],
@@ -51,12 +69,30 @@ export interface ChartCurveRequest {
 
 export interface ChartCurveResult {
   readonly rowId: number;
-  /** the curve in (u, v), for the inset */
+  /** the part of the curve lying over the domain, for the inset */
   readonly chart: Polyline;
+  /**
+   * The rest of it: finite, but outside the rectangle the surface is defined over.
+   *
+   * Drawn in the inset and never on the surface, because **the chart is the whole (u, v) plane**
+   * and the domain is only the part of it this parametrization has been given. A line `v = cu + a`
+   * exists everywhere; where it leaves the rectangle it stops being a curve on the surface, and
+   * showing that — rather than cropping it at the border — is what makes the domain readable as a
+   * choice rather than as the edge of the world.
+   */
+  readonly chartBeyond: Polyline | null;
   /** its image on the surface, lifted clear of the mesh */
   readonly surface: Polyline | null;
   /** how much of the curve fell outside the domain */
   readonly outsideFraction: number;
+}
+
+/** Was this sample used, anywhere? */
+function anySet(mask: Uint8Array): boolean {
+  for (let i = 0; i < mask.length; i++) {
+    if (mask[i]) return true;
+  }
+  return false;
 }
 
 const SAMPLES = 500;
@@ -72,10 +108,11 @@ function segment(from: Vec3, to: Vec3, color: Vec3): Polyline {
 /**
  * The domain rectangle plus interior grid lines, as polylines in (u, v).
  *
- * Drawn in the inset only. On the surface these same lines are already visible as the
- * fragment-shader chart grid, so duplicating them in 3D would just be clutter.
+ * Drawn in the inset. The same lines appear on the surface itself as the *image* of this grid
+ * (`surfaceGridLines`), traced through the same number of divisions, so the two pictures line up
+ * square for square and the parametrization can be read across from one to the other.
  */
-export function chartGrid(bounds: ChartBounds, divisions = 8): LineGroup[] {
+export function chartGrid(bounds: ChartBounds, divisions = GRID_DIVISIONS): LineGroup[] {
   const [u0, u1] = bounds.u;
   const [v0, v1] = bounds.v;
 
@@ -105,6 +142,88 @@ export function chartGrid(bounds: ChartBounds, divisions = 8): LineGroup[] {
     { polylines: interior, style: { widthPx: 1.2, opacity: 0.9 } },
     { polylines: border, style: { widthPx: 2 } },
   ];
+}
+
+export interface SurfaceGridLines {
+  /** the interior lines of the grid */
+  readonly interior: Polyline[];
+  /** the four edges of the domain, drawn heavier */
+  readonly border: Polyline[];
+}
+
+/**
+ * The chart grid, drawn on the surface as **real curves read off the mesh**.
+ *
+ * It used to be a fragment-shader overlay: `fract(uv / spacing)` antialiased by `fwidth`. Three
+ * things were wrong with that, and all three are the same thing. A line was drawn wherever a
+ * fragment happened to be near a multiple of a fixed spacing, so it followed the *facets* — a
+ * circle of constant u came back as a visible polygon, and the border of the domain was drawn
+ * only when the domain happened to end on a multiple of the spacing, which is to say never. And
+ * with the face turned off the overlay had to threshold its own coverage and discard, which threw
+ * away the antialiasing it had just computed and left every line stepped.
+ *
+ * Tracing the mesh's own rows and columns fixes all of it at once: the lines are exactly as smooth
+ * as the surface is (they *are* the surface's samples), the border is just the first and last row,
+ * and the thick-line pass draws them antialiased with round caps like every other curve. The lift
+ * clears the sagitta, the same one a geodesic uses.
+ *
+ * The mesh is a grid of (resU + 1) × (resV + 1) vertices in u-major order, which is what makes a
+ * row a contiguous walk. A vertex with a zero normal is one the tessellator could not place — a
+ * chart pole, a non-finite sample — and it breaks the line rather than being drawn through, which
+ * is the non-finite contract as the line pass states it.
+ */
+export function surfaceGridLines(
+  mesh: {
+    positions: Float32Array;
+    normals: Float32Array;
+  },
+  resU: number,
+  resV: number,
+  lift: number,
+  divisions = GRID_DIVISIONS,
+): SurfaceGridLines {
+  const nV = resV + 1;
+  const interior: Polyline[] = [];
+  const border: Polyline[] = [];
+
+  const trace = (fixed: number, isoU: boolean, color: Vec3): Polyline | null => {
+    const count = (isoU ? resV : resU) + 1;
+    const points = new Float32Array(count * 3);
+    const valid = new Uint8Array(count);
+    let usable = 0;
+
+    for (let step = 0; step < count; step++) {
+      const k = isoU ? fixed * nV + step : step * nV + fixed;
+      const nx = mesh.normals[k * 3] ?? 0;
+      const ny = mesh.normals[k * 3 + 1] ?? 0;
+      const nz = mesh.normals[k * 3 + 2] ?? 0;
+      // A zero normal is the tessellator's mark for a vertex with no tangent plane. Its position
+      // may still be finite, but nothing can be lifted off a surface that has no normal there.
+      if (nx * nx + ny * ny + nz * nz < 1e-12) continue;
+      points[step * 3] = (mesh.positions[k * 3] ?? 0) + nx * lift;
+      points[step * 3 + 1] = (mesh.positions[k * 3 + 1] ?? 0) + ny * lift;
+      points[step * 3 + 2] = (mesh.positions[k * 3 + 2] ?? 0) + nz * lift;
+      valid[step] = 1;
+      usable++;
+    }
+
+    return usable >= 2 ? { points, count, valid, color } : null;
+  };
+
+  for (const [isoU, resolution] of [
+    [true, resU],
+    [false, resV],
+  ] as const) {
+    for (let i = 0; i <= divisions; i++) {
+      const index = Math.round((i * resolution) / divisions);
+      const edge = i === 0 || i === divisions;
+      const line = trace(index, isoU, edge ? SURFACE_BORDER_COLOR : SURFACE_GRID_COLOR);
+      if (!line) continue;
+      (edge ? border : interior).push(line);
+    }
+  }
+
+  return { interior, border };
 }
 
 /**
@@ -138,6 +257,7 @@ export function pushForward(
   const chartPoints = new Float64Array(count * 3);
   const surfacePoints = new Float64Array(count * 3);
   const chartValid = new Uint8Array(count);
+  const beyondValid = new Uint8Array(count);
   const surfaceValid = new Uint8Array(count);
   const arcLength = new Float64Array(count);
 
@@ -159,7 +279,7 @@ export function pushForward(
 
     chartPoints[i * 3] = u;
     chartPoints[i * 3 + 1] = v;
-    chartValid[i] = Number.isFinite(u) && Number.isFinite(v) ? 1 : 0;
+    const finite = Number.isFinite(u) && Number.isFinite(v);
 
     if (i > 0) {
       const du = u - chartPoints[(i - 1) * 3]!;
@@ -168,15 +288,19 @@ export function pushForward(
       arcLength[i] = arcLength[i - 1]! + (Number.isFinite(step) ? step : 0);
     }
 
-    if (!surface || !chartValid[i]) continue;
+    if (!finite) continue;
 
     // Periodic directions wrap rather than leaving the chart, so they are always in range.
-    const insideU = surface.periodicU || (u >= uLo && u <= uHi);
-    const insideV = surface.periodicV || (v >= vLo && v <= vHi);
-    if (!insideU || !insideV) {
+    const insideU = !surface || surface.periodicU || (u >= uLo && u <= uHi);
+    const insideV = !surface || surface.periodicV || (v >= vLo && v <= vHi);
+    const inside = insideU && insideV;
+    chartValid[i] = inside ? 1 : 0;
+    beyondValid[i] = inside ? 0 : 1;
+    if (!inside) {
       outside++;
       continue;
     }
+    if (!surface) continue;
 
     surface.at(u, v, surfaceParameters, point);
     if (point.degenerate) continue;
@@ -209,6 +333,9 @@ export function pushForward(
   return {
     rowId: request.rowId,
     chart,
+    chartBeyond: anySet(beyondValid)
+      ? { points: chartPoints, count, valid: beyondValid, arcLength, color }
+      : null,
     surface: anyOnSurface
       ? { points: surfacePoints, count, valid: surfaceValid, arcLength, color }
       : null,
@@ -279,6 +406,7 @@ export function sampleChartGraph(
   const chartPoints = new Float64Array(count * 3);
   const surfacePoints = new Float64Array(count * 3);
   const chartValid = new Uint8Array(count);
+  const beyondValid = new Uint8Array(count);
   const surfaceValid = new Uint8Array(count);
   const arcLength = new Float64Array(count);
 
@@ -303,6 +431,8 @@ export function sampleChartGraph(
     // which would draw a line along the boundary that is not part of the graph.
     const inside = finite && value >= outLo && value <= outHi;
     chartValid[i] = inside ? 1 : 0;
+    // Off the domain but perfectly well defined: drawn in the chart, never on the surface.
+    beyondValid[i] = finite && !inside ? 1 : 0;
     if (finite && !inside) outside++;
 
     if (i > 0) {
@@ -333,6 +463,9 @@ export function sampleChartGraph(
   return {
     rowId: request.rowId,
     chart: { points: chartPoints, count, valid: chartValid, arcLength, color },
+    chartBeyond: anySet(beyondValid)
+      ? { points: chartPoints, count, valid: beyondValid, arcLength, color }
+      : null,
     surface: anyOnSurface
       ? { points: surfacePoints, count, valid: surfaceValid, arcLength, color }
       : null,

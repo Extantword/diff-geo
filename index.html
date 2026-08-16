@@ -4,6 +4,10 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>DiffGeo — curves and surfaces in R³</title>
+    <meta
+      name="description"
+      content="An interactive differential geometry engine for curves and surfaces in R³, after do Carmo."
+    />
   </head>
   <body>
     <div class="app">
@@ -15,6 +19,9 @@
         <main class="stage">
           <canvas id="stage-canvas"></canvas>
           <div class="stage-hint">drag to rotate · scroll to zoom · shift-drag to pan</div>
+          <!-- Static markup, not built by the app: a link to the manual should survive with
+               script off, and be there for anything that reads the page rather than runs it. -->
+          <a class="docs-link" href="docs/" title="the reference: the formula language, the interface, and what is computed">docs</a>
         </main>
       </div>
     </div>

@@ -70,6 +70,9 @@ export function gaussImage(
     normals: mesh.normals,
     chart: mesh.chart,
     ids: mesh.ids,
+    // Shared like everything else: the image is drawn the way its source is, so hiding a
+    // surface's face hides its Gauss image's too.
+    style: mesh.style,
     colors: mesh.colors,
     baseColors: mesh.baseColors,
     curvature: mesh.curvature,

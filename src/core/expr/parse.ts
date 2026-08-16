@@ -516,6 +516,31 @@ export type ParsedRow =
     }
   /** `x² + y² + z² = 1` — becomes an implicit surface as `lhs − rhs` */
   | { readonly kind: "equation"; readonly lhs: Expr; readonly rhs: Expr }
+  /**
+   * `X: VectorField(a, b, c)` — a vector field along a patch, in ambient components.
+   *
+   * The components are functions of the patch's u and v; whether the vector they make is tangent
+   * to the surface is measured rather than assumed.
+   */
+  | {
+      readonly kind: "surfaceField";
+      readonly comps: readonly Expr[];
+      /** the patch it lives on, or null when the row names none */
+      readonly surface: string | null;
+    }
+  /** `T_(u₀, v₀) X` — the tangent plane to X at a point of X's chart */
+  | {
+      readonly kind: "tangentPlane";
+      /**
+       * Where, in **chart** coordinates, as expressions rather than numbers.
+       *
+       * `T_(a, 0) X` then slides the plane along the surface as `a` is dragged, for free: the
+       * coordinates go through the same parameter slots everything else does.
+       */
+      readonly at: readonly [Expr, Expr];
+      /** the patch it is tangent to, or null when the row names none */
+      readonly surface: string | null;
+    }
   /** a bare `(1, 2, 3)` */
   | { readonly kind: "tuple"; readonly comps: readonly Expr[] }
   /** a bare expression */
@@ -524,6 +549,185 @@ export type ParsedRow =
 export interface ParseRowResult {
   readonly row: ParsedRow | null;
   readonly diags: readonly Diagnostic[];
+  /**
+   * The chart this row is stated in, from a `X:` prefix.
+   *
+   * `X: (u − a)² + (v − b)² = 1` is a curve in **X's** chart. Nothing in a relation between u and
+   * v can say which patch's u and v those are, and with several patches on screen the first one is
+   * a bad guess — so the document says it, in the row itself, where it is visible, saved with the
+   * text and undone with it.
+   */
+  readonly host?: string;
+}
+
+/**
+ * `X: …` — the name of the chart a row is stated in, and the rest of the row.
+ *
+ * The body is **blanked** rather than removed: every diagnostic carries character offsets into
+ * the source the user typed, and shortening the string would slide every one of them left by the
+ * length of the prefix.
+ */
+export function splitHost(source: string): { host: string | null; body: string } {
+  const match = /^(\s*)([A-Za-z][A-Za-z0-9_]*)(\s*):/.exec(source);
+  if (!match) return { host: null, body: source };
+  return {
+    host: match[2]!,
+    body: " ".repeat(match[0].length) + source.slice(match[0].length),
+  };
+}
+
+/**
+ * ## Row forms: `T_(u₀, v₀) X` and `X: VectorField(a, b, c)`
+ *
+ * Both are peeled off the row **before lexing**, exactly like the `X:` prefix, and for a related
+ * reason: neither is something the expression language can say. A subscript binds into a name in
+ * the lexer (`k_1`, `a_{max}`), so `T_(1,2)` lexes as an empty subscript and reports a character
+ * error pointing at a parenthesis; `VectorField(a, b, c)` lexes as a product of nine single-letter
+ * variables against a tuple, which is a nested-tuple error. Both diagnostics are about tokens, for
+ * rows whose *form* is the thing being written. Recognizing the forms here means each can be
+ * answered in its own terms — and once a row has committed to one by opening its parenthesis, it
+ * is never handed back to the expression parser to fail somewhere unrelated.
+ *
+ * Each names its patch **after** the closing parenthesis, `T_(1,2) X`, or with the prefix,
+ * `X: T_(1,2)`. Both spellings mean one thing and both end up in `ParseRowResult.host`.
+ */
+
+/** One row form, split into its arguments and the patch it names. */
+export interface RowForm {
+  /**
+   * The arguments as source, **blanked** outside their own slice.
+   *
+   * Same trick as `splitHost`: every diagnostic carries offsets into the text the user typed, so
+   * the pieces keep their positions instead of being cut out and re-indexed from zero.
+   */
+  readonly args: readonly string[];
+  /** the patch named after the closing parenthesis, or null when the row names none */
+  readonly surface: string | null;
+  /** where that name sits, so it can be rewritten when a patch is copied */
+  readonly surfaceSpan: Span | null;
+}
+
+/** A row that begins a form but does not go on to say one. */
+export interface RowFormError {
+  readonly diag: Diagnostic;
+}
+
+const TANGENT_HEAD = /^\s*T_\s*\(/;
+const FIELD_HEAD = /^\s*vector\s*field\s*\(/i;
+/** What may follow the arguments: one patch name, `X` or `X_2`. */
+const PATCH_NAME = /^\s*([A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+|_\{[^}]*\})?)\s*$/;
+
+/** The same text with everything outside `[start, end)` replaced by spaces. */
+function blankOutside(source: string, start: number, end: number): string {
+  return " ".repeat(start) + source.slice(start, end);
+}
+
+/**
+ * Split `head( a, b, … ) Name`, or null when the row does not begin that head.
+ *
+ * `arity` is what the form needs; `shape` states the whole form in one line, for the message a
+ * row gets when it has the wrong number of arguments.
+ */
+function splitRowForm(
+  source: string,
+  head: RegExp,
+  arity: number,
+  shape: string,
+): RowForm | RowFormError | null {
+  const matched = head.exec(source);
+  if (!matched) return null;
+
+  const open = matched[0].length - 1;
+  let depth = 0;
+  let close = -1;
+  for (let i = open; i < source.length; i++) {
+    const ch = source[i];
+    if (ch === "(") depth++;
+    else if (ch === ")") {
+      depth--;
+      if (depth === 0) {
+        close = i;
+        break;
+      }
+    }
+  }
+  if (close < 0) {
+    return {
+      diag: error("E_UNCLOSED", `this row is missing its closing parenthesis — ${shape}`, [
+        open,
+        source.length,
+      ]),
+    };
+  }
+
+  // Commas at the outermost depth only, so that `T_(f(1, 2), 0) X` splits where it is written
+  // rather than inside the call.
+  const cuts: number[] = [open];
+  depth = 0;
+  for (let i = open + 1; i < close; i++) {
+    const ch = source[i];
+    if (ch === "(") depth++;
+    else if (ch === ")") depth--;
+    else if (ch === "," && depth === 0) cuts.push(i);
+  }
+  if (cuts.length !== arity) {
+    return {
+      diag: error("E_ARITY", `this takes ${arity} arguments — ${shape}`, [open, close + 1]),
+    };
+  }
+  const args = cuts.map((cut, index) =>
+    blankOutside(source, cut + 1, index + 1 < cuts.length ? cuts[index + 1]! : close),
+  );
+
+  const tail = source.slice(close + 1);
+  if (tail.trim() === "") return { args, surface: null, surfaceSpan: null };
+
+  const named = PATCH_NAME.exec(tail);
+  if (!named) {
+    return {
+      diag: error(
+        "E_UNEXPECTED",
+        `"${tail.trim()}" is not a patch name — ${shape}`,
+        [close + 1, source.length],
+      ),
+    };
+  }
+  const start = close + 1 + tail.indexOf(named[1]!);
+  return {
+    args,
+    surface: named[1]!,
+    surfaceSpan: [start, start + named[1]!.length],
+  };
+}
+
+/**
+ * `T_(u₀, v₀) X` — the tangent plane to a patch at a point of its chart.
+ *
+ * The point is given in the chart, which is the whole content of the notation: do Carmo's tangent
+ * plane is `dX_q(R²)` at `q = (u₀, v₀)`, and naming the point downstairs in the domain rather than
+ * upstairs in R³ is what makes it well defined without solving anything.
+ */
+export function splitTangent(source: string): RowForm | RowFormError | null {
+  return splitRowForm(source, TANGENT_HEAD, 2, "a tangent plane is written T_(u, v) X");
+}
+
+/**
+ * `X: VectorField(a, b, c)` — a vector field along a patch, in **ambient** components.
+ *
+ * The three components are the vector's coordinates in the R³ the surface lives in, as functions
+ * of that patch's u and v. Ambient rather than chart components because that is how a field is
+ * written when it is a restriction of something defined on all of space — a rotation, a gradient,
+ * a constant wind — which is most of the fields anyone wants to look at. Whether the result is
+ * *tangent* is then a question with a measurable answer rather than something the notation
+ * assumes, which is why the scene checks it and says so.
+ */
+export function splitVectorField(source: string): RowForm | RowFormError | null {
+  return splitRowForm(
+    source,
+    FIELD_HEAD,
+    3,
+    "a vector field has three components in R³: VectorField(a, b, c)",
+  );
 }
 
 /** Index of the first top-level `=`, or −1. */
@@ -545,6 +749,88 @@ function findTopLevelEquals(tokens: readonly Token[]): number {
  * a layer up; this only recovers the syntactic shape.
  */
 export function parseRow(source: string, options: ParseOptions = {}): ParseRowResult {
+  const { host, body } = splitHost(source);
+  const text = host === null ? source : body;
+
+  /**
+   * A row form names its patch **after** the arguments, so the trailing name is the host and the
+   * prefix is only a fallback. Both spellings mean the same thing — `T_(1,2) X` and `X: T_(1,2)`
+   * are one row — which is what keeps the copy machinery, the chart inset and the placement all
+   * reading a single field instead of two.
+   */
+  const form = parseTangentRow(text, options) ?? parseFieldRow(text, options);
+  if (form) {
+    const named =
+      form.row?.kind === "tangentPlane" || form.row?.kind === "surfaceField"
+        ? form.row.surface
+        : null;
+    const owner = named ?? host;
+    // Saying it twice and differently is the one case where the two spellings disagree, so it is
+    // reported rather than resolved quietly in favour of whichever the code happens to read.
+    const diags =
+      named !== null && host !== null && named !== host
+        ? [
+            ...form.diags,
+            warning(
+              "W_TWO_HOSTS",
+              `this row names two patches — it is drawn on ${named}, and the "${host}:" prefix ` +
+                `is ignored`,
+            ),
+          ]
+        : form.diags;
+    const result = { ...form, diags };
+    return owner === null ? result : { ...result, host: owner };
+  }
+
+  if (host === null) return parseRowBody(source, options);
+  return { ...parseRowBody(body, options), host };
+}
+
+/** Parse a form's arguments, keeping every diagnostic. Null if any of them failed. */
+function parseFormArguments(
+  form: RowForm,
+  options: ParseOptions,
+): { exprs: Expr[] | null; diags: Diagnostic[] } {
+  const diags: Diagnostic[] = [];
+  const exprs: Expr[] = [];
+  let failed = false;
+  for (const argument of form.args) {
+    const { expr, diags: argumentDiags } = parse(argument, options);
+    diags.push(...argumentDiags);
+    if (expr) exprs.push(expr);
+    else failed = true;
+  }
+  return { exprs: failed ? null : exprs, diags };
+}
+
+/** `T_(u₀, v₀) X`, or null when the row does not begin one. */
+function parseTangentRow(source: string, options: ParseOptions): ParseRowResult | null {
+  const head = splitTangent(source);
+  if (head === null) return null;
+  if ("diag" in head) return { row: null, diags: [head.diag] };
+
+  const { exprs, diags } = parseFormArguments(head, options);
+  if (!exprs) return { row: null, diags };
+
+  return {
+    row: { kind: "tangentPlane", at: [exprs[0]!, exprs[1]!], surface: head.surface },
+    diags,
+  };
+}
+
+/** `X: VectorField(a, b, c)`, or null when the row does not begin one. */
+function parseFieldRow(source: string, options: ParseOptions): ParseRowResult | null {
+  const head = splitVectorField(source);
+  if (head === null) return null;
+  if ("diag" in head) return { row: null, diags: [head.diag] };
+
+  const { exprs, diags } = parseFormArguments(head, options);
+  if (!exprs) return { row: null, diags };
+
+  return { row: { kind: "surfaceField", comps: exprs, surface: head.surface }, diags };
+}
+
+function parseRowBody(source: string, options: ParseOptions = {}): ParseRowResult {
   const c = options.ctx ?? defaultCtx;
   const { tokens, errors } = lex(source, { knownNames: options.knownNames });
   const lexDiags: Diagnostic[] = errors.map((e) =>

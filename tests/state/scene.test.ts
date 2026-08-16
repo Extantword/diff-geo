@@ -2,7 +2,12 @@ import { describe, expect, it } from "vitest";
 import { createDocument } from "../../src/state/graph.ts";
 import type { Vec3 } from "../../src/core/geom/types.ts";
 import { quatFromAxisAngle, type Quat } from "../../src/core/num/quat.ts";
-import { buildScene, type DomainRange, type FrameRequest } from "../../src/state/scene.ts";
+import {
+  buildScene,
+  type DomainRange,
+  type FrameRequest,
+  type SurfaceOverlay,
+} from "../../src/state/scene.ts";
 import { divergingColor } from "../../src/core/geom/curvatureColor.ts";
 import type { RowId } from "../../src/state/graph.ts";
 
@@ -549,42 +554,43 @@ describe("a picked start point", () => {
   });
 });
 
-describe("one colour scale for the whole scene", () => {
+describe("a colour scale per surface", () => {
   /** A sphere on a domain that avoids both poles, so no vertex is degenerate. */
   const sphere = (radius: string, name: string) =>
     `${name}(u,v) = (${radius} sin u cos v, ${radius} sin u sin v, ${radius} cos u)`;
 
-  function scene(sources: readonly string[]) {
+  function scene(sources: readonly string[], chartRow: number | null = null) {
     const document = createDocument(sources);
     const rows = document.rows();
     const domains = new Map<RowId, DomainRange[]>(
       rows.map((row) => [row.id, [{ min: 0.3, max: 2.8 }, { min: 0, max: 6.28 }]]),
     );
-    return buildScene({
-      items: [...document.resolution().items.values()],
-      parameters: new Map(),
-      domains,
-      resolution: 16,
-    });
+    return {
+      rows,
+      scene: buildScene({
+        items: [...document.resolution().items.values()],
+        parameters: new Map(),
+        domains,
+        resolution: 16,
+        chartRow,
+      }),
+    };
   }
 
-  it("repaints an existing surface when a more curved one joins the scene", () => {
+  it("leaves a surface's colours alone when a more curved one joins the scene", () => {
     /**
-     * The legend labels one scale, so every surface must be painted against that scale — and the
-     * consequence, which is what this asserts, is that adding a surface CHANGES the colour of the
-     * ones already there. If each surface were normalized to its own curvature range instead,
-     * every shape would look equally saturated and identical colours would mean different
-     * curvatures: a figure that lies about the one thing it exists to show.
+     * Pooled across the scene, one object decides how every other one looks: a sphere of radius
+     * 0.2 has K = 25, which drives the shared scale up 25-fold and leaves the unit sphere beside
+     * it a uniform grey — indistinguishable from a plane, which reads as a rendering failure
+     * rather than as a comparison.
+     *
+     * The trade this makes is real and is why it was the other way round first: identical colours
+     * on two surfaces no longer mean identical curvature. That is paid for by the legend, which
+     * labels the scale of the patch you have selected rather than one number for the scene.
      */
-    const alone = scene([sphere("1", "A")]);
-    // K = 1 for the unit sphere and 25 for this one, so the pooled scale jumps by 25x.
-    const together = scene([sphere("1", "A"), sphere("0.2", "B")]);
+    const alone = scene([sphere("1", "A")]).scene;
+    const together = scene([sphere("1", "A"), sphere("0.2", "B")]).scene;
 
-    expect(alone.curvatureScale).toBeCloseTo(1, 3);
-    expect(together.curvatureScale).toBeCloseTo(25, 1);
-
-    // Vertex 0 belongs to the unit sphere in both scenes. On its own it sits at the saturated
-    // end of the scale; sharing with a far more curved surface pushes it toward neutral.
     const neutral: [number, number, number] = [0, 0, 0];
     divergingColor(0, neutral);
     const distanceToNeutral = (mesh: NonNullable<typeof alone.mesh>) =>
@@ -594,12 +600,29 @@ describe("one colour scale for the whole scene", () => {
         mesh.colors[2]! - neutral[2],
       );
 
-    expect(distanceToNeutral(together.mesh!)).toBeLessThan(distanceToNeutral(alone.mesh!));
+    // Vertex 0 belongs to the unit sphere in both scenes, and is painted the same either way.
+    expect(distanceToNeutral(together.mesh!)).toBeCloseTo(distanceToNeutral(alone.mesh!), 6);
+  });
+
+  it("reports the scale each patch is painted through", () => {
+    const { rows, scene: built } = scene([sphere("1", "A"), sphere("0.2", "B")]);
+    // K = 1/R²: 1 for the unit sphere, 25 for the small one.
+    expect(built.curvatureScales.get(rows[0]!.id)).toBeCloseTo(1, 3);
+    expect(built.curvatureScales.get(rows[1]!.id)).toBeCloseTo(25, 1);
+  });
+
+  it("labels the legend with the selected patch's scale", () => {
+    // Otherwise the legend states a number that nothing on screen is drawn through.
+    const { rows, scene: first } = scene([sphere("1", "A"), sphere("0.2", "B")]);
+    expect(first.curvatureScale).toBeCloseTo(1, 3);
+    const second = scene([sphere("1", "A"), sphere("0.2", "B")], rows[1]!.id).scene;
+    expect(second.curvatureScale).toBeCloseTo(25, 1);
   });
 
   it("gives both surfaces the same colour where their curvature agrees", () => {
-    // Two unit spheres: same K, so same colour, whichever buffer half a vertex lands in.
-    const both = scene([sphere("1", "A"), sphere("1", "B")]);
+    // Two unit spheres: same K and the same scale, so the same colour, whichever buffer half a
+    // vertex lands in.
+    const both = scene([sphere("1", "A"), sphere("1", "B")]).scene;
     const mesh = both.mesh!;
     const half = mesh.vertexCount / 2;
     for (let k = 0; k < 3; k++) {
@@ -1091,5 +1114,635 @@ describe("arranging objects in space", () => {
     const there = placed([10, -3, 4]);
     expect(there.bounds!.center[0] - here.bounds!.center[0]).toBeCloseTo(10, 3);
     expect(there.bounds!.radius).toBeCloseTo(here.bounds!.radius, 3);
+  });
+});
+
+describe("the tangent plane at a point of a chart", () => {
+  const SPHERE = "X(u,v) = (sin u cos v, sin u sin v, cos u)";
+
+  function tangentScene(
+    rows: readonly string[],
+    translations?: Map<RowId, Vec3>,
+  ) {
+    const document = createDocument(rows);
+    const rowId = document.rows()[0]!.id;
+    const resolved = document.resolution();
+    const scene = buildScene({
+      items: [...resolved.items.values()],
+      parameters: new Map(),
+      declaredParameters: resolved.declaredParameters,
+      // Off both poles: the chart is singular there, and the surface's own reports would
+      // otherwise be about a degenerate centre rather than about the tangent plane.
+      domains: new Map([
+        [rowId, [{ min: 0.01, max: Math.PI - 0.01 }, { min: 0, max: 2 * Math.PI }]],
+      ]),
+      resolution: 24,
+      translations,
+    });
+    return { document, scene, rowId };
+  }
+
+  /** Every polyline the tangent plane drew on the surface's behalf, in the order pushed. */
+  const drawnBy = (scene: ReturnType<typeof buildScene>, rowId: RowId) =>
+    scene.lines.filter((group) => group.rowId === rowId);
+
+  it("draws a plane that is actually tangent: every point has the same height along N", () => {
+    /**
+     * The whole claim, as one number. At (π/2, 0) the unit sphere has p = (1, 0, 0) and N = p,
+     * so a plane tangent there is exactly the set of points with x constant — and the constant is
+     * 1 plus the lift that keeps it off the triangles it touches. A plane built from the wrong
+     * basis, or attached at the wrong point, fails this immediately.
+     */
+    const { scene, rowId } = tangentScene([SPHERE, `T_(${Math.PI / 2}, 0) X`]);
+    const groups = drawnBy(scene, rowId);
+    expect(groups).toHaveLength(3);
+
+    const heights: number[] = [];
+    // The ruling and the border; the frame group holds the normal, which is tested below.
+    for (const group of groups.slice(0, 2)) {
+      for (const line of group.polylines) {
+        for (let i = 0; i < line.count; i++) {
+          heights.push(line.points[i * 3]!);
+          // Tangent at the equator means the plane runs along z and y.
+          expect(Math.abs(line.points[i * 3 + 1]!)).toBeLessThanOrEqual(1);
+        }
+      }
+    }
+    expect(heights.length).toBeGreaterThan(20);
+    for (const x of heights) closeRel(x, heights[0]!, 1e-9);
+    // Lifted clear of the surface, but only just: a plane standing off its point is not tangent.
+    expect(heights[0]!).toBeGreaterThan(1);
+    expect(heights[0]!).toBeLessThan(1.05);
+  });
+
+  it("draws X_u and X_v in the plane, and N out of it", () => {
+    const { scene, rowId } = tangentScene([SPHERE, `T_(${Math.PI / 2}, 0) X`]);
+    const frame = drawnBy(scene, rowId)[2]!;
+    expect(frame.polylines).toHaveLength(3);
+
+    const tip = (index: number): Vec3 => {
+      const line = frame.polylines[index]!;
+      return [line.points[3]!, line.points[4]!, line.points[5]!];
+    };
+    const base = tip(0);
+    // X_u = (cos u cos v, cos u sin v, −sin u) = (0, 0, −1) and X_v = (0, sin u, 0) = (0, 1, 0):
+    // both tangent, so both arrows stay at the plane's own height.
+    closeRel(tip(0)[0], tip(1)[0], 1e-9);
+    expect(Math.abs(tip(0)[2])).toBeGreaterThan(0.1);
+    expect(Math.abs(tip(1)[1])).toBeGreaterThan(0.1);
+    // The normal is the one that leaves: it points along +x, away from the sphere.
+    expect(tip(2)[0]).toBeGreaterThan(base[0] + 0.1);
+  });
+
+  it("reports where it is attached, with the curvature and the first fundamental form there", () => {
+    const { document, scene } = tangentScene([SPHERE, `T_(${Math.PI / 2}, 0) X`]);
+    const report = scene.reports.find((r) => r.rowId === document.rows()[1]!.id);
+    // At the equator of the unit sphere: K = 1, H = −1 with the outward normal, and the chart is
+    // orthonormal there — E = G = 1, F = 0.
+    expect(report!.info.join(" ")).toContain("K = 1.000   H = -1.000");
+    expect(report!.info.join(" ")).toContain("E = 1.000   F = 0.000   G = 1.000");
+  });
+
+  it("marks the point in the chart inset", () => {
+    const { scene } = tangentScene([SPHERE, "T_(1, 2) X"]);
+    // Its own group: a dot drawn at the width of a stroke is invisible.
+    const marks = scene.chartLines.find((group) => group.style?.widthPx === 9)!;
+    expect(marks.polylines).toHaveLength(1);
+    // A dot: a zero-length segment, drawn with round caps.
+    expect([...marks.polylines[0]!.points]).toEqual([1, 2, 0, 1, 2, 0]);
+  });
+
+  it("moves with the surface it is tangent to", () => {
+    /**
+     * It is built by evaluating X, which knows nothing of arrangement, so it is owned by the
+     * SURFACE's row. Owned by its own row instead, moving the sphere would leave its tangent
+     * plane behind where the formula alone would have put it.
+     */
+    const still = tangentScene([SPHERE, `T_(${Math.PI / 2}, 0) X`]);
+    const moved = tangentScene(
+      [SPHERE, `T_(${Math.PI / 2}, 0) X`],
+      new Map([[1, [3, 0, 0] as Vec3]]),
+    );
+    const a = drawnBy(still.scene, still.rowId)[1]!.polylines[0]!;
+    const b = drawnBy(moved.scene, moved.rowId)[1]!.polylines[0]!;
+    for (let i = 0; i < a.count; i++) {
+      closeRel(b.points[i * 3]! - a.points[i * 3]!, 3, 1e-9);
+      closeRel(b.points[i * 3 + 1]!, a.points[i * 3 + 1]!, 1e-9);
+    }
+  });
+
+  it("says there is no tangent plane at a pole instead of drawing one", () => {
+    // The sphere's u = 0 collapses to a point: X_u × X_v vanishes and the plane genuinely does
+    // not exist there. A plausible square drawn through the pole would be a picture of nothing.
+    const { document, scene, rowId } = tangentScene([SPHERE, "T_(0, 0) X"]);
+    expect(drawnBy(scene, rowId)).toHaveLength(0);
+    const report = scene.reports.find((r) => r.rowId === document.rows()[1]!.id);
+    expect(report!.warnings.join(" ")).toContain("no tangent plane");
+  });
+
+  it("draws it on the patch it names, out of several", () => {
+    const { scene, document } = tangentScene([
+      SPHERE,
+      "Y(u,v) = (u, v, 0)",
+      "T_(1, 1) Y",
+    ]);
+    const yRow = document.rows()[1]!.id;
+    expect(drawnBy(scene, yRow)).toHaveLength(3);
+    expect(drawnBy(scene, document.rows()[0]!.id)).toHaveLength(0);
+    // A plane's tangent plane is the plane: z = 0 everywhere it was drawn.
+    for (const group of drawnBy(scene, yRow).slice(0, 2)) {
+      for (const line of group.polylines) {
+        for (let i = 0; i < line.count; i++) {
+          expect(Math.abs(line.points[i * 3 + 2]!)).toBeLessThan(0.05);
+        }
+      }
+    }
+  });
+
+  it("follows the parameter that moves it", () => {
+    const document = createDocument([SPHERE, "T_(a, 0) X"]);
+    const resolved = document.resolution();
+    const at = (a: number) =>
+      buildScene({
+        items: [...resolved.items.values()],
+        parameters: new Map([["a", a]]),
+        declaredParameters: resolved.declaredParameters,
+        domains: new Map(),
+        resolution: 16,
+      });
+    const first = at(Math.PI / 2).lines.find((g) => g.style?.widthPx === 2.2)!;
+    const second = at(1).lines.find((g) => g.style?.widthPx === 2.2)!;
+    // Attached somewhere else on the sphere, so the square is somewhere else in space.
+    expect(Math.abs(first.polylines[0]!.points[0]! - second.polylines[0]!.points[0]!))
+      .toBeGreaterThan(0.1);
+  });
+});
+
+describe("a vector field along a patch", () => {
+  const SPHERE = "X(u,v) = (sin u cos v, sin u sin v, cos u)";
+
+  function fieldScene(rows: readonly string[], translations?: Map<RowId, Vec3>) {
+    const document = createDocument(rows);
+    const rowId = document.rows()[0]!.id;
+    const resolved = document.resolution();
+    const scene = buildScene({
+      items: [...resolved.items.values()],
+      parameters: new Map(),
+      declaredParameters: resolved.declaredParameters,
+      domains: new Map([
+        [rowId, [{ min: 0.01, max: Math.PI - 0.01 }, { min: 0, max: 2 * Math.PI }]],
+      ]),
+      resolution: 24,
+      translations,
+    });
+    return { document, scene, rowId };
+  }
+
+  /** The one group of arrows, owned by the surface the field is drawn on. */
+  const arrowsOf = (scene: ReturnType<typeof buildScene>, rowId: RowId) =>
+    scene.lines.find((group) => group.rowId === rowId)!;
+
+  it("draws an arrow per cell, standing on the surface and tangent to it", () => {
+    /**
+     * ∂/∂v on the unit sphere is the rotation field (−y, x, 0). Two claims in one: every arrow
+     * starts ON the sphere (radius 1, up to the lift that keeps it off the triangles), and every
+     * shaft is perpendicular to the normal there — which for the sphere is the point itself.
+     */
+    const { scene, rowId } = fieldScene([
+      SPHERE,
+      "X: VectorField(-sin u sin v, sin u cos v, 0)",
+    ]);
+    const arrows = arrowsOf(scene, rowId);
+    expect(arrows.polylines.length).toBeGreaterThan(100);
+
+    for (const arrow of arrows.polylines) {
+      const base: Vec3 = [arrow.points[0]!, arrow.points[1]!, arrow.points[2]!];
+      const tip: Vec3 = [arrow.points[3]!, arrow.points[4]!, arrow.points[5]!];
+      const radius = Math.hypot(...base);
+      expect(Math.abs(radius - 1)).toBeLessThan(0.05);
+      const shaft = [tip[0] - base[0], tip[1] - base[1], tip[2] - base[2]] as const;
+      const along = (shaft[0] * base[0] + shaft[1] * base[1] + shaft[2] * base[2]) / radius;
+      // Perpendicular to the normal: the arrow lies in the tangent plane it is drawn on.
+      expect(Math.abs(along)).toBeLessThan(1e-9);
+    }
+  });
+
+  it("says how far a field leans off the tangent plane, in degrees", () => {
+    /**
+     * `(0, 0, 1)` is a perfectly good field on R³ and a perfectly bad one on a sphere. It is
+     * drawn — seeing it lean off the surface is how the failure is understood — and it is named,
+     * because a field that is not tangent is not a field ON the surface and nothing intrinsic can
+     * be read off it.
+     */
+    const { document, scene } = fieldScene([SPHERE, "X: VectorField(0, 0, 1)"]);
+    const report = scene.reports.find((r) => r.rowId === document.rows()[1]!.id)!;
+    expect(report.warnings.join(" ")).toContain("not tangent to X");
+    expect(report.warnings.join(" ")).toMatch(/8\d\.\d°/);
+  });
+
+  it("says nothing about tangency when the field is tangent", () => {
+    const { document, scene } = fieldScene([
+      SPHERE,
+      "X: VectorField(-sin u sin v, sin u cos v, 0)",
+    ]);
+    const report = scene.reports.find((r) => r.rowId === document.rows()[1]!.id)!;
+    expect(report.warnings).toEqual([]);
+    expect(report.info.join(" ")).toContain("arrows on X");
+  });
+
+  it("scales the arrows by a robust quantile, so one wild sample cannot flatten the rest", () => {
+    /**
+     * The same failure `robustScale` exists to prevent for colour. `1/sin u` blows up toward the
+     * pole; scaled by the maximum, every other arrow would be a dot. Past the 98th percentile the
+     * arrows saturate instead, which is why the longest is bounded rather than the shortest being
+     * invisible.
+     */
+    const { scene, rowId } = fieldScene([
+      SPHERE,
+      "X: VectorField(-sin v / sin u, cos v / sin u, 0)",
+    ]);
+    const lengths = arrowsOf(scene, rowId).polylines.map((arrow) =>
+      Math.hypot(
+        arrow.points[3]! - arrow.points[0]!,
+        arrow.points[4]! - arrow.points[1]!,
+        arrow.points[5]! - arrow.points[2]!,
+      ),
+    );
+    const longest = Math.max(...lengths);
+    const median = [...lengths].sort((a, b) => a - b)[Math.floor(lengths.length / 2)]!;
+    expect(longest).toBeLessThan(median * 12);
+    expect(median).toBeGreaterThan(0.02);
+  });
+
+  it("moves with the surface it lies along", () => {
+    const still = fieldScene([SPHERE, "X: VectorField(-sin u sin v, sin u cos v, 0)"]);
+    const moved = fieldScene(
+      [SPHERE, "X: VectorField(-sin u sin v, sin u cos v, 0)"],
+      new Map([[1, [0, 4, 0] as Vec3]]),
+    );
+    const a = arrowsOf(still.scene, still.rowId).polylines[0]!;
+    const b = arrowsOf(moved.scene, moved.rowId).polylines[0]!;
+    closeRel(b.points[1]! - a.points[1]!, 4, 1e-9);
+    closeRel(b.points[0]!, a.points[0]!, 1e-9);
+  });
+
+  it("draws nothing, and says why, when the field vanishes everywhere", () => {
+    const { document, scene, rowId } = fieldScene([SPHERE, "X: VectorField(0, 0, 0)"]);
+    expect(scene.lines.filter((group) => group.rowId === rowId)).toHaveLength(0);
+    const report = scene.reports.find((r) => r.rowId === document.rows()[1]!.id)!;
+    expect(report.warnings.join(" ")).toContain("zero or undefined");
+  });
+
+  it("is drawn on the patch it names, out of several", () => {
+    const { scene, document } = fieldScene([
+      SPHERE,
+      "Y(u,v) = (u, v, 0)",
+      "Y: VectorField(0, 0, 1)",
+    ]);
+    // Tangent to nothing on a plane: the check is per host, so this one is reported against Y.
+    expect(scene.lines.filter((g) => g.rowId === document.rows()[1]!.id)).toHaveLength(1);
+    expect(scene.lines.filter((g) => g.rowId === document.rows()[0]!.id)).toHaveLength(0);
+    const report = scene.reports.find((r) => r.rowId === document.rows()[2]!.id)!;
+    expect(report.warnings.join(" ")).toContain("not tangent to Y");
+  });
+});
+
+describe("playing a field's flow", () => {
+  const SPHERE = "X(u,v) = (sin u cos v, sin u sin v, cos u)";
+
+  function sceneWith(rows: readonly string[], translations?: Map<RowId, Vec3>) {
+    const document = createDocument(rows);
+    const rowId = document.rows()[0]!.id;
+    const resolved = document.resolution();
+    const scene = buildScene({
+      items: [...resolved.items.values()],
+      parameters: new Map(),
+      declaredParameters: resolved.declaredParameters,
+      domains: new Map([
+        [rowId, [{ min: 0.01, max: Math.PI - 0.01 }, { min: 0, max: 2 * Math.PI }]],
+      ]),
+      resolution: 24,
+      translations,
+    });
+    return { document, scene };
+  }
+
+  it("offers a flow for a field row and for nothing else", () => {
+    const { document, scene } = sceneWith([
+      SPHERE,
+      "X: VectorField(-sin u sin v, sin u cos v, 0)",
+    ]);
+    const [surface, field] = document.rows();
+    expect(scene.flowFor(field!.id)).not.toBeNull();
+    // A surface is not a flow, and neither is a row that does not exist.
+    expect(scene.flowFor(surface!.id)).toBeNull();
+    expect(scene.flowFor(9999)).toBeNull();
+    expect(scene.flowFor(field!.id)!.hostRow).toBe(surface!.id);
+  });
+
+  it("draws streaks that lie on the surface and follow the field", () => {
+    const { document, scene } = sceneWith([
+      SPHERE,
+      "X: VectorField(-sin u sin v, sin u cos v, 0)",
+    ]);
+    const flow = scene.flowFor(document.rows()[1]!.id)!;
+    const state = flow.seed(30, 5);
+    for (let i = 0; i < 20; i++) flow.advance(state, 1 / 60);
+
+    // Three layered bands: the whole streak, its newer half, its head — which is how the tail
+    // fades when the line pass takes one opacity per group.
+    const groups = flow.lines(state);
+    expect(groups.length).toBe(3);
+    expect(groups[0]!.style!.opacity).toBeLessThan(groups[2]!.style!.opacity!);
+    expect(groups[0]!.style!.widthPx).toBeLessThan(groups[2]!.style!.widthPx!);
+    expect(groups[0]!.polylines.length).toBeGreaterThan(20);
+    for (const streak of groups[0]!.polylines) {
+      expect(streak.count).toBeGreaterThan(1);
+      for (let i = 0; i < streak.count; i++) {
+        const r = Math.hypot(
+          streak.points[i * 3]!,
+          streak.points[i * 3 + 1]!,
+          streak.points[i * 3 + 2]!,
+        );
+        // On the sphere, up to the lift that keeps a curve off the triangles under it.
+        expect(Math.abs(r - 1)).toBeLessThan(0.05);
+      }
+    }
+  });
+
+  it("is drawn where its surface is, not where the formula puts it", () => {
+    const still = sceneWith([SPHERE, "X: VectorField(-sin u sin v, sin u cos v, 0)"]);
+    const moved = sceneWith(
+      [SPHERE, "X: VectorField(-sin u sin v, sin u cos v, 0)"],
+      new Map([[1, [0, 0, 5] as Vec3]]),
+    );
+    const seeded = (built: ReturnType<typeof sceneWith>) => {
+      const flow = built.scene.flowFor(built.document.rows()[1]!.id)!;
+      const state = flow.seed(8, 3);
+      flow.advance(state, 1 / 60);
+      return flow.lines(state)[0]!.polylines[0]!;
+    };
+    const a = seeded(still);
+    const b = seeded(moved);
+    closeRel(b.points[2]! - a.points[2]!, 5, 1e-9);
+    closeRel(b.points[0]!, a.points[0]!, 1e-9);
+  });
+
+  it("animates at the same rate however the field is scaled", () => {
+    /**
+     * The tempo is a property of the picture, not of the formula: doubling every vector is a
+     * reparametrization of time, and a flow that ran twice as fast for it would make the speed
+     * on screen mean nothing. The relative speeds WITHIN one field are what carry meaning, and
+     * those are untouched — the scale divides out through the same robust quantile the arrow
+     * lengths use.
+     */
+    const advanced = (field: string) => {
+      const { document, scene } = sceneWith([SPHERE, `X: VectorField(${field})`]);
+      const flow = scene.flowFor(document.rows()[1]!.id)!;
+      const state = flow.seed(1, 17);
+      const before = state.chart[1]!;
+      for (let i = 0; i < 10; i++) flow.advance(state, 1 / 60);
+      return state.chart[1]! - before;
+    };
+    const single = advanced("-sin u sin v, sin u cos v, 0");
+    const doubled = advanced("-2 sin u sin v, 2 sin u cos v, 0");
+    closeRel(doubled, single, 1e-9);
+  });
+
+  it("flows a field that is not tangent along the part of it that is", () => {
+    // Reported as untangent, and still played: the projection is a perfectly good field on the
+    // surface, and refusing to animate would leave the row with a warning and nothing to look at.
+    const { document, scene } = sceneWith([SPHERE, "X: VectorField(0, 0, 1)"]);
+    const flow = scene.flowFor(document.rows()[1]!.id)!;
+    const state = flow.seed(6, 8);
+    const before = [...state.chart];
+    const ageBefore = [...state.age];
+    const elapsed = 10 / 60;
+    for (let i = 0; i < 10; i++) flow.advance(state, 1 / 60);
+
+    // u̇ = −sin u, v̇ = 0: a particle climbs toward the north pole and none goes round. A particle
+    // whose lifetime ran out in those ten frames is somewhere else entirely, by design — its age
+    // is what says so, since a reseeded one starts counting again from zero.
+    let followed = 0;
+    for (let k = 0; k < state.count; k++) {
+      if (Math.abs(state.age[k]! - (ageBefore[k]! + elapsed)) > 1e-9) continue;
+      followed++;
+      expect(state.chart[k * 2]!).toBeLessThan(before[k * 2]!);
+      closeRel(state.chart[k * 2 + 1]!, before[k * 2 + 1]!, 1e-9);
+    }
+    expect(followed).toBeGreaterThan(0);
+  });
+});
+
+describe("what colour each row was drawn in", () => {
+  /**
+   * Reported rather than left to be guessed, because the defaults are not one rule: a curve takes
+   * the next entry of a palette by document order, a field its own blue, a patch the shade under
+   * its curvature map. The dot on a row's cell shows this, and a swatch that showed anything else
+   * would be a swatch that lies about the object beside it.
+   */
+  it("names a colour for everything that draws one", () => {
+    const { document, scene } = sceneOf([
+      "X(u,v) = (sin u cos v, sin u sin v, cos u)",
+      "alpha(t) = (cos t, sin t, t)",
+      "X: VectorField(-sin u sin v, sin u cos v, 0)",
+      "(1, 2, 3)",
+    ]);
+    for (const row of document.rows()) {
+      const color = scene.usedColors.get(row.id);
+      expect(color, `row ${row.id} reported no colour`).toBeDefined();
+      for (const channel of color!) {
+        expect(channel).toBeGreaterThanOrEqual(0);
+        expect(channel).toBeLessThanOrEqual(1);
+      }
+    }
+    // Two curves in a row take different palette entries, which is exactly what a dot has to
+    // show and what no rule in the UI could have worked out on its own.
+    const { document: pair, scene: two } = sceneOf([
+      "alpha(t) = (cos t, sin t, t)",
+      "beta(t) = (cos t, sin t, -t)",
+    ]);
+    const [a, b] = pair.rows();
+    expect(two.usedColors.get(a!.id)).not.toEqual(two.usedColors.get(b!.id));
+  });
+
+  it("reports the colour a row was given, when it was given one", () => {
+    const document = createDocument(["alpha(t) = (cos t, sin t, t)"]);
+    const rowId = document.rows()[0]!.id;
+    const scene = buildScene({
+      items: [...document.resolution().items.values()],
+      parameters: new Map(),
+      domains: new Map(),
+      resolution: 16,
+      colors: new Map([[rowId, [0.25, 0.5, 0.75] as Vec3]]),
+    });
+    expect(scene.usedColors.get(rowId)).toEqual([0.25, 0.5, 0.75]);
+  });
+});
+
+describe("a field's arrows, as a group of their own", () => {
+  it("hands them out by identity, still in the lines they belong to", () => {
+    /**
+     * The app leaves the arrows out of a frame while the flow plays, or when the row's switch
+     * says so — decisions about the frame, not about the document. Handing back the very group
+     * that is also in `lines` is what makes that a filter rather than a rebuild, and keeping it
+     * in `lines` is what keeps it moving with its surface.
+     */
+    const document = createDocument([
+      "X(u,v) = (sin u cos v, sin u sin v, cos u)",
+      "X: VectorField(-sin u sin v, sin u cos v, 0)",
+    ]);
+    const resolved = document.resolution();
+    const scene = buildScene({
+      items: [...resolved.items.values()],
+      parameters: new Map(),
+      domains: new Map(),
+      resolution: 16,
+    });
+    const [surface, field] = document.rows();
+
+    const group = scene.fieldArrows.get(field!.id);
+    expect(group).toBeDefined();
+    expect(scene.lines).toContain(group!);
+    // Owned by the surface, like everything else built by evaluating X.
+    expect(group!.rowId).toBe(surface!.id);
+    expect(scene.fieldArrows.get(surface!.id)).toBeUndefined();
+  });
+});
+
+describe("a row switched off", () => {
+  /**
+   * The dot on a row's cell. A patch answers it through `fill` — its grid stays, which is the
+   * half of a surface you want left behind — and everything else stops being drawn entirely.
+   */
+  const overlayOf = (hidden: boolean): SurfaceOverlay =>
+    ({ geodesics: 0, geodesicLength: 1.5, curvatureLines: false, hidden }) as SurfaceOverlay;
+
+  function scene(sources: readonly string[], hiddenRow: number | null) {
+    const document = createDocument(sources);
+    const rows = document.rows();
+    const resolved = document.resolution();
+    return {
+      rows,
+      scene: buildScene({
+        items: [...resolved.items.values()],
+        parameters: new Map(),
+        declaredParameters: resolved.declaredParameters,
+        domains: new Map(),
+        resolution: 16,
+        overlays:
+          hiddenRow === null
+            ? new Map()
+            : new Map([[rows[hiddenRow]!.id, overlayOf(true)]]),
+      }),
+    };
+  }
+
+  it("draws nothing for a hidden curve, and everything else as before", () => {
+    const shown = scene(["X(u,v) = (u, v, 0)", "alpha(t) = (cos t, sin t, t)"], null);
+    const hidden = scene(["X(u,v) = (u, v, 0)", "alpha(t) = (cos t, sin t, t)"], 1);
+    const curveRow = shown.rows[1]!.id;
+    expect(shown.scene.lines.some((group) => group.rowId === curveRow)).toBe(true);
+    expect(hidden.scene.lines.some((group) => group.rowId === curveRow)).toBe(false);
+    // The surface is untouched: switching one row off is not a scene-wide mode.
+    expect(hidden.scene.mesh!.triangleCount).toBe(shown.scene.mesh!.triangleCount);
+  });
+
+  it("hides a point, a tangent plane and a field alike", () => {
+    for (const [rows, index] of [
+      [["(1, 2, 3)"], 0],
+      [["X(u,v) = (u, v, 0)", "T_(0.5, 0.5) X"], 1],
+      [["X(u,v) = (u, v, 0)", "X: VectorField(0, 1, 0)"], 1],
+    ] as const) {
+      const shown = scene(rows, null);
+      const hidden = scene(rows, index);
+      expect(hidden.scene.lines.length).toBeLessThan(shown.scene.lines.length);
+    }
+  });
+});
+
+describe("a field in the chart", () => {
+  const SPHERE = "X(u,v) = (sin u cos v, sin u sin v, cos u)";
+
+  function chartScene(rows: readonly string[], chartRow?: number) {
+    const document = createDocument(rows);
+    const rows_ = document.rows();
+    const resolved = document.resolution();
+    const scene = buildScene({
+      items: [...resolved.items.values()],
+      parameters: new Map(),
+      declaredParameters: resolved.declaredParameters,
+      domains: new Map([
+        [rows_[0]!.id, [{ min: 0.01, max: Math.PI - 0.01 }, { min: 0, max: 2 * Math.PI }]],
+      ]),
+      resolution: 16,
+      chartRow: chartRow === undefined ? undefined : rows_[chartRow]!.id,
+    });
+    return { rows: rows_, scene };
+  }
+
+  it("draws the field's arrows in the inset, in chart coordinates", () => {
+    /**
+     * A field written in ambient components has a chart representation — the (u̇, v̇) solving
+     * `[E F; F G](u̇,v̇)ᵀ = (⟨V,X_u⟩, ⟨V,X_v⟩)ᵀ` — and that is what an arrow downstairs means:
+     * components in the basis {∂/∂u, ∂/∂v}.
+     */
+    const { rows, scene } = chartScene([SPHERE, "X: VectorField(-sin u sin v, sin u cos v, 0)"]);
+    const group = scene.fieldChartArrows.get(rows[1]!.id);
+    expect(group).toBeDefined();
+    expect(scene.chartLines).toContain(group!);
+    expect(group!.polylines.length).toBeGreaterThan(100);
+
+    // ∂/∂v has (u̇, v̇) = (0, 1): every arrow points along v and none of them leaves its own u.
+    for (const arrow of group!.polylines) {
+      const u0 = arrow.points[0]!;
+      const tipU = arrow.points[3]!;
+      const tipV = arrow.points[4]!;
+      expect(Math.abs(tipU - u0)).toBeLessThan(1e-9);
+      expect(tipV).toBeGreaterThan(arrow.points[1]!);
+    }
+  });
+
+  it("draws only the shown patch's field, not every patch's", () => {
+    // Two patches have two different (u, v) planes, and drawing both in one square would be a
+    // picture of neither — the rule every chart curve already follows.
+    const rows = [SPHERE, "Y(u,v) = (u, v, 0)", "Y: VectorField(0, 1, 0)"];
+    const onX = chartScene(rows);
+    expect(onX.scene.fieldChartArrows.size).toBe(0);
+    const onY = chartScene(rows, 1);
+    expect(onY.scene.fieldChartArrows.size).toBe(1);
+  });
+
+  it("gives the flow a chart streak beside its own", () => {
+    const { rows, scene } = chartScene([SPHERE, "X: VectorField(-sin u sin v, sin u cos v, 0)"]);
+    const flow = scene.flowFor(rows[1]!.id)!;
+    const state = flow.seed(20, 4);
+    for (let i = 0; i < 10; i++) flow.advance(state, 1 / 60);
+
+    const groups = flow.chartLines(state);
+    expect(groups).toHaveLength(1);
+    const streaks = groups[0]!.polylines;
+    expect(streaks.length).toBeGreaterThan(10);
+    for (const streak of streaks) {
+      for (let i = 0; i < streak.count; i++) {
+        // Inside the domain it was seeded over, and flat: the inset draws (u, v, 0).
+        expect(streak.points[i * 3]!).toBeGreaterThanOrEqual(0);
+        expect(streak.points[i * 3]!).toBeLessThanOrEqual(Math.PI);
+        expect(streak.points[i * 3 + 2]!).toBe(0);
+      }
+    }
+    // The chart trail and the one in space are the same particles, so they have the same lengths.
+    expect(streaks.length).toBe(flow.lines(state)[0]!.polylines.length);
+  });
+
+  it("says nothing in the chart when the inset is showing another patch", () => {
+    const rows = [SPHERE, "Y(u,v) = (u, v, 0)", "X: VectorField(-sin u sin v, sin u cos v, 0)"];
+    const elsewhere = chartScene(rows, 1);
+    const flow = elsewhere.scene.flowFor(elsewhere.rows[2]!.id)!;
+    const state = flow.seed(8, 2);
+    flow.advance(state, 1 / 60);
+    expect(flow.chartLines(state)).toEqual([]);
+    // and it is still drawn in space, which is the point of the check.
+    expect(flow.lines(state).length).toBeGreaterThan(0);
   });
 });

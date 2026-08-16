@@ -105,6 +105,28 @@ body {
   user-select: none;
 }
 
+/*
+ * The link to the manual, bottom right of the stage.
+ *
+ * Deliberately quiet — it is a signpost, not a control — and deliberately part of `index.html`
+ * rather than built by the app, so it survives with script off and is visible to anything that
+ * reads the page instead of running it.
+ */
+.docs-link {
+  position: absolute;
+  right: 14px;
+  bottom: 12px;
+  color: var(--text-faint);
+  font-size: 12px;
+  text-decoration: none;
+  letter-spacing: 0.04em;
+}
+
+.docs-link:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
 .panel {
   flex: 0 0 300px;
   background: var(--panel);
@@ -235,7 +257,33 @@ body {
   border-left: 2px solid var(--accent);
 }
 
+/*
+ * One line: the name, the lower bound, the track, the upper bound.
+ *
+ * This used to be a bare block, so in the cell column — where nothing re-declares it — the track
+ * is a block-level child and breaks the line either side of itself. The two bound fields then sat
+ * ABOVE and BELOW the track instead of at its ends, which reads as two unrelated numbers rather
+ * than as the two ends of one interval. The card had its own flex rule and looked right; the cell
+ * did not, and the cell is where a parameter is usually reached for.
+ */
+/*
+ * A slider row **wraps**; it never overflows.
+ *
+ * The arithmetic does not fit and cannot be made to: a 300px panel leaves about 230px of cell
+ * body once the colour gutter and the padding are taken out, and a name, two typed ends, a track
+ * wide enough to drag, and a transport want half again as much. Something has to give, and the
+ * choice is between a control pushed off the edge — where it is in the DOM, does nothing, and
+ * reads as a missing feature, which is exactly how the play button went missing — and a second
+ * line. A second line is visibly a second line. The transport keeps `margin-left: auto`, so when
+ * it does wrap it lands under the right-hand end of the track rather than adrift on the left.
+ */
 .slider {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+  row-gap: 3px;
+  min-width: 0;
   margin-bottom: 12px;
 }
 
@@ -356,14 +404,123 @@ body {
   gap: 8px;
 }
 
+/*
+ * A cell is a gutter and a body.
+ *
+ * The gutter carries the object's colour, the way a graphing calculator does it: the question
+ * "which of these is the blue one" is asked constantly, and answering it should not require
+ * selecting a row and reading a panel. It is a strip rather than a floating dot so that the
+ * pencil has somewhere to live directly under it.
+ */
 .row {
   position: relative;
-  padding: 8px;
+  display: flex;
+  align-items: stretch;
   background: var(--field);
   border: 1px solid var(--panel-border);
   border-radius: 6px;
   /* Clicking anywhere on a row selects it, so the whole row is the target, not just the badge. */
   cursor: pointer;
+}
+
+.row__body {
+  flex: 1;
+  min-width: 0;
+  padding: 8px;
+}
+
+/*
+ * The gutter rounds its own left corners rather than the cell clipping them.
+ *
+ * `overflow: hidden` on the row would do it in one line and cost something invisible until it
+ * bites: a slider row is wider than the cell became once 34 pixels went to this gutter, so the
+ * transport at its right end was silently cut off. Nothing in a cell may be clipped horizontally.
+ */
+.row__gutter {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  width: 30px;
+  flex-shrink: 0;
+  padding: 8px 0;
+  background: var(--gutter, rgba(0, 0, 0, 0.04));
+  border-right: 1px solid var(--panel-border);
+  border-radius: 5px 0 0 5px;
+}
+
+.row__gutter[hidden] {
+  display: none;
+}
+
+/*
+ * The readout, and the switch: what the scene drew this object in, and whether it drew it.
+ *
+ * Filled while it is drawn, a hollow ring in the same colour while it is not — the object is
+ * switched off, not decoloured, and it comes back in the colour it left in.
+ */
+.gutter__dot {
+  width: 17px;
+  height: 17px;
+  padding: 0;
+  border-radius: 50%;
+  border: 2px solid var(--text-faint);
+  background: var(--text-faint);
+  box-shadow: inset 0 1px 2px rgba(255, 255, 255, 0.35);
+  cursor: pointer;
+  transition: transform 0.12s;
+}
+
+.gutter__dot:hover {
+  transform: scale(1.12);
+}
+
+.gutter__dot--off {
+  box-shadow: none;
+}
+
+/* The way to change it: a real icon, at a size that can be hit. */
+.gutter__pencil {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: var(--text);
+  cursor: pointer;
+  opacity: 0.75;
+  transition: opacity 0.15s, background 0.15s;
+}
+
+.gutter__pencil svg {
+  display: block;
+}
+
+.row:hover .gutter__pencil,
+.gutter__pencil:focus-visible {
+  opacity: 1;
+  background: rgba(0, 0, 0, 0.07);
+}
+
+/*
+ * The colour input the pencil opens, kept off screen rather than hidden.
+ *
+ * `display: none` makes `click()` a no-op in some browsers, and this element exists for no other
+ * reason than to be opened by that call.
+ */
+.gutter__input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+  left: 8px;
+  bottom: 4px;
 }
 
 .row__head {
@@ -442,6 +599,7 @@ body {
   color: var(--text-dim);
 }
 
+
 .field--tiny {
   width: 58px;
   padding: 2px 4px;
@@ -473,6 +631,22 @@ body {
   gap: 5px;
   margin-top: 4px;
   font-size: 11px;
+  color: var(--text-dim);
+}
+
+/*
+ * `X:` in front of the typeset formula — the row's own statement of which chart it is in.
+ *
+ * Dimmed and set apart, because it is not part of the formula: two rows with the same relation
+ * on two different patches are different curves, and this is the only thing that says so.
+ */
+.echo-chart {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+}
+
+.echo-chart > :first-child {
   color: var(--text-dim);
 }
 
@@ -568,6 +742,8 @@ option {
   display: flex;
   gap: 3px;
   margin-left: auto;
+  /* Never squeezed: three controls at half width are three controls nobody can hit. */
+  flex: 0 0 auto;
 }
 
 .transport__button {
@@ -593,8 +769,34 @@ option {
   border-color: var(--accent);
 }
 
+.row__flow:empty,
 .row__overlay:empty {
   display: none;
+}
+
+/*
+ * The flow transport: the word, then the controls, on the row's own cell.
+ *
+ * Not in the properties card: the floating placement hides its tray, so the button was invisible
+ * where the card usually is — and a play button nobody can find is a feature that does not exist.
+ * A field's flow is to its row what a slider is to a numeric one, so it is offered in the same
+ * place, and `transport` pushes itself to the right exactly as a slider's does.
+ */
+.flow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Buttons at the right edge of the cell, in line with the sliders' own transports. */
+.row__flow {
+  margin-top: 6px;
+}
+
+.flow__label {
+  color: var(--text-faint);
+  font-size: 11px;
+  letter-spacing: 0.02em;
 }
 
 .row__overlay {
@@ -710,7 +912,8 @@ option {
 }
 
 .props .vslider {
-  min-width: 150px;
+  min-width: 110px;
+  flex: 1 1 auto;
   padding-top: 12px;
 }
 
@@ -725,6 +928,7 @@ option {
 
 .props .domain {
   flex-direction: row;
+  flex-wrap: nowrap;
   align-items: center;
   gap: 5px;
   min-width: 0;
@@ -782,7 +986,12 @@ option {
 .vslider {
   position: relative;
   flex: 1 1 auto;
-  min-width: 120px;
+  /*
+   * Small, deliberately. The track is the only part of a slider row that can give up width, and
+   * everything beside it — the name, the two typed ends, the transport — has a size it needs.
+   * A generous minimum here pushes the transport out of the cell instead of shortening the track.
+   */
+  min-width: 70px;
   /* Head room for the bubble, which is positioned above the track. */
   padding-top: 13px;
 }
@@ -828,6 +1037,92 @@ option {
 }
 
 /*
+ * The relation being typed, at the button that asked for it.
+ *
+ * Fixed and on the body, not in the card: the card is rebuilt whenever the document is, and a
+ * rebuild under a focused field is how this UI has broken before. Wide enough for a formula,
+ * because a relation that has to be scrolled to read is a relation you cannot check.
+ */
+.relation-pop {
+  position: fixed;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 6px 8px;
+  background: rgba(255, 255, 255, 0.97);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  box-shadow: 0 6px 20px rgba(20, 30, 45, 0.22);
+}
+
+.relation-pop__where {
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  color: var(--text-dim);
+}
+
+.relation-pop__field {
+  width: 300px;
+  max-width: 60vw;
+  padding: 3px 5px;
+  background: var(--field);
+  border: 1px solid var(--panel-border);
+  border-radius: 3px;
+  color: var(--text);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+}
+
+.relation-pop__field:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+/*
+ * The ends of a track, typed.
+ *
+ * Deliberately quiet — a hairline box, the dim colour of a label — because that is what they
+ * are most of the time: the numbers written at the ends of the scale. They come forward on
+ * focus, when one is being changed. The spinners are hidden: a stepper turns setting a range
+ * into clicking, which is the mistake the domain fields already made once.
+ */
+.slider__limit {
+  flex: 0 0 42px;
+  width: 42px;
+  padding: 1px 3px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  color: var(--text-dim);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 10px;
+  text-align: center;
+}
+
+.slider__limit:hover {
+  border-color: var(--panel-border);
+}
+
+.slider__limit:focus {
+  background: var(--field);
+  border-color: var(--accent);
+  color: var(--text);
+  outline: none;
+}
+
+.slider__limit::-webkit-outer-spin-button,
+.slider__limit::-webkit-inner-spin-button {
+  appearance: none;
+  margin: 0;
+}
+
+.slider__limit {
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+
+/*
  * A chip: a symbol that toggles. Square, so a row of them reads as a row of buttons rather than
  * as running text, and sized to the same height as the fields beside it.
  */
@@ -858,6 +1153,14 @@ option {
 
 /* Pressed state carried by the fill, so which tools are live is readable at a glance across the
    whole bar rather than one control at a time. */
+/* A chip whose label is a sentence rather than a symbol: it gets the row to itself. */
+.chip--wide {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  text-align: center;
+}
+
 .chip--on {
   background: var(--accent);
   border-color: var(--accent);
@@ -1017,6 +1320,9 @@ option {
 }
 
 .props--at-cursor .props__panel-body {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
   padding: 0;
   background: transparent;
   border: none;
@@ -1115,6 +1421,25 @@ option {
   letter-spacing: 0.08em;
 }
 
+/* Save and open, in the scene card. */
+.file-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.file-status {
+  flex-basis: 100%;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.file-status__bad {
+  color: #a3231b;
+}
+
 /* ---- right-click menu ---- */
 
 .context-menu {
@@ -1162,6 +1487,63 @@ option {
   gap: 8px;
   /* Above the properties card, so the popover is not covered by it. */
   z-index: 2;
+}
+
+/* The tool buttons themselves, side by side above whichever panel is open. */
+.stage-tools__row {
+  display: flex;
+  gap: 8px;
+}
+
+/*
+ * The socket line in the parts bin: what a piece would attach to.
+ *
+ * Its colour is the same teal the free rings are drawn in on the stage, so the panel and the
+ * geometry name the same thing.
+ */
+.socket-status {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11px;
+  line-height: 1.4;
+  margin-bottom: 8px;
+}
+
+.socket-status__on {
+  color: #1a9eaf;
+}
+
+.socket-status__off {
+  color: var(--text-faint);
+}
+
+/* The whole object the socket belongs to: which surface, and how much of it is still open. */
+.socket-status__surface {
+  color: var(--text-dim);
+  font-family: ui-monospace, Menlo, monospace;
+}
+
+/*
+ * A piece that cannot join the chosen socket.
+ *
+ * Dimmed in place rather than removed: a bin whose contents rearrange as sockets are clicked has
+ * to be re-read every time, and the tooltip on a greyed button says why, which a missing one
+ * cannot.
+ */
+.template--unusable {
+  opacity: 0.4;
+  cursor: not-allowed;
+  border-style: dashed;
+}
+
+.template--unusable:hover {
+  border-color: var(--panel-border);
+  color: var(--text);
+}
+
+.joint-controls {
+  margin-top: 4px;
 }
 
 .tool-button {
@@ -1282,14 +1664,22 @@ option {
   resize: none;
   overflow: hidden;
   line-height: 1.45;
-  min-height: 0;
+  /* One line, whatever anything else says: a cell you can type in is never a sliver. */
+  min-height: 1.45em;
 }
 
-.row--editing /* A stacked surface is several lines tall; capped so one long formula cannot drive the height
-   of the whole strip, with the overflow reachable by scrolling inside the cell. */
+/* A stacked surface is several lines tall; capped so one long formula cannot drive the height of
+   the whole strip, with the overflow reachable by scrolling inside the cell.
+
+   The cap used to sit inside the selector below — a comment between `.row--editing` and
+   `.formula__echo` still parses as a descendant combinator, so the rule only applied to a cell
+   being edited, which is exactly when the echo is hidden. It never did anything. */
 .formula__echo {
   max-height: 22vh;
   overflow: auto;
+}
+
+.row--editing .formula__echo {
   display: none;
 }
 
@@ -1322,14 +1712,18 @@ option {
   padding: 2px 4px;
 }
 
+/* No native arrow: it costs sixteen pixels on a control whose whole text is "1×". */
 .transport__speed {
+  appearance: none;
+  -webkit-appearance: none;
   background: transparent;
   border: 1px solid var(--panel-border);
   border-radius: 4px;
   color: var(--text-dim);
   cursor: pointer;
   font-size: 11px;
-  padding: 1px 2px;
+  padding: 1px 3px;
+  text-align: center;
 }
 
 .transport__speed:hover {
@@ -1348,6 +1742,25 @@ option {
   display: flex;
   align-items: center;
   gap: 6px;
+}
+
+/*
+ * The buttons beside the sliders: one line in the top bar, two rows floating.
+ *
+ * Docked, the whole card is a single horizontal strip and a stacked block would make it taller
+ * than everything else on it. Floating, the domain is two tracks high and the block fits beside
+ * them for free — the one place height is expensive is under the pointer.
+ */
+.props__chips {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.props--at-cursor .props__chips {
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
 }
 
 /* ---- the cell bar ---- */
@@ -1449,9 +1862,12 @@ option {
 .domain__range {
   display: flex;
   flex: 1 1 auto;
+  flex-wrap: nowrap;
   align-items: center;
   gap: 8px;
-  min-width: 150px;
+  /* Small enough that the two bound fields fit on the line beside it: the fields are fixed and
+     the track is what gives up width, never the other way round. */
+  min-width: 96px;
 }
 
 .domain__range .vslider {

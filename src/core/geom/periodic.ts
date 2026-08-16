@@ -108,6 +108,139 @@ export function detectPeriodicity(
 }
 
 /**
+ * The smallest width of chart after which a coordinate repeats itself, or null if it never does.
+ *
+ * This is the point past which a domain **overlaps itself**: at u + P the parametrization returns
+ * to material it has already drawn, so a wider domain does not show more surface, it shows the
+ * same surface twice, tessellated over itself. That is a wall worth stopping a control at, and it
+ * is measured rather than assumed — 2π is the usual answer and nothing guarantees it.
+ *
+ * ## Why a scan and not a formula
+ *
+ * The period is a property of the *map*, not of the interval it is currently sampled over, so it
+ * cannot be read off the bounds — a domain already narrowed to half a turn has to yield the same
+ * answer as one covering the whole. The cheap case is checked first: if the current bounds already
+ * close up, the period is exactly their width and no search is needed. Otherwise `X(t₀ + P, ·)` is
+ * compared against `X(t₀, ·)` over a coarse sweep, and the first candidate that comes close is
+ * refined by ternary search before being accepted — a coarse grid alone would step over the answer
+ * and a fine one would cost more than the tessellation it is supporting.
+ *
+ * ## What it does not claim
+ *
+ * This is **pointwise** repetition: `X(t + P, s) = X(t, s)` for the same s. A surface can cover
+ * itself again without that — the sphere retraces itself past u = π, but with v shifted by π, so
+ * the answer here is 2π rather than π. Finding every such overlap is the self-intersection
+ * problem, which is global and not worth solving to place a wall on a slider. Pointwise is exactly
+ * the case a domain control walks into: a tube swept past a full turn draws over itself, vertex
+ * for vertex.
+ */
+export function detectPeriod(
+  surface: ParametricSurface,
+  params: ArrayLike<number>,
+  alongU: boolean,
+): number | null {
+  const [u0, u1] = sampleBounds(surface.u);
+  const [v0, v1] = sampleBounds(surface.v);
+  const width = alongU ? u1 - u0 : v1 - v0;
+  if (!(width > 0)) return null;
+
+  // Already closed at the current bounds: the width IS the period, exactly, for free.
+  if (alongU ? surface.periodicU : surface.periodicV) return width;
+
+  const scale = extentOf(surface, params);
+  if (!(scale > 0)) return null;
+  const tolerance = scale * RELATIVE_TOLERANCE;
+
+  const start = alongU ? u0 : v0;
+  const [otherLo, otherHi] = alongU ? [v0, v1] : [u0, u1];
+
+  const here: [number, number, number] = [0, 0, 0];
+  const there: [number, number, number] = [0, 0, 0];
+
+  /** How far `X(start + p, ·)` has moved from `X(start, ·)`, at its worst along the boundary. */
+  const gap = (p: number): number => {
+    let worst = 0;
+    for (let k = 0; k < PERIOD_SAMPLES; k++) {
+      const t = otherLo + ((otherHi - otherLo) * k) / Math.max(PERIOD_SAMPLES - 1, 1);
+      const ok = alongU
+        ? position(surface, start, t, params, here) && position(surface, start + p, t, params, there)
+        : position(surface, t, start, params, here) && position(surface, t, start + p, params, there);
+      if (!ok) return Infinity;
+      worst = Math.max(
+        worst,
+        Math.hypot(here[0] - there[0], here[1] - there[1], here[2] - there[2]),
+      );
+    }
+    return worst;
+  };
+
+  const span = width * PERIOD_REACH;
+  const step = span / PERIOD_STEPS;
+  /**
+   * The gap has to genuinely leave before coming back.
+   *
+   * Every parametrization is nearly unchanged just after p = 0, so the trivial minimum sitting
+   * there is the first thing any search finds — and accepting it reports a period of about zero,
+   * which would pin a domain control shut. Nothing counts until the surface has moved a
+   * measurable fraction of its own size away from where it started.
+   */
+  const departure = scale * PERIOD_DEPARTURE;
+  let left = false;
+  let previous = Infinity;
+  let best = Number.NaN;
+
+  for (let i = 1; i <= PERIOD_STEPS; i++) {
+    const p = step * i;
+    const value = gap(p);
+    if (!left) {
+      if (value > departure) left = true;
+      previous = value;
+      continue;
+    }
+    if (value < previous) {
+      previous = value;
+      continue;
+    }
+    // Turned upward: the sample before this one bracketed a minimum.
+    const refined = refineMinimum(gap, p - 2 * step, p);
+    if (gap(refined) <= tolerance) {
+      best = refined;
+      break;
+    }
+    previous = value;
+  }
+
+  return Number.isFinite(best) && best > 0 ? best : null;
+}
+
+/** Samples along the boundary compared at each candidate period. Three pins a rigid motion. */
+const PERIOD_SAMPLES = 3;
+/**
+ * How far past the current width to look, as a multiple of it.
+ *
+ * Generous, because the width is no guide: a domain already narrowed to a fifth of a turn has its
+ * period five widths away, and a control that lost the wall there would walk straight past it.
+ */
+const PERIOD_REACH = 8;
+/** Candidates in that reach. Coarse: a bracketed minimum is refined rather than resolved here. */
+const PERIOD_STEPS = 160;
+/** How far the surface must move before a return counts, as a fraction of its own extent. */
+const PERIOD_DEPARTURE = 0.05;
+
+/** Ternary search for the minimum of a unimodal gap on [lo, hi]. */
+function refineMinimum(gap: (p: number) => number, lo: number, hi: number): number {
+  let left = lo;
+  let right = hi;
+  for (let i = 0; i < 24; i++) {
+    const a = left + (right - left) / 3;
+    const b = right - (right - left) / 3;
+    if (gap(a) < gap(b)) right = b;
+    else left = a;
+  }
+  return (left + right) / 2;
+}
+
+/**
  * Find which chart boundaries are coordinate poles.
  *
  * A boundary counts as a pole only if it is degenerate **along its whole length** — one degenerate

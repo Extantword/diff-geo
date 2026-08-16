@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { Ctx, nodeCount, freeVars, type Expr } from "../../src/core/expr/ast.ts";
-import { parse, parseRow } from "../../src/core/expr/parse.ts";
+import { parse, parseRow, splitHost } from "../../src/core/expr/parse.ts";
 import { toSource, toPython } from "../../src/core/expr/print.ts";
 
 /** Parse, asserting success, and return the printed source. */
@@ -373,5 +373,194 @@ describe("labelled tuple components", () => {
     expect(row.row?.kind).toBe("vectorFunction");
     expect((row.row as { comps: readonly unknown[] }).comps).toHaveLength(3);
     expect(row.diags.filter((d) => d.severity === "error")).toEqual([]);
+  });
+});
+
+describe("a row stated in someone's chart", () => {
+  /**
+   * `X: (u − a)² + (v − b)² = 1` is a curve in **X's** chart. Nothing in a relation between u and
+   * v can say whose u and v those are, so the row says it — in the text, where it is visible,
+   * saved and undone along with the formula.
+   */
+  it("reads the name before the colon and parses the rest as a row", () => {
+    const row = parseRow("X: (u - a)^2 + (v - b)^2 = 1");
+    expect(row.host).toBe("X");
+    expect(row.row?.kind).toBe("equation");
+    expect(row.diags.filter((d) => d.severity === "error")).toEqual([]);
+  });
+
+  it("takes a subscripted patch name, since that is what new patches are called", () => {
+    expect(parseRow("X_2: v = sin u").host).toBe("X_2");
+    // `v = sin u` declares v, which is what makes it the chart graph v = f(u) a layer up.
+    expect(parseRow("X_2: v = sin u").row?.kind).toBe("value");
+  });
+
+  it("leaves an ordinary row alone", () => {
+    expect(parseRow("X(u,v) = (u, v, 0)").host).toBeUndefined();
+    expect(parseRow("a = 2").host).toBeUndefined();
+  });
+
+  it("blanks the prefix instead of removing it, so diagnostics still point at the right place", () => {
+    /**
+     * Every diagnostic carries character offsets into the text the user typed. Shortening the
+     * string would slide every one of them left by the length of the prefix, and the squiggle
+     * would land on the character before the mistake.
+     */
+    const { body } = splitHost("X: 1 + ");
+    expect(body).toHaveLength("X: 1 + ".length);
+    const prefixed = parseRow("X: 1 + ");
+    const plain = parseRow("   1 + ");
+    expect(prefixed.diags.map((d) => d.span)).toEqual(plain.diags.map((d) => d.span));
+  });
+
+  it("treats a bare prefix as a row still being written", () => {
+    // What the "+ relation" button opens: the patch is named, the formula is not there yet.
+    const { host, body } = splitHost("X: ");
+    expect(host).toBe("X");
+    expect(body.trim()).toBe("");
+  });
+});
+
+describe("the tangent plane at a point of a chart", () => {
+  it("reads T_(u, v) X as a point in the chart and the patch it belongs to", () => {
+    const { row, host, diags } = parseRow("T_(1, 2) X");
+    expect(diags.filter((d) => d.severity === "error")).toEqual([]);
+    expect(row?.kind).toBe("tangentPlane");
+    if (row?.kind !== "tangentPlane") throw new Error("not a tangent plane");
+    expect(toSource(row.at[0])).toBe("1");
+    expect(toSource(row.at[1])).toBe("2");
+    expect(row.surface).toBe("X");
+    // The patch named after the point IS the host, so everything that reads `host` — the chart
+    // inset, the copy machinery, the placement — needs no second field to consult.
+    expect(host).toBe("X");
+  });
+
+  it("takes expressions for the point, so a slider can carry the plane along the surface", () => {
+    const { row, diags } = parseRow("T_(a + 1, pi/2) X");
+    expect(diags.filter((d) => d.severity === "error")).toEqual([]);
+    if (row?.kind !== "tangentPlane") throw new Error("not a tangent plane");
+    expect(freeVars(row.at[0])).toEqual(["a"]);
+  });
+
+  it("splits at the comma between the coordinates, not one inside a call", () => {
+    const { row, diags } = parseRow("T_(atan2(1, 2), 0) X");
+    expect(diags.filter((d) => d.severity === "error")).toEqual([]);
+    if (row?.kind !== "tangentPlane") throw new Error("not a tangent plane");
+    expect(toSource(row.at[0])).toBe("atan2(1, 2)");
+    expect(toSource(row.at[1])).toBe("0");
+  });
+
+  it("accepts a row that names no patch, which then falls back to the first surface", () => {
+    const { row, host } = parseRow("T_(1, 2)");
+    if (row?.kind !== "tangentPlane") throw new Error("not a tangent plane");
+    expect(row.surface).toBeNull();
+    expect(host).toBeUndefined();
+  });
+
+  it("reads the prefix form as the same row", () => {
+    // `X: T_(1,2)` and `T_(1,2) X` are one row said two ways; both have to end up hosted by X.
+    const { row, host } = parseRow("X: T_(1, 2)");
+    expect(row?.kind).toBe("tangentPlane");
+    expect(host).toBe("X");
+  });
+
+  it("says so when the row names two different patches", () => {
+    const { host, diags } = parseRow("Y: T_(1, 2) X");
+    expect(host).toBe("X");
+    expect(diags.some((d) => d.code === "W_TWO_HOSTS")).toBe(true);
+  });
+
+  it("keeps the coordinates' offsets, so a diagnostic lands where the mistake is", () => {
+    /**
+     * The pieces are blanked out of the row rather than cut out of it — the same reason the `X:`
+     * prefix is. A squiggle under the second coordinate has to appear under the second
+     * coordinate, and its offsets are into the text the user typed.
+     */
+    const source = "T_(1, 2 @ 3) X";
+    const { diags } = parseRow(source);
+    const span = diags.find((d) => d.severity === "error")?.span;
+    expect(span).toBeDefined();
+    expect(source.slice(span![0], span![1])).toBe("@");
+  });
+
+  it("asks for two coordinates when it is given some other number", () => {
+    for (const source of ["T_(1) X", "T_(1, 2, 3) X"]) {
+      const { row, diags } = parseRow(source);
+      expect(row).toBeNull();
+      expect(diags.some((d) => d.code === "E_ARITY")).toBe(true);
+    }
+  });
+
+  it("reports an unclosed point rather than handing the row to the lexer", () => {
+    /**
+     * `T_(` has already committed to the form, so it is answered in its own terms. Left to the
+     * ordinary path it would come back as "subscript is empty" pointing at a parenthesis, which
+     * is a fact about tokens rather than about the row being written.
+     */
+    const { row, diags } = parseRow("T_(1, 2 X");
+    expect(row).toBeNull();
+    expect(diags.some((d) => d.code === "E_UNCLOSED")).toBe(true);
+    expect(diags.some((d) => d.message.includes("subscript"))).toBe(false);
+  });
+
+  it("rejects anything but a patch name after the point", () => {
+    const { row, diags } = parseRow("T_(1, 2) X + Y");
+    expect(row).toBeNull();
+    expect(diags.some((d) => d.code === "E_UNEXPECTED")).toBe(true);
+  });
+
+  it("leaves an ordinary subscripted name alone", () => {
+    // `T_1` is a variable, and `T_1 u` is a product. Only `T_(` starts a tangent plane.
+    expect(parseRow("T_1 u").row?.kind).toBe("expr");
+  });
+});
+
+describe("a vector field along a patch", () => {
+  it("reads VectorField(a, b, c) as three ambient components on a named patch", () => {
+    const { row, host, diags } = parseRow("X: VectorField(-sin v, cos v, 0)");
+    expect(diags.filter((d) => d.severity === "error")).toEqual([]);
+    expect(row?.kind).toBe("surfaceField");
+    if (row?.kind !== "surfaceField") throw new Error("not a field");
+    expect(row.comps.map((c) => toSource(c))).toEqual(["-sin(v)", "cos(v)", "0"]);
+    expect(host).toBe("X");
+  });
+
+  it("takes the trailing-name spelling too, like a tangent plane", () => {
+    const { row, host } = parseRow("VectorField(0, 0, 1) X");
+    expect(row?.kind).toBe("surfaceField");
+    if (row?.kind !== "surfaceField") throw new Error("not a field");
+    expect(row.surface).toBe("X");
+    expect(host).toBe("X");
+  });
+
+  it("would otherwise lex as a product of single letters against a tuple", () => {
+    /**
+     * The reason this is a row form rather than a call: `VectorField` is not a known name, so the
+     * lexer takes it one character at a time and `(a, b, c)` becomes a tuple inside an
+     * expression — a nested-tuple error about tokens, for a row whose form is the thing being
+     * written.
+     */
+    const { row, diags } = parseRow("W = VectorField(0, 0, 1)");
+    expect(row).toBeNull();
+    expect(diags.some((d) => d.code === "E_NESTED_TUPLE")).toBe(true);
+  });
+
+  it("asks for three components when given some other number", () => {
+    const { row, diags } = parseRow("X: VectorField(1, 0)");
+    expect(row).toBeNull();
+    expect(diags.some((d) => d.code === "E_ARITY")).toBe(true);
+    expect(diags[0]!.message).toContain("three components");
+  });
+
+  it("reports an unclosed field rather than handing the row to the lexer", () => {
+    const { row, diags } = parseRow("X: VectorField(1, 0, 0");
+    expect(row).toBeNull();
+    expect(diags.some((d) => d.code === "E_UNCLOSED")).toBe(true);
+  });
+
+  it("keeps each component's offsets, so a diagnostic lands on the right one", () => {
+    const source = "X: VectorField(1, 2 @ 3, 0)";
+    const span = parseRow(source).diags.find((d) => d.severity === "error")?.span;
+    expect(source.slice(span![0], span![1])).toBe("@");
   });
 });
