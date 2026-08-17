@@ -18,6 +18,15 @@ import type { DocumentStore } from "./graph.ts";
 /** Preferred names for a parametrized surface, in order. */
 export const SURFACE_NAMES: readonly string[] = ["X", "Y", "Z", "W", "P", "Q"];
 
+/**
+ * Preferred names for an ambient space, in order.
+ *
+ * `A_1`, `A_2`, … — numbered rather than lettered, because spaces are made one after another and
+ * "the third space" is how anyone would refer to it, while the fifth letter of an alphabet of
+ * spaces is not something a reader can count.
+ */
+export const SPACE_NAMES: readonly string[] = ["A_1", "A_2", "A_3", "A_4", "A_5", "A_6"];
+
 /** Preferred names for a curve, in order. */
 export const CURVE_NAMES: readonly string[] = ["alpha", "beta", "gamma", "delta", "sigma", "tau"];
 

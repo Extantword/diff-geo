@@ -508,6 +508,40 @@ body {
 }
 
 /*
+ * The eye: whether the object is drawn at all.
+ *
+ * Shares the pencil's shape and hit size — the gutter is a little column of controls and they
+ * have to read as one — but it stays visible when the row is not hovered while it is SHUT, since
+ * a hidden object has nothing on the stage to remind you it exists.
+ */
+.gutter__eye {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: var(--text);
+  cursor: pointer;
+  opacity: 0.55;
+  transition: opacity 0.15s, background 0.15s;
+}
+
+.gutter__eye svg {
+  display: block;
+}
+
+.row:hover .gutter__eye,
+.gutter__eye:focus-visible,
+.gutter__eye--off {
+  opacity: 1;
+  background: rgba(0, 0, 0, 0.07);
+}
+
+/*
  * The colour input the pencil opens, kept off screen rather than hidden.
  *
  * `display: none` makes `click()` a no-op in some browsers, and this element exists for no other
@@ -734,6 +768,69 @@ option {
 .row__chart .toggle {
   margin-bottom: 0;
   color: var(--text-dim);
+}
+
+/*
+ * A domain the scene is currently ignoring — a level set framed by its own extent instead.
+ *
+ * Dimmed rather than hidden: the values are still what the sliders will go back to saying the
+ * moment the fit is turned off, and a control that disappears looks like a control that was lost.
+ */
+.row__domain--ignored {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+/*
+ * The ambient-space banner: top centre, out of the way of the panel and the two stage buttons.
+ *
+ * Quiet, because it is a statement about the mode rather than a control anybody needs to find
+ * quickly — but present, because a mode with no visible way out is a trap.
+ */
+.ambient {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 6px 4px 12px;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid var(--panel-border);
+  border-radius: 999px;
+  box-shadow: 0 2px 10px rgba(20, 30, 45, 0.12);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.ambient[hidden] {
+  display: none;
+}
+
+.ambient__exit {
+  padding: 2px 10px;
+  background: var(--field);
+  border: 1px solid var(--panel-border);
+  border-radius: 999px;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.ambient__exit:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/*
+ * A row that belongs to another object, while an ambient space is open.
+ *
+ * Hidden rather than removed: the document still holds it, its controls are still registered, and
+ * leaving the space is a class toggle rather than a rebuild.
+ */
+.row--out-of-scope {
+  display: none;
 }
 
 /* ---- slider transport ---- */
@@ -1850,6 +1947,22 @@ option {
 
 .row__move:hover {
   color: var(--text);
+}
+
+/*
+ * The way into an ambient space, on the cell that declares it.
+ *
+ * A space draws nothing of itself, so it is the one object with nothing on the stage to
+ * double-click; the arrow is the way in. Coloured like an action rather than like the quiet
+ * move/remove controls, since it is the point of the row.
+ */
+.row__enter {
+  color: var(--accent);
+  font-size: 14px;
+}
+
+.row__enter[hidden] {
+  display: none;
 }
 
 /*

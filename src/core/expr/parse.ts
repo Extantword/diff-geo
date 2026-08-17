@@ -541,6 +541,15 @@ export type ParsedRow =
       /** the patch it is tangent to, or null when the row names none */
       readonly surface: string | null;
     }
+  /**
+   * `A = AmbientSpace` — a copy of R³ to build things in.
+   *
+   * Recognized **before lexing**, like every other row form, because `AmbientSpace` on the right
+   * of an `=` would otherwise lex as a product of twelve single-letter variables. A space declares
+   * nothing but its name, which is the point of it: what it holds is every row whose scope names
+   * it, and that is written in those rows rather than listed here.
+   */
+  | { readonly kind: "ambientSpace"; readonly name: string }
   /** a bare `(1, 2, 3)` */
   | { readonly kind: "tuple"; readonly comps: readonly Expr[] }
   /** a bare expression */
@@ -558,22 +567,62 @@ export interface ParseRowResult {
    * text and undone with it.
    */
   readonly host?: string;
+  /**
+   * The whole scope chain the row was written in, outermost first.
+   *
+   * `host` is its innermost segment — the chart — while this is the address: `A:sigma: u + v = 1`
+   * is stated in sigma's chart **and** in A's space, and a name it mentions may be declared in
+   * either. Empty for a row written at the top level.
+   */
+  readonly scope?: readonly string[];
 }
 
 /**
- * `X: …` — the name of the chart a row is stated in, and the rest of the row.
+ * `A:sigma: …` — the scope a row is written in, and the rest of the row.
+ *
+ * `:` is this language's `.`: it names the thing a row is *inside*, and it chains as deep as the
+ * document is built. `A` is an ambient space, `sigma` a chart in it, and `A:sigma: u + v = 1` is a
+ * relation stated in sigma's chart, in A's space — the whole address, visible in the row, saved
+ * with it and undone with it. A repeated colon is tolerated (`A:sigma::k`) because it is a natural
+ * thing to type for "one level further in" and it means exactly the same path.
  *
  * The body is **blanked** rather than removed: every diagnostic carries character offsets into
  * the source the user typed, and shortening the string would slide every one of them left by the
  * length of the prefix.
  */
-export function splitHost(source: string): { host: string | null; body: string } {
-  const match = /^(\s*)([A-Za-z][A-Za-z0-9_]*)(\s*):/.exec(source);
-  if (!match) return { host: null, body: source };
+export function splitScope(source: string): {
+  /** the segments of the prefix, outermost first: `["A", "sigma"]` */
+  readonly path: readonly string[];
+  /** the innermost segment — the chart a row is stated in, when there is one */
+  readonly host: string | null;
+  readonly body: string;
+} {
+  const segment = /^(\s*)([A-Za-z][A-Za-z0-9_]*)(\s*):+/;
+  const path: string[] = [];
+  let consumed = 0;
+  for (;;) {
+    const match = segment.exec(source.slice(consumed));
+    if (!match) break;
+    path.push(match[2]!);
+    consumed += match[0].length;
+  }
+  if (path.length === 0) return { path, host: null, body: source };
   return {
-    host: match[2]!,
-    body: " ".repeat(match[0].length) + source.slice(match[0].length),
+    path,
+    host: path[path.length - 1]!,
+    body: " ".repeat(consumed) + source.slice(consumed),
   };
+}
+
+/**
+ * The innermost scope segment alone: what most of the app means by "which chart is this in".
+ *
+ * Kept as its own function because that question is asked in a dozen places and none of them
+ * care about the rest of the address.
+ */
+export function splitHost(source: string): { host: string | null; body: string } {
+  const { host, body } = splitScope(source);
+  return { host, body };
 }
 
 /**
@@ -610,6 +659,23 @@ export interface RowForm {
 /** A row that begins a form but does not go on to say one. */
 export interface RowFormError {
   readonly diag: Diagnostic;
+}
+
+/**
+ * `A = AmbientSpace`, `A_1 = ambient space`, `A = AmbientSpace()`.
+ *
+ * The name may carry a subscript, because spaces are handed out as A_1, A_2, … as they are made.
+ * Tested before the lexer sees the row for the reason every row form is: the right-hand side is a
+ * *word*, not an expression, and letting the expression parser have it produces a diagnostic about
+ * implicit multiplication for a row whose form is the thing being written.
+ */
+const AMBIENT_ROW =
+  /^\s*([A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+|_\{[^}]*\})?)\s*=\s*ambient\s*space\s*(?:\(\s*\))?\s*$/i;
+
+/** `A = AmbientSpace`, or null when the row is not one. */
+export function splitAmbientSpace(source: string): { readonly name: string } | null {
+  const match = AMBIENT_ROW.exec(source);
+  return match ? { name: match[1]! } : null;
 }
 
 const TANGENT_HEAD = /^\s*T_\s*\(/;
@@ -749,8 +815,9 @@ function findTopLevelEquals(tokens: readonly Token[]): number {
  * a layer up; this only recovers the syntactic shape.
  */
 export function parseRow(source: string, options: ParseOptions = {}): ParseRowResult {
-  const { host, body } = splitHost(source);
+  const { path, host, body } = splitScope(source);
   const text = host === null ? source : body;
+  const scope = path.length === 0 ? undefined : path;
 
   /**
    * A row form names its patch **after** the arguments, so the trailing name is the host and the
@@ -758,6 +825,12 @@ export function parseRow(source: string, options: ParseOptions = {}): ParseRowRe
    * are one row — which is what keeps the copy machinery, the chart inset and the placement all
    * reading a single field instead of two.
    */
+  const space = splitAmbientSpace(text);
+  if (space) {
+    const row: ParsedRow = { kind: "ambientSpace", name: space.name };
+    return host === null ? { row, diags: [], scope } : { row, diags: [], host, scope };
+  }
+
   const form = parseTangentRow(text, options) ?? parseFieldRow(text, options);
   if (form) {
     const named =
@@ -778,12 +851,12 @@ export function parseRow(source: string, options: ParseOptions = {}): ParseRowRe
             ),
           ]
         : form.diags;
-    const result = { ...form, diags };
+    const result = { ...form, diags, scope };
     return owner === null ? result : { ...result, host: owner };
   }
 
   if (host === null) return parseRowBody(source, options);
-  return { ...parseRowBody(body, options), host };
+  return { ...parseRowBody(body, options), host, scope };
 }
 
 /** Parse a form's arguments, keeping every diagnostic. Null if any of them failed. */

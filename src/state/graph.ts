@@ -1,7 +1,61 @@
-import { freeVars, type Expr } from "../core/expr/ast.ts";
+import { freeVars, variable, type Expr } from "../core/expr/ast.ts";
 import { error, hint, type Diagnostic } from "../core/expr/diagnostics.ts";
 import { lookupFn } from "../core/expr/fns.ts";
 import { parseRow, splitHost, type ParsedRow } from "../core/expr/parse.ts";
+import { qualify, resolveScoped, within } from "./scope.ts";
+
+/**
+ * A table keyed by qualified name, seen from `path` under the bare names a row writes.
+ *
+ * Only what encloses the row is visible — `A:k` from inside A, never `B:k` — and the **innermost**
+ * definition of a bare name wins, which is the ordinary lexical rule. A name declared nowhere is
+ * absent from the result and stays free, which is what makes an undeclared parameter shared by
+ * every scope in the document rather than private to the first one that mentions it.
+ */
+function visibleIn<T>(
+  table: ReadonlyMap<string, T>,
+  path: readonly string[],
+): Map<string, T> {
+  const out = new Map<string, T>();
+  const depths = new Map<string, number>();
+  const elsewhere = new Map<string, { entry: T; count: number }>();
+  for (const [key, entry] of table) {
+    const { owner, bare } = splitQualified(key);
+    if (!within(path, owner)) {
+      const seen = elsewhere.get(bare);
+      elsewhere.set(bare, { entry, count: (seen?.count ?? 0) + 1 });
+      continue;
+    }
+    if ((depths.get(bare) ?? -1) > owner.length) continue;
+    depths.set(bare, owner.length);
+    out.set(bare, entry);
+  }
+  /**
+   * A name from somewhere else entirely, when there is exactly one of it.
+   *
+   * Full addresses are for when they are needed, not for every mention: a document with one
+   * surface called sigma should let another row say `sigma` wherever it is written. Two of them
+   * and the short name means nothing, so it resolves to nothing — the same fail-closed answer
+   * `E_DUPLICATE` gives, for the same reason: picking one would make where you typed it silently
+   * decide which object you meant.
+   */
+  for (const [bare, found] of elsewhere) {
+    if (found.count !== 1 || out.has(bare)) continue;
+    out.set(bare, found.entry);
+  }
+  return out;
+}
+
+/** `"A:sigma:k"` → the path `["A", "sigma"]` and the name `"k"`. */
+function splitQualified(key: string): { owner: readonly string[]; bare: string } {
+  const cut = key.lastIndexOf(":");
+  return cut < 0
+    ? { owner: EMPTY_PATH, bare: key }
+    : { owner: key.slice(0, cut).split(":"), bare: key.slice(cut + 1) };
+}
+
+/** Shared so the common case — a row at the top level — allocates nothing. */
+const EMPTY_PATH: readonly string[] = [];
 import {
   inlineDefinitions,
   type InlineFailure,
@@ -44,7 +98,6 @@ export type ItemKind =
   | "parametricSurface"
   | "graphSurface"
   | "implicitSurface"
-  | "implicitPlaneCurve"
   | "point"
   | "vectorField"
   /** `T_(u₀, v₀) X`: the tangent plane to a patch at a point of its chart */
@@ -58,6 +111,8 @@ export type ItemKind =
   | "chartRelation"
   /** a row declaring a plain number: becomes a compiled slot, not an inlined literal */
   | "parameter"
+  /** `A = AmbientSpace`: a copy of R³, and the scope everything written in it belongs to */
+  | "ambientSpace"
   | "unknown";
 
 export interface Item {
@@ -279,6 +334,9 @@ export function resolve(rows: readonly Row[]): Resolution {
   // ---- pass 1: parse every row ----
   const userFunctionNames = new Set<string>();
   const hosts = new Map<RowId, string>();
+  /** Each row's address, outermost first: `A:sigma: …` is `["A", "sigma"]`. */
+  const scopes = new Map<RowId, readonly string[]>();
+  const pathOf = (id: RowId): readonly string[] => scopes.get(id) ?? EMPTY_PATH;
   for (const row of rows) {
     const text = row.source();
     // `X:` on its own is a row being written, not a broken one — the same as an empty cell.
@@ -289,8 +347,9 @@ export function resolve(rows: readonly Row[]): Resolution {
     // The host comes off the PARSE, not off the prefix: `T_(1,2) X` names its patch after the
     // point, and both spellings have to end up in one field or half the machinery reads the
     // wrong one.
-    const { row: parsed, diags, host } = parseRow(text);
+    const { row: parsed, diags, host, scope } = parseRow(text);
     if (host !== undefined) hosts.set(row.id, host);
+    if (scope !== undefined) scopes.set(row.id, scope);
     diagnostics.set(row.id, [...diags]);
     if (parsed) {
       parsedRows.set(row.id, parsed);
@@ -310,10 +369,11 @@ export function resolve(rows: readonly Row[]): Resolution {
     for (const row of rows) {
       const text = row.source();
       if (splitHost(text).body.trim() === "") continue;
-      const { row: parsed, diags, host } = parseRow(text, {
+      const { row: parsed, diags, host, scope } = parseRow(text, {
         userFunctions: userFunctionNames,
       });
       if (host !== undefined) hosts.set(row.id, host);
+      if (scope !== undefined) scopes.set(row.id, scope);
       diagnostics.set(row.id, [...diags]);
       if (parsed) parsedRows.set(row.id, parsed);
       else parsedRows.delete(row.id);
@@ -327,11 +387,17 @@ export function resolve(rows: readonly Row[]): Resolution {
   for (const row of rows) {
     const parsed = parsedRows.get(row.id);
     if (!parsed) continue;
-    const name = declaredName(parsed);
-    if (name === null) continue;
+    const bare = declaredName(parsed);
+    if (bare === null) continue;
+    /**
+     * Keyed by the **qualified** name, which is what makes a scope a scope: `A:k` and `B:k` are
+     * two numbers, and neither is the document's `k`. A name is still reserved against the
+     * built-in functions by its bare spelling — `A:sin` would be a trap whichever space it is in.
+     */
+    const name = qualify(pathOf(row.id), bare);
 
-    if (lookupFn(name)) {
-      push(row.id, error("E_RESERVED", `"${name}" is a built-in function`));
+    if (lookupFn(bare)) {
+      push(row.id, error("E_RESERVED", `"${bare}" is a built-in function`));
       continue;
     }
     const existing = declarations.get(name);
@@ -347,6 +413,18 @@ export function resolve(rows: readonly Row[]): Resolution {
   }
   for (const name of duplicated) declarations.delete(name);
 
+  /**
+   * A bare name, resolved the way a row means it: innermost scope first, then — if nothing
+   * encloses it — the one declaration of that name anywhere, when there is exactly one.
+   */
+  const uniqueByBare = new Map<string, string | null>();
+  for (const key of declarations.keys()) {
+    const { bare } = splitQualified(key);
+    uniqueByBare.set(bare, uniqueByBare.has(bare) ? null : key);
+  }
+  const resolveRef = (path: readonly string[], bare: string): string =>
+    resolveScoped(path, bare, (q) => declarations.has(q)) ?? uniqueByBare.get(bare) ?? bare;
+
   // ---- pass 3: dependency edges and cycle detection ----
   const dependencies = new Map<RowId, Set<RowId>>();
   for (const row of rows) {
@@ -356,8 +434,11 @@ export function resolve(rows: readonly Row[]): Resolution {
     if (!parsed) continue;
 
     const locals = new Set(localNames(parsed));
-    for (const name of referencedNames(parsed)) {
-      if (locals.has(name)) continue;
+    const path = pathOf(row.id);
+    for (const bare of referencedNames(parsed)) {
+      if (locals.has(bare)) continue;
+      // Innermost first: a row in A:sigma sees sigma's k, then A's, then the document's.
+      const name = resolveRef(path, bare);
       const declaration = declarations.get(name);
       if (declaration && declaration.rowId !== row.id) edges.add(declaration.rowId);
       // Self-reference is genuine recursion, which the CAS cannot differentiate.
@@ -392,35 +473,72 @@ export function resolve(rows: readonly Row[]): Resolution {
     const rowDiagnostics = diagnostics.get(id) ?? [];
     if (rowDiagnostics.some((d) => d.severity === "error")) continue;
 
-    const item = classify(id, parsed, values, functions, push);
+    const path = pathOf(id);
+    /**
+     * What this row can see, under the bare names it writes.
+     *
+     * The tables are keyed by qualified name, because that is the identity of a definition; a row
+     * writes `k` and means whichever `k` is nearest. So each row gets a view of the tables with
+     * the innermost visible definition under each bare name, and everything downstream — the
+     * inliner, the classifier — goes on working in bare names as it always has.
+     */
+    const item = classify(
+      id,
+      parsed,
+      visibleIn(values, path),
+      visibleIn(functions, path),
+      push,
+    );
     if (!item) continue;
 
-    const host = hosts.get(id);
+    // A declaration's identity is its qualified name: `A:k` is A's, `k` is the document's.
+    const named = item.name === null ? item : { ...item, name: qualify(path, item.name) };
+
+    const bareHost = hosts.get(id);
+    const host =
+      bareHost === undefined
+        ? undefined
+        : resolveRef(path, bareHost);
+    /**
+     * Naming a chart is also saying the row is stated in one — but a **space** is not a chart.
+     * `A: alpha(t) = (cos t, sin t)` is a plane curve in A, not a curve in A's (u, v), and A has
+     * no (u, v) to be in. So the default follows what the host actually is.
+     */
+    const hostItem =
+      host === undefined ? null : items.get(declarations.get(host)?.rowId ?? -1) ?? null;
+    const inChart =
+      hostItem !== null &&
+      (hostItem.kind === "parametricSurface" || hostItem.kind === "graphSurface");
     items.set(
       id,
-      host === undefined
-        ? item
-        : // Naming a chart is also saying the row is stated IN one, so a two-component curve
-          // written in t reads as a curve in (u, v) without the toggle being found first.
-          { ...item, host, chartByDefault: true },
+      host === undefined ? named : { ...named, host, chartByDefault: inChart },
     );
-    for (const name of item.params) freeParameters.add(name);
+    for (const name of named.params) freeParameters.add(name);
 
     // Publish this row's definition for the rows that depend on it.
-    if (item.kind === "parameter" && item.name && item.comps[0]?.kind === "num") {
-      // Deliberately NOT added to `values`: leaving it symbolic is what makes it a slot.
-      declaredParameters.set(item.name, item.comps[0].value);
-      freeParameters.add(item.name);
-    } else if (item.kind === "scalar" && item.name && item.comps[0]) {
-      values.set(item.name, item.comps[0]);
+    if (named.kind === "parameter" && named.name && named.comps[0]?.kind === "num") {
+      // Deliberately NOT inlined: leaving it symbolic is what makes it a slot.
+      declaredParameters.set(named.name, named.comps[0].value);
+      freeParameters.add(named.name);
+      /**
+       * A scoped parameter is published as a **rename**, not as a value.
+       *
+       * Rows inside A write `k` and have to compile against the slot `A:k`, or two spaces each
+       * with their own k would both ask the scene for a number called k and get one answer. The
+       * rename rides the inliner already in place: `k ↦ var("A:k")` substitutes a name for a
+       * name, the expression stays symbolic, and the slot keeps its per-frame cost of nothing.
+       */
+      if (path.length > 0) values.set(named.name, variable(named.name));
+    } else if (named.kind === "scalar" && named.name && named.comps[0]) {
+      values.set(named.name, named.comps[0]);
     } else if (
-      (item.kind === "functionDefinition" || item.kind === "chartGraph") &&
-      item.name
+      (named.kind === "functionDefinition" || named.kind === "chartGraph") &&
+      named.name
     ) {
-      functions.set(item.name, {
-        name: item.name,
-        args: item.vars,
-        body: item.comps[0]!,
+      functions.set(named.name, {
+        name: named.name,
+        args: named.vars,
+        body: named.comps[0]!,
       });
     }
   }
@@ -449,6 +567,9 @@ function declaredName(parsed: ParsedRow): string | null {
     case "value":
     case "function":
     case "vectorFunction":
+    // A space's name is a declaration like any other: two spaces called A is one name meaning two
+    // places, which `E_DUPLICATE` refuses for the same reason it refuses two surfaces called X.
+    case "ambientSpace":
       return parsed.name;
     default:
       return null;
@@ -463,6 +584,9 @@ function localNames(parsed: ParsedRow): readonly string[] {
 
 function bodyExpressions(parsed: ParsedRow): readonly Expr[] {
   switch (parsed.kind) {
+    // A space has no body: it declares a place, not a quantity.
+    case "ambientSpace":
+      return [];
     case "value":
     case "function":
     case "expr":
@@ -562,6 +686,17 @@ function classify(
   push: PushDiagnostic,
 ): Item | null {
   const locals = new Set(localNames(parsed));
+
+  /**
+   * A space is a scope, and that is all it is.
+   *
+   * It draws nothing by itself — the axes are drawn when it is opened — and it evaluates nothing,
+   * so it carries no components and no parameters. What makes it useful is its **name**, which
+   * every row written inside it repeats in its own prefix.
+   */
+  if (parsed.kind === "ambientSpace") {
+    return { rowId, kind: "ambientSpace", name: parsed.name, vars: [], comps: [], params: [] };
+  }
 
   // A function declaration is published for other rows rather than drawn itself.
   if (parsed.kind === "function" && parsed.args.length > 0) {
@@ -855,18 +990,26 @@ function classify(
         };
       }
 
-      const ambient = [...free].filter((n) =>
-        (AMBIENT_VARS as readonly string[]).includes(n),
-      );
-      const keep = new Set(ambient);
-      const kind: ItemKind = ambient.includes("z")
-        ? "implicitSurface"
-        : "implicitPlaneCurve";
+      const keep = new Set(AMBIENT_VARS);
+      /**
+       * An equation in the ambient coordinates is a **surface in R³**, whichever of them it
+       * mentions.
+       *
+       * `x² + y² = 1` names two and is the **cylinder**, not the circle: the regular value theorem
+       * reads it as a level set of F: R³ → R, and the circle is what that surface cuts on a plane
+       * rather than what the equation says. Drawing it flat instead is offered as a per-row
+       * choice, since only the reader knows which was meant — but the surface is the default,
+       * because this is a program about surfaces in space.
+       *
+       * The variables are therefore the **box**, not the ones the formula happens to mention. A
+       * level set has no chart, so its "domain" is the window it is searched in, and that window
+       * always has as many sides as the space.
+       */
       return {
         rowId,
-        kind,
+        kind: "implicitSurface",
         name: null,
-        vars: ambient.sort(),
+        vars: [...AMBIENT_VARS],
         comps,
         params: paramsOf(comps, keep, values, functions),
       };

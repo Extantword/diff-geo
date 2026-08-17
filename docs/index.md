@@ -46,6 +46,9 @@ X(u,v) = (sin u cos v, sin u sin v, cos u)
 X: VectorField(-sin u sin v, sin u cos v, 0)
 ```
 
+A surface can also be given as an equation rather than a map — `x^2 + y^2 + z^2 = 1` is the same
+sphere, found by [meshing its level set](#level-sets).
+
 Nothing above is special-cased. Everything in the [catalog](#the-catalog) is the same kind of text,
 and loading a template inserts exactly what you could have typed.
 
@@ -195,6 +198,49 @@ X: beta(t) = (t, 2t)
 Duplicating a patch (the `⧉` button on its cell) copies every row stated in its chart along with
 it, re-pointed at the copy, so the copy is the object rather than the line of text.
 
+### Ambient spaces, and `:` as scope
+
+`:` is this language's `.`. An **ambient space** is a copy of R³ to build in, made from the panel's
+**+ space** button or by typing one:
+
+```dg
+A_1 = AmbientSpace
+```
+
+Everything written inside it says so, and the prefix chains as deep as you build:
+
+```dg
+A = AmbientSpace
+A: sigma(u,v) = (u, v, u^2 - v^2)
+A:sigma: u + v = 1
+```
+
+`A:sigma` is A's chart sigma; the relation is stated in that chart, in that space. A repeated colon
+means the same thing, so `A:sigma::k` and `A:sigma:k` address one name.
+
+Open a space with the **↗** on its cell — a space draws nothing of itself, so there is nothing on
+the stage to double-click — and leave it with a double right-click or the banner. Inside, the axes
+appear, the panel narrows to what belongs to the space, and the empty cell already carries the
+prefix, so anything you type there lands in the space you are looking at. Outside, everything is
+still drawn: opening a space narrows what you see, it never decides what is real.
+
+A **name declared in a scope belongs to it**, so two spaces can each have their own:
+
+```dg
+A = AmbientSpace
+B = AmbientSpace
+A: k = 2
+B: k = 5
+A: X(u,v) = (u, v, k + R)
+B: Y(u,v) = (u, v, k + R)
+```
+
+`A:k` and `B:k` are two numbers with two sliders. `R` is declared nowhere, so both spaces see the
+same free name and one slider moves both surfaces — sharing a parameter across spaces is what
+*not* shadowing it does. A name is resolved innermost first: `A:sigma:k`, then `A:k`, then the
+document's `k`. A short name that nothing encloses still finds the one declaration of it anywhere,
+and finds nothing when there are two.
+
 ### Tangent planes
 
 `T_(u₀, v₀) X` attaches the tangent plane at a point of X's chart:
@@ -248,6 +294,52 @@ example in the catalog is. The **+ field** button on a patch does it for you: it
 patch's own formula and writes ∂X/∂v, which is tangent by construction.
 
 `VectorField(…) X` is the same row said the other way round.
+
+### Level sets
+
+An equation in the ambient coordinates is a **level set**: the surface where `F(x, y, z) = 0`,
+with F the difference of the two sides.
+
+```dg
+x^2 + y^2 + z^2 = 1
+```
+
+It is meshed inside a **box** — the domain sliders are the three sides of that box, and the box is
+a window onto R³ rather than something the surface is a map from. So a level set can leave through
+the wall of its box, and widening the box shows more of it rather than more resolution.
+
+Everything a parametrized patch reports, a level set reports too, because the geometry is computed
+the same way: with `N = ∇F/|∇F|` the shape operator is the Hessian of F projected onto the tangent
+plane, `A = −P·Hess(F)·P / |∇F|`, and the same eigensolver produces K, H, k₁ and k₂ from it. The
+sphere above comes out with K = 1 and H = −1 — the same numbers, sign and all, that the
+parametrized sphere gives.
+
+```dg
+(sqrt(x^2 + y^2) - 1)^2 + z^2 = 0.16
+```
+
+That is a torus, and its K runs from cos u/(r(R + r cos u)) at both extremes exactly as the
+parametrized one does.
+
+An equation in **two** ambient coordinates is still a surface: `x^2 + y^2 = 1` is the cylinder,
+because the regular value theorem reads it as a level set of F: R³ → R.
+
+```dg
+x^2 + y^2 = 1
+```
+
+The circle is what that cylinder cuts on the plane z = 0 — a different object, and one the row can
+ask for with **draw flat** in its properties. Both are honest readings of the same equation, and
+only you know which you meant.
+
+What a level set does not have is a **chart**. There is no (u, v) to state a curve in, so the
+chart inset, geodesics, the Gauss map and chart relations belong to parametrized patches only —
+and clicking a level set reports no coordinates, because it has none to report.
+
+It does have a **grid**, though: where the ambient coordinates cut it. The curves of constant x, y
+and z on the surface are its contour lines, the way a map draws a hillside, and they are what the
+`▦` chip draws. Turn the face off with `◼` and they are what is left — a wireframe you can see the
+inside of, and other objects through.
 
 ### Diagnostics
 
@@ -353,8 +445,8 @@ Selecting an object opens its properties. Beside the colour swatch:
 | chip | what it does |
 | --- | --- |
 | `K` | paint Gaussian curvature, or show the object's own colour |
-| `◼` | the face: draw this patch's surface |
-| `▦` | the grid: draw its (u, v) grid and the border of its domain |
+| `◼` | the face: draw this surface's shaded skin |
+| `▦` | the grid: the curves of constant u and v on a patch, or of constant x, y and z on a level set, with the border where it is cut |
 | `+ relation` | open a new cell that already names this patch, ready for a relation |
 | `+ tangent` | a tangent plane at the centre of this patch's domain |
 | `+ field` | this patch's own coordinate field ∂X/∂v, tangent by construction |
@@ -392,19 +484,56 @@ there too.
 drawn wherever it is finite, dashed past the domain's border, and has an image on the surface only
 inside it. That is what makes the domain readable as a choice rather than as the edge of the world.
 
+**Hovering the inset** picks out the grid square under the pointer and, at the same time, the
+patch of surface it maps to. That is the parametrization made visible one cell at a time, which is
+what the two pictures are side by side to show: a square in the corner and a curved quadrilateral
+on the object, the same square seen from both ends of the map.
+
 The inset follows the last patch you selected, and is toggled from the scene card.
 
 ### Selecting and moving objects
 
 - **Click** an object to focus it: its row highlights, and if it is a patch the inset shows its
   chart. Nothing else moves.
-- **Double-click** it to open its properties at the pointer.
-- **Drag** an object to move it. The point you grabbed stays under the pointer.
+- **Right-click** it to open its properties — the colour, the domain sliders, the chips. One
+  press; a right *drag* still turns the object.
+- **Double-click** it to enter its **ambient space**: everything else
+  leaves the stage and the x, y and z axes appear, so the question becomes where the object sits
+  as much as what shape it is. Rows stated in its chart come with it — a curve on a surface is
+  part of that surface's picture. An object that belongs to an ambient space opens **that space**,
+  with everything else in it.
+  Inside, the object is drawn **where its formula puts it**: arrangement is dropped and dragging
+  is disabled, because a picture you can move is not a picture of where the surface is. The camera
+  still orbits.
+  Inside, the panel shows only what belongs to that object: its own row, everything stated on it,
+  and the parameters it is built from. The empty cell at the bottom already carries the `X:`
+  prefix, so anything you write there belongs to the space — **a point**, `X: (1, 2, 3)`; **a
+  curve**, `X: alpha(t) = (cos t, sin t, t)`; **a graph**, `X: z = x^2 - y^2`. Those live in that
+  space: they are drawn when it is open and nowhere else, because a point written beside one
+  surface is a stray point out in the whole document. A **surface** written there shares the space
+  too: an ambient space has no way into another one, so inside, a double click does nothing but
+  focus what it landed on — and the controls are a right click away, as they are everywhere else. Everything written in a space is on the stage when you leave, points
+  and curves included: ambient space narrows what you see, it never decides what is real. What
+  takes an object off the stage is the **eye** on its own row. Building inside a space is the point of it: a patch you type, a
+  template you load from the gallery and a formula you drop on the canvas all land in the space
+  you are looking at, and anything stated on what you built — a field, a relation, a tangent
+  plane — is in that space with it.
+- **Double right-click**, anywhere, leaves ambient space; so does the button at the top. Getting
+  out never depends on hitting anything, and double-click keeps meaning "open this" while you are
+  inside.
+- **Drag** an object to move it. The point you grabbed stays under the pointer. An object written
+  in another's ambient space moves **with that space**: a point beside a torus is at those
+  coordinates *of the torus's space*, so the two travel together.
+- The **eye** in a row's gutter stops the object being drawn, and shows it again. It is saved with
+  the document and undone with everything else.
 - **Right-drag** an object to turn it about the camera's axes.
 - Click empty space to deselect.
 
 Arrangement is a rigid motion applied to what is drawn, never to the map it came from, so moving or
 turning an object changes no curvature at all.
+
+The camera has **z up**, like the mathematics: every surface here puts its axis of symmetry on z,
+so a torus closes around the vertical and `z = f(x, y)` is a height above the floor.
 
 The camera: **left-drag** orbits, **wheel** zooms, **Shift-drag** (or the middle button) pans, and
 `W A S D Q E` fly the view when you are not typing.
@@ -476,6 +605,19 @@ itself, not declared, so a hand-typed sphere behaves like a catalog one. A **pol
 either: the parametrization runs straight through it, so a great circle reaching a sphere's pole
 carries on.
 
+### The curvature of a level set
+
+`N = ∇F/|∇F|`, and `A = −P·Hess(F)·P/|∇F|` in an orthonormal tangent basis, through the same
+eigensolver the parametric path uses — so a sign error could not hide in one representation and
+not the other. Where ∇F vanishes, the level set has no tangent plane and generally is not a
+surface either (the apex of `x² + y² − z² = 0`); those points are marked rather than answered.
+
+The mesh comes from **marching tetrahedra**: each cube of the grid is cut into six tets, which
+removes the ambiguous face marching cubes has to guess at, needs sixteen cases instead of two
+hundred and fifty-six, and is watertight by construction. Each vertex takes one Newton step onto
+the level set after its edge is interpolated, and its normal and curvature come from ∇F and the
+Hessian rather than from the triangles around it.
+
 ### The Gauss map
 
 The Gauss image is the same mesh with positions and normals exchanged, drawn on a sphere beside the
@@ -507,12 +649,20 @@ toward.
 ## The catalog
 
 Every entry is source text pushed through the same pipeline your typing goes through. The ground
-truth suite verifies these nine surfaces against their closed forms, so they double as the engine's
-own tests.
+truth suite verifies these against their closed forms — H = 0 for the minimal ones, K = −1 for the
+pseudospherical ones, K ≤ 0 for the ruled ones — so they double as the engine's own tests.
 
 ### Surfaces
 
 <!-- generated: catalog.surfaces -->
+
+### Level sets in the catalog
+
+Surfaces given as an equation. Several are here because they *cannot* be written the other way: a
+smooth quartic has no rational parametrization at all, and the triply periodic minimal surfaces
+have no elementary one. Each carries the box it should be looked for in.
+
+<!-- generated: catalog.implicit -->
 
 ### Curves
 
@@ -566,9 +716,13 @@ watch the inset as well: the same flow runs there, over the domain it actually l
 
 ## Limits
 
-- **Implicit surfaces are not drawn yet.** `x² + y² + z² = 1` classifies as one and says so; the
-  marching-cubes path is the next milestone. A field on all of R³, `V(x,y,z) = (…)`, is recognised
-  and not drawn for the same reason.
+- **A level set has no chart**, so geodesics, the Gauss map, chart relations and the inset are for
+  parametrized patches only. Its box is also a window rather than a boundary: a surface that
+  leaves through the wall is cut off there.
+- **A field on all of R³**, `V(x,y,z) = (…)`, is recognised and not drawn. A field along a surface
+  is: see [vector fields](#vector-fields).
+- An equation in x and y alone is read as the **surface** it defines in R³ — `x^2 + y^2 = 1` is
+  the cylinder. Tick **draw flat** on the row for the plane curve instead.
 - **Identifiers are one character** unless they are a name the lexer knows. `radius` is r·a·d·i·u·s
   until something declares it.
 - `min`, `max`, `floor`, `ceil` and `mod` do not exist, and will not: see

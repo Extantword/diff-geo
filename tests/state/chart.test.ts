@@ -5,8 +5,14 @@ import {
   chartGrid,
   chartLift,
   GRID_DIVISIONS,
+  meshSliceLines,
   surfaceGridLines,
 } from "../../src/state/chart.ts";
+import { parse } from "../../src/core/expr/parse.ts";
+import { createImplicitSurface } from "../../src/core/geom/implicit.ts";
+import { interval } from "../../src/core/geom/types.ts";
+import { buildDiffMap } from "../../src/core/jets/compile.ts";
+import { marchImplicit } from "../../src/core/mesh/marchingCubes.ts";
 import { marchingSquares } from "../../src/core/mesh/contour.ts";
 import type { Vec3 } from "../../src/core/geom/types.ts";
 
@@ -762,5 +768,119 @@ describe("which chart a curve lives in", () => {
 
     // Only the grid and the border: no curve was added to the first patch's chart.
     expect(scene.chartLines).toHaveLength(2);
+  });
+});
+
+describe("the grid on a surface that has no chart", () => {
+  /**
+   * A parametrized patch's grid is its curves of constant u and v. A level set has neither, so
+   * the analogous thing is where the ambient coordinates cut it — the surface's own contour lines,
+   * the way a map draws a hillside. Without them, turning a level set's face off left nothing at
+   * all on the screen, which made the switch look broken rather than useful.
+   */
+  function levelSet(source: string, half = 2, res = 24) {
+    const { expr } = parse(source);
+    const map = buildDiffMap({
+      id: source,
+      comps: [expr!],
+      vars: ["x", "y", "z"],
+      params: [],
+      order: 2,
+    });
+    const surface = createImplicitSurface({
+      id: source,
+      map,
+      x: interval(-half, half),
+      y: interval(-half, half),
+      z: interval(-half, half),
+    });
+    return marchImplicit(surface, new Float64Array(0), { res });
+  }
+
+  /** How far the contours stray from the true sphere at a given grid: the mesh's own chord error. */
+  const worstRadius = (res: number) => {
+    const { interior } = meshSliceLines(levelSet("x^2 + y^2 + z^2 - 1", 2, res), 0);
+    expect(interior.length).toBeGreaterThan(100);
+    let worst = 0;
+    for (const line of interior) {
+      for (let i = 0; i < line.count; i++) {
+        const r = Math.hypot(
+          line.points[i * 3]!,
+          line.points[i * 3 + 1]!,
+          line.points[i * 3 + 2]!,
+        );
+        worst = Math.max(worst, Math.abs(r - 1));
+      }
+    }
+    return worst;
+  };
+
+  it("cuts contours that lie on the surface as drawn", () => {
+    /**
+     * They are cut from the triangles, so they carry the **mesh's** error and not one of their
+     * own: a chord of the true surface, O(h²) in the cell size. That is the point of cutting the
+     * mesh rather than re-marching the field — a contour found independently would lie near the
+     * drawn triangles instead of on them, and would z-fight with the very surface it decorates.
+     * So the assertion is the chord error, and it falls with the grid. The bound is generous
+     * because a tetrahedron's edges include the cube's face and body diagonals, so the longest
+     * chord spans h√3 rather than h.
+     */
+    expect(worstRadius(24)).toBeLessThan(1.2e-2);
+    expect(worstRadius(48)).toBeLessThan(worstRadius(24) / 2);
+  });
+
+  it("lifts them clear of the triangles they were cut from", () => {
+    // Same lift a curve on a parametric surface takes, and for the same reason: a line lying
+    // exactly in a face z-fights with it.
+    const mesh = levelSet("x^2 + y^2 + z^2 - 1");
+    const lifted = meshSliceLines(mesh, 0.05).interior[0]!;
+    const r = Math.hypot(lifted.points[0]!, lifted.points[1]!, lifted.points[2]!);
+    expect(r).toBeGreaterThan(1.04);
+    expect(r).toBeLessThan(1.06);
+  });
+
+  it("draws a border only where the surface was actually cut", () => {
+    /**
+     * The rim is the edges belonging to one triangle. A sphere inside its box has none — it is
+     * closed — while a surface running out of the box has the curve where it left. With the face
+     * off, that outline is what says the surface was cut rather than that it ends there.
+     */
+    expect(meshSliceLines(levelSet("x^2 + y^2 + z^2 - 1"), 0).border).toEqual([]);
+    expect(meshSliceLines(levelSet("x^2 + y^2 - 1"), 0).border.length).toBeGreaterThan(10);
+  });
+
+  it("says nothing about an empty mesh", () => {
+    expect(meshSliceLines(levelSet("x^2 + y^2 + z^2 - 100"), 0).interior).toEqual([]);
+  });
+
+  it("reaches the scene, and follows the row's own switch", () => {
+    const document = createDocument(["x^2 + y^2 + z^2 = 1"]);
+    const rowId = document.rows()[0]!.id;
+    const items = [...document.resolution().items.values()];
+    const shown = buildScene({ items, parameters: new Map(), domains: new Map(), resolution: 48 });
+    expect(shown.gridLines.length).toBeGreaterThan(0);
+
+    const off = buildScene({
+      items,
+      parameters: new Map(),
+      domains: new Map(),
+      resolution: 48,
+      overlays: new Map([
+        [rowId, { geodesics: 0, geodesicLength: 1.5, curvatureLines: false, grid: false }],
+      ]),
+    });
+    expect(off.gridLines).toEqual([]);
+    // And with the face off instead, the grid is the whole picture — which is the point of it.
+    const wireframe = buildScene({
+      items,
+      parameters: new Map(),
+      domains: new Map(),
+      resolution: 48,
+      overlays: new Map([
+        [rowId, { geodesics: 0, geodesicLength: 1.5, curvatureLines: false, fill: false }],
+      ]),
+    });
+    expect(wireframe.gridLines.length).toBeGreaterThan(0);
+    expect(wireframe.mesh!.style[0]! % 2).toBe(0);
   });
 });

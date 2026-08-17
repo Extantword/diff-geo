@@ -6,19 +6,20 @@ import {
   type ColormapName,
 } from "../core/geom/colormaps.ts";
 import { toLatex } from "../core/expr/latex.ts";
-import { parse, parseRow, splitHost } from "../core/expr/parse.ts";
+import { parse, parseRow, splitHost, splitScope } from "../core/expr/parse.ts";
 import { toSource } from "../core/expr/print.ts";
 import { diff } from "../core/expr/diff.ts";
 import { simplify } from "../core/expr/simplify.ts";
 import {
   CURVE_NAMES,
+  SPACE_NAMES,
   SURFACE_NAMES,
   nextName,
   rehost,
   renameDeclaration,
   usedNames,
 } from "../state/naming.ts";
-import type { DocumentStore, Item, RowId } from "../state/graph.ts";
+import type { DocumentStore, Item, Resolution, RowId } from "../state/graph.ts";
 import {
   DEFAULT_DOMAIN,
   type DomainRange,
@@ -57,8 +58,7 @@ const KIND_LABEL: Readonly<Record<string, string>> = {
   spaceCurve: "space curve",
   parametricSurface: "coordinate patch",
   graphSurface: "graph patch",
-  implicitSurface: "implicit surface",
-  implicitPlaneCurve: "implicit curve",
+  implicitSurface: "level set",
   point: "point",
   vectorField: "vector field",
   functionDefinition: "definition",
@@ -70,7 +70,8 @@ const KIND_LABEL: Readonly<Record<string, string>> = {
 };
 
 /** Not yet drawn by the renderer; the badge says so rather than failing silently. */
-const NOT_YET_DRAWN = new Set(["implicitSurface", "implicitPlaneCurve", "vectorField"]);
+/** Recognized, and not drawn: a field on all of R³ has no surface to live along. */
+const NOT_YET_DRAWN = new Set(["vectorField"]);
 
 export interface SliderSpec {
   value: number;
@@ -137,6 +138,13 @@ export interface ExprListOptions {
    * selecting a row has to be able to ask for a rebuild, exactly as editing one does.
    */
   readonly onSelect?: (id: RowId | null) => void;
+  /**
+   * Step into an ambient space, from the arrow on its own cell.
+   *
+   * A space is the one object with nothing on the stage to double-click, so the way in has to be
+   * in the panel; the way out is the banner and the double right-click, as it is for every space.
+   */
+  readonly onEnterSpace?: (id: RowId) => void;
 }
 
 export interface ExprList {
@@ -165,6 +173,15 @@ export interface ExprList {
   setPlacement(mode: "bar" | "cursor"): void;
   /** Remember where to open the window, for the cursor placement. */
   placeAt(x: number, y: number): void;
+  /**
+   * Show only the rows belonging to one object, or all of them again.
+   *
+   * What belongs: the row itself, everything stated on it with the `X:` prefix, and everything it
+   * is built from — a torus whose R and r were hidden would be a torus with half its controls
+   * missing. Rows outside the scope stay in the document and in the DOM; only their visibility
+   * changes, so leaving costs nothing and loses nothing.
+   */
+  setScope(scope: { readonly name: string; readonly rowId: RowId } | null): void;
   /**
    * Full refresh: echoes, badges, controls, diagnostics. For structural changes.
    *
@@ -261,6 +278,8 @@ interface RowView {
   readonly valueHost: HTMLElement;
   /** host for the chart toggle a plane-curve row gets */
   readonly chartHost: HTMLElement;
+  /** host for the flat-drawing toggle a level set gets */
+  readonly planeHost: HTMLElement;
   /** host for the geodesic and curvature-line controls a surface row gets */
   readonly overlayHost: HTMLElement;
   /** host for the transport a vector field gets, so its flow can be played */
@@ -281,6 +300,10 @@ interface RowView {
   readonly colorSwatch: HTMLInputElement;
   /** the dot on the cell that reports the colour the object is drawn in */
   readonly colorDot: HTMLElement;
+  /** the eye that draws or stops drawing the whole row */
+  readonly eye: HTMLButtonElement;
+  /** the arrow that opens an ambient space, shown on that kind of row alone */
+  readonly enterSpace: HTMLButtonElement;
   /** the pencil's colour input, opened by it and never shown */
   readonly colorField: HTMLInputElement;
   /** the gutter holding both, hidden on a row that draws nothing */
@@ -296,6 +319,8 @@ interface RowView {
   readonly addTangent: HTMLButtonElement;
   /** makes a vector field along this patch; only a parametric patch can seed one */
   readonly addField: HTMLButtonElement;
+  /** frames the whole of a level set, ignoring its box sliders */
+  readonly fitChip: HTMLButtonElement;
   /** this row's colour-map menu, once its surface controls exist */
   colormapSelect: HTMLSelectElement | null;
   readonly detailsTitle: HTMLElement;
@@ -307,6 +332,22 @@ interface RowView {
   /** the name the inline slider was built for, or "" if there is none */
   valueName: string;
 }
+
+/** The eye, open: this object is drawn. */
+const EYE_OPEN =
+  '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">' +
+  '<path fill="none" stroke="currentColor" stroke-width="1.3" ' +
+  'd="M1 8s2.6-4.2 7-4.2S15 8 15 8s-2.6 4.2-7 4.2S1 8 1 8z"/>' +
+  '<circle cx="8" cy="8" r="1.9" fill="currentColor"/></svg>';
+
+/** And shut: the same eye, struck through, so the two read as one control in two states. */
+const EYE_SHUT =
+  '<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">' +
+  '<path fill="none" stroke="currentColor" stroke-width="1.3" opacity="0.55" ' +
+  'd="M1 8s2.6-4.2 7-4.2S15 8 15 8s-2.6 4.2-7 4.2S1 8 1 8z"/>' +
+  '<circle cx="8" cy="8" r="1.9" fill="currentColor" opacity="0.55"/>' +
+  '<path stroke="currentColor" stroke-width="1.4" d="M2.4 13.6 13.6 2.4"/></svg>';
+
 
 export function createExprList(options: ExprListOptions): ExprList {
   const { document: store } = options;
@@ -417,6 +458,89 @@ export function createExprList(options: ExprListOptions): ExprList {
     if (moved) options.onSelect?.(id);
   };
 
+  /**
+   * The ambient space the list is showing, if any.
+   *
+   * Inside one, the panel is about that object: the row itself, everything stated on it, and the
+   * parameters it is built from. Everything else is still in the document and still in the DOM —
+   * hidden rather than removed, so leaving the space costs a class toggle and nothing has to be
+   * rebuilt, refocused or re-registered.
+   */
+  let scope: { readonly name: string; readonly rowId: RowId } | null = null;
+
+  /**
+   * Which rows belong to the scoped object.
+   *
+   * Three things do: the row itself; every row stated on it, which is what the `X:` prefix says;
+   * and every row it is **built from** — a torus whose R and r are elsewhere is not usable without
+   * them, and hiding a slider the surface depends on would be hiding half the object. Followed to
+   * a fixed point, since a parameter can be defined in terms of another.
+   */
+  const inScope = (resolution: Resolution): Set<RowId> => {
+    const keep = new Set<RowId>();
+    if (scope === null) return keep;
+    keep.add(scope.rowId);
+
+    /**
+     * Membership is read off the **text**, not off the resolution.
+     *
+     * A row being typed has no item yet — `X: ` alone resolves to nothing, and neither does a
+     * half-written formula — so a filter that asked the resolution would hide the cell at the
+     * exact moment somebody is writing in it, which is what it did. The prefix is the binding and
+     * the prefix is text, so the text is what decides. Blank cells stay for the same reason: the
+     * empty one at the end is where the next expression goes.
+     */
+    for (const row of store.rows()) {
+      const text = row.source();
+      if (isBlank(text) || withinScope(splitScope(text).path, scope.name)) keep.add(row.id);
+    }
+
+    const items = [...resolution.items.values()];
+    /**
+     * Numbers and definitions are in scope everywhere, because they belong to the document rather
+     * than to any object: one `k` is one number wherever it is used. Without this, adding a slider
+     * inside a space would make it vanish until something referred to it.
+     */
+    for (const item of items) {
+      if (item.kind === "parameter" || item.kind === "scalar" || item.kind === "functionDefinition") {
+        keep.add(item.rowId);
+      }
+    }
+
+    for (let pass = 0; pass < 8; pass++) {
+      const wanted = new Set<string>();
+      /**
+       * What is stated *on* something in the space is in the space too.
+       *
+       * A surface written inside X's space is X's, and a field or a relation written on that
+       * surface is X's by the same argument — the chain is what the prefix means. Without the
+       * transitive step, loading a patch-with-field inside a space would show the patch and hide
+       * the field stated on it.
+       */
+      const hosts = new Set<string>();
+      for (const item of items) {
+        if (!keep.has(item.rowId)) continue;
+        for (const name of item.params) wanted.add(name);
+        if (item.name !== null) hosts.add(item.name);
+      }
+      let grew = false;
+      for (const item of items) {
+        if (keep.has(item.rowId) || item.host == null) continue;
+        if (!hosts.has(item.host)) continue;
+        keep.add(item.rowId);
+        grew = true;
+      }
+      for (const item of items) {
+        if (keep.has(item.rowId) || item.name === null) continue;
+        if (!wanted.has(item.name)) continue;
+        keep.add(item.rowId);
+        grew = true;
+      }
+      if (!grew) break;
+    }
+    return keep;
+  };
+
   const views = new Map<RowId, RowView>();
 
   /**
@@ -462,15 +586,54 @@ export function createExprList(options: ExprListOptions): ExprList {
    * write and never an "add" button to find. Trailing empties beyond the first are collapsed, so
    * the bar cannot grow a tail of blanks.
    */
+  /**
+   * What a new cell starts with: nothing, or the prefix of the space you are inside.
+   *
+   * In an ambient space every expression written belongs to that space, so the cell says so before
+   * you type — the same thing the "+ relation" button does, applied to the empty cell that is
+   * always there. A row that is only a prefix counts as empty, so trailing cells still collapse.
+   */
+  const blankRow = () => (scope === null ? "" : `${scope.name}: `);
+  /**
+   * The full address of the object a row declares — `sigma` at the top level, `A:sigma` inside A.
+   *
+   * Every button that writes a row *about* another one uses this rather than the bare name: a
+   * relation written as `sigma:` while sigma lives in A would be a row at the top level naming
+   * something inside a space, which resolves only by luck (one sigma in the document) and stops
+   * resolving the moment there are two.
+   */
+  const addressOf = (id: RowId): string | null => {
+    const named = store.resolution().items.get(id)?.name;
+    if (named != null) return named;
+    const parsed = parseRow(store.rows().find((row) => row.id === id)?.source() ?? "").row;
+    return parsed && "name" in parsed ? parsed.name : null;
+  };
+
+  const isBlank = (text: string) => splitHost(text).body.trim() === "";
+
+  /**
+   * Whether a row written at `path` is inside the scope addressed by `address`.
+   *
+   * The address is the open object's **qualified** name — `A`, or `A:sigma` — which is exactly the
+   * prefix its rows carry, so this is a question about one string being a scope-prefix of another.
+   * `A` holds `A:sigma:` and does not hold `AB:`, which is why the test is segment-wise rather
+   * than `startsWith`.
+   */
+  const withinScope = (path: readonly string[], address: string): boolean => {
+    const outer = address.split(":");
+    if (outer.length > path.length) return false;
+    return outer.every((segment, index) => path[index] === segment);
+  };
+
   const ensureTrailingCell = () => {
     const rows = store.rows();
     const trailing: RowId[] = [];
     for (let i = rows.length - 1; i >= 0; i--) {
-      if (rows[i]!.source().trim() !== "") break;
+      if (!isBlank(rows[i]!.source())) break;
       trailing.push(rows[i]!.id);
     }
     if (trailing.length === 0) {
-      store.addRow("");
+      store.addRow(blankRow());
       return true;
     }
     let changed = false;
@@ -593,6 +756,26 @@ export function createExprList(options: ExprListOptions): ExprList {
     const chartHost = el("div", { class: "row__chart" });
     const overlayHost = el("div", { class: "row__overlay" });
     const flowHost = el("div", { class: "row__flow" });
+    const planeHost = el("div", { class: "row__chart" });
+
+    /**
+     * Step into this space.
+     *
+     * A space draws nothing of itself — the axes are what you see when you are in one — so it is
+     * the one object that cannot be entered by double-clicking it on the stage. The button is on
+     * the **cell**, where the row that declares the space is, and it is shown for no other kind:
+     * every other object is entered by double-clicking the thing itself.
+     */
+    const enterSpace = el("button", {
+      class: "row__move row__enter",
+      title: "open this ambient space",
+      text: "\u2197",
+      hidden: true,
+      onClick: (event: Event) => {
+        event.stopPropagation();
+        options.onEnterSpace?.(id);
+      },
+    }) as HTMLButtonElement;
 
     const remove = el("button", {
       class: "row__remove",
@@ -842,7 +1025,26 @@ export function createExprList(options: ExprListOptions): ExprList {
       },
     }) as HTMLButtonElement;
 
-    const gutter = el("div", { class: "row__gutter" }, [colorDot, pencil, colorField]);
+    /**
+     * The eye: whether this object is drawn at all.
+     *
+     * Distinct from the dot, which for a patch takes the **face** off and leaves the grid — the
+     * outline is the half worth keeping when you are looking past a surface. The eye is the
+     * blunt one: closed, the row draws nothing, whatever kind of thing it is. It exists because
+     * everything a document holds is now on the stage at once, including what was built inside an
+     * ambient space, and the answer to "there is too much on screen" has to be a switch the user
+     * operates rather than a rule about which kinds of row are real.
+     */
+    const eye = el("button", {
+      class: "gutter__eye",
+      title: "hide this object",
+      onClick: (event: Event) => {
+        event.stopPropagation();
+        toggleHidden(id);
+      },
+    }) as HTMLButtonElement;
+
+    const gutter = el("div", { class: "row__gutter" }, [colorDot, pencil, eye, colorField]);
 
     const root = el("div", {
       class: "row row--editing",
@@ -859,6 +1061,7 @@ export function createExprList(options: ExprListOptions): ExprList {
       input,
       echo,
       el("div", { class: "row__tools" }, [
+        enterSpace,
         duplicate,
         shift(-1, "\u2191", "move up"),
         shift(1, "\u2193", "move down"),
@@ -913,11 +1116,29 @@ export function createExprList(options: ExprListOptions): ExprList {
     curvatureChip.addEventListener("click", (event: Event) => {
       event.stopPropagation();
       const select = views.get(id)?.colormapSelect;
-      if (!select) return;
-      const turningOn = select.value === "solid";
-      select.value = turningOn ? "curvature" : "solid";
-      select.dispatchEvent(new Event("change"));
+      if (select) {
+        // A patch has the colour-map menu, and the chip drives THAT rather than the record: the
+        // overlay controls rewrite all their state from their own locals on every commit, so
+        // setting the map behind the menu's back would be undone by the next slider drag.
+        const turningOn = select.value === "solid";
+        select.value = turningOn ? "curvature" : "solid";
+        select.dispatchEvent(new Event("change"));
+        curvatureChip.classList.toggle("chip--on", turningOn);
+        return;
+      }
+      /**
+       * A level set has no such menu — none of the overlay tools apply to it — so the chip is the
+       * only control for its colour map and writes the record directly. Safe precisely because
+       * there are no closure locals to go stale against.
+       */
+      const current = options.overlays.get(id) ?? EMPTY_OVERLAY;
+      const turningOn = (current.colormap ?? "curvature") === "solid";
+      options.overlays.set(id, {
+        ...current,
+        colormap: turningOn ? "curvature" : "solid",
+      });
       curvatureChip.classList.toggle("chip--on", turningOn);
+      options.onEdit(false);
     });
 
     /**
@@ -989,8 +1210,7 @@ export function createExprList(options: ExprListOptions): ExprList {
       title: "a curve in this patch's chart, as a relation between u and v",
       onClick: (event: Event) => {
         event.stopPropagation();
-        const parsed = parseRow(row.source());
-        const name = parsed.row && "name" in parsed.row ? parsed.row.name : null;
+        const name = addressOf(id);
         if (name === null) return;
         const opened = store.addRow(`${name}: `);
         syncRows();
@@ -1020,8 +1240,7 @@ export function createExprList(options: ExprListOptions): ExprList {
       title: "the tangent plane at a point of this patch's chart",
       onClick: (event: Event) => {
         event.stopPropagation();
-        const parsed = parseRow(row.source());
-        const name = parsed.row && "name" in parsed.row ? parsed.row.name : null;
+        const name = addressOf(id);
         if (name === null) return;
         const ranges = options.domains.get(id);
         const centre = (index: number, fallback: readonly [number, number]) => {
@@ -1031,8 +1250,13 @@ export function createExprList(options: ExprListOptions): ExprList {
             : (fallback[0] + fallback[1]) / 2;
           return Number(middle.toFixed(3));
         };
+        /**
+         * Written with the **prefix** spelling, `A:sigma: T_(u₀, v₀)`, rather than by naming the
+         * patch after the parenthesis. Both spellings mean one row, but only the prefix can carry
+         * an address: a trailing name is one identifier, and `A:sigma` is two.
+         */
         const opened = store.addRow(
-          `T_(${centre(0, DEFAULT_DOMAIN["u"]!)}, ${centre(1, DEFAULT_DOMAIN["v"]!)}) ${name}`,
+          `${name}: T_(${centre(0, DEFAULT_DOMAIN["u"]!)}, ${centre(1, DEFAULT_DOMAIN["v"]!)})`,
         );
         syncRows();
         options.onEdit(false);
@@ -1077,7 +1301,9 @@ export function createExprList(options: ExprListOptions): ExprList {
          */
         const usable = derivative.every((text) => !text.includes("NaN"));
         const opened = store.addRow(
-          `${parsed.name}: VectorField(${usable ? derivative.join(", ") : "0, 0, 1"})`,
+          `${addressOf(id) ?? parsed.name}: VectorField(${
+            usable ? derivative.join(", ") : "0, 0, 1"
+          })`,
         );
         syncRows();
         options.onEdit(false);
@@ -1086,6 +1312,40 @@ export function createExprList(options: ExprListOptions): ExprList {
         if (!view) return;
         view.enterEdit();
         view.input.setSelectionRange(view.input.value.length, view.input.value.length);
+      },
+    }) as HTMLButtonElement;
+
+    /**
+     * "Show me all of it", for a level set.
+     *
+     * Its domain sliders are a **window**, not a domain — the surface is wherever F vanishes, and
+     * the box only says where to look. So the one request three sliders cannot express is "as far
+     * as it goes, in every direction", and this is that request: the scene sweeps a wide reach,
+     * finds where the surface crosses, and frames exactly that. A bounded surface comes back
+     * framed; an unbounded one — a plane, a triply periodic minimal surface — fills the sweep, so
+     * you see it spanning every direction rather than cut to a domain nobody chose.
+     *
+     * The sliders keep their values while it is on, so turning it off puts the old window back
+     * rather than having overwritten it.
+     */
+    const fitChip = el("button", {
+      class: "chip",
+      title:
+        "show the whole surface, spanning every direction \u2014 the box is found rather than " +
+        "taken from the sliders",
+      html:
+        '<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">' +
+        '<path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" ' +
+        'd="M2 5.5V2h3.5M10.5 2H14v3.5M14 10.5V14h-3.5M5.5 14H2v-3.5"/>' +
+        '<circle cx="8" cy="8" r="2.4" fill="none" stroke="currentColor" stroke-width="1.4"/>' +
+        "</svg>",
+      onClick: (event: Event) => {
+        event.stopPropagation();
+        const current = options.overlays.get(id) ?? EMPTY_OVERLAY;
+        const wanted = !(current.autoBox ?? false);
+        options.overlays.set(id, { ...current, autoBox: wanted });
+        fitChip.classList.toggle("chip--on", wanted);
+        options.onEdit(false);
       },
     }) as HTMLButtonElement;
 
@@ -1138,10 +1398,11 @@ export function createExprList(options: ExprListOptions): ExprList {
             addRelation,
             addTangent,
             addField,
+            fitChip,
           ]),
         ]),
       ]),
-      el("div", { class: "props__tray" }, [notes, chartHost, overlayHost, frameHost]),
+      el("div", { class: "props__tray" }, [notes, chartHost, planeHost, overlayHost, frameHost]),
     ]);
 
     return {
@@ -1156,6 +1417,7 @@ export function createExprList(options: ExprListOptions): ExprList {
       frameHost,
       valueHost,
       chartHost,
+      planeHost,
       overlayHost,
       flowHost,
       flowBuilt: false,
@@ -1163,6 +1425,8 @@ export function createExprList(options: ExprListOptions): ExprList {
       details,
       colorSwatch,
       colorDot,
+      eye,
+      enterSpace,
       colorField,
       gutter,
       curvatureChip,
@@ -1171,6 +1435,7 @@ export function createExprList(options: ExprListOptions): ExprList {
       addRelation,
       addTangent,
       addField,
+      fitChip,
       colormapSelect: null,
       detailsTitle,
       paramHost,
@@ -1241,13 +1506,30 @@ export function createExprList(options: ExprListOptions): ExprList {
   const toggleDrawn = (id: RowId) => {
     const kind = store.resolution().items.get(id)?.kind;
     const current = options.overlays.get(id) ?? EMPTY_OVERLAY;
-    if (kind === "parametricSurface" || kind === "graphSurface") {
+    if (
+      kind === "parametricSurface" ||
+      kind === "graphSurface" ||
+      kind === "implicitSurface"
+    ) {
       options.overlays.set(id, { ...current, fill: !(current.fill ?? true) });
     } else if (kind === "surfaceField") {
       options.overlays.set(id, { ...current, arrows: !(current.arrows ?? true) });
     } else {
       options.overlays.set(id, { ...current, hidden: !(current.hidden ?? false) });
     }
+    options.onEdit(false);
+  };
+
+  /**
+   * Draw this row's object, or stop drawing it — the eye, for every kind of row.
+   *
+   * One flag (`hidden`) and one writer, so the cell's eye and anything else that ever offers it
+   * cannot drift. It lands in the overlays record, which is snapshotted by undo and saved with
+   * the document: being switched off is part of the figure rather than a mood the session is in.
+   */
+  const toggleHidden = (id: RowId) => {
+    const current = options.overlays.get(id) ?? EMPTY_OVERLAY;
+    options.overlays.set(id, { ...current, hidden: !(current.hidden ?? false) });
     options.onEdit(false);
   };
 
@@ -1739,7 +2021,10 @@ export function createExprList(options: ExprListOptions): ExprList {
       (item.kind === "parametricSurface" ||
         item.kind === "graphSurface" ||
         item.kind === "spaceCurve" ||
-        item.kind === "planeCurve");
+        item.kind === "planeCurve" ||
+        // A level set's "domain" is the box it is searched in — a window rather than something it
+        // is a map from — but it is edited with the same two-thumbed sliders.
+        item.kind === "implicitSurface");
 
     // Same rule as the row list: the number inputs are only rebuilt when the variables
     // change, so typing a domain bound is not interrupted by the next refresh.
@@ -2028,6 +2313,7 @@ export function createExprList(options: ExprListOptions): ExprList {
   const DRAWN_KINDS: ReadonlySet<string> = new Set([
     "parametricSurface",
     "graphSurface",
+    "implicitSurface",
     "planeCurve",
     "spaceCurve",
     "point",
@@ -2059,7 +2345,9 @@ export function createExprList(options: ExprListOptions): ExprList {
      */
     const overlay = options.overlays.get(view.id);
     const on =
-      item.kind === "parametricSurface" || item.kind === "graphSurface"
+      item.kind === "parametricSurface" ||
+      item.kind === "graphSurface" ||
+      item.kind === "implicitSurface"
         ? overlay?.fill ?? true
         : item.kind === "surfaceField"
           ? overlay?.arrows ?? true
@@ -2067,14 +2355,65 @@ export function createExprList(options: ExprListOptions): ExprList {
     view.colorDot.style.borderColor = hex;
     view.colorDot.style.background = on ? hex : "transparent";
     view.colorDot.classList.toggle("gutter__dot--off", !on);
+    /**
+     * Open or struck through, drawn as SVG for the reason the pencil is: a glyph is only there if
+     * the reader's font has it, and this one has to be legible at thirteen pixels.
+     */
+    const shut = overlay?.hidden ?? false;
+    view.eye.innerHTML = shut ? EYE_SHUT : EYE_OPEN;
+    view.eye.title = shut ? "draw this object" : "hide this object";
+    view.eye.classList.toggle("gutter__eye--off", shut);
+
     view.colorDot.title = on
-      ? item.kind === "parametricSurface" || item.kind === "graphSurface"
+      ? item.kind === "parametricSurface" ||
+        item.kind === "graphSurface" ||
+        item.kind === "implicitSurface"
         ? "hide this patch's face, keeping its grid"
         : "stop drawing this"
       : "draw this again";
     // The input is only pushed while nobody is holding it open, the same rule every other
     // control in this file follows.
     if (view.colorField !== globalThis.document.activeElement) view.colorField.value = hex;
+  };
+
+  /**
+   * A level set can ask to be drawn **flat**.
+   *
+   * `x² + y² = 1` is the cylinder — that is what the regular value theorem says, and it is the
+   * default — while its section by the plane it is drawn in is the circle. Both are honest
+   * readings of one row and only the reader knows which was meant, so this is a choice rather
+   * than an inference, offered exactly where the equation could mean either.
+   */
+  const syncPlaneToggle = (view: RowView, item: Item | null) => {
+    const eligible = item?.kind === "implicitSurface";
+    if (!eligible) {
+      if (view.planeHost.childElementCount > 0) replace(view.planeHost, []);
+      return;
+    }
+    if (view.planeHost.childElementCount > 0) {
+      const box = view.planeHost.querySelector("input");
+      if (box instanceof HTMLInputElement && box !== globalThis.document.activeElement) {
+        box.checked = options.overlays.get(view.id)?.inPlane ?? false;
+      }
+      return;
+    }
+
+    const toggle = el("input", {
+      type: "checkbox",
+      checked: options.overlays.get(view.id)?.inPlane ?? false,
+      onChange: () => {
+        const current = options.overlays.get(view.id) ?? EMPTY_OVERLAY;
+        options.overlays.set(view.id, { ...current, inPlane: toggle.checked });
+        options.onEdit(false);
+      },
+    }) as HTMLInputElement;
+
+    replace(view.planeHost, [
+      el("label", { class: "toggle toggle--tight" }, [
+        toggle,
+        el("span", { text: "draw flat — the curve this cuts on the z = 0 plane" }),
+      ]),
+    ]);
   };
 
   const syncFlowControl = (view: RowView, item: Item | null) => {
@@ -2162,10 +2501,18 @@ export function createExprList(options: ExprListOptions): ExprList {
    */
   const sharedOverlay = (id: RowId) => {
     const current = options.overlays.get(id);
-    return { hidden: current?.hidden, arrows: current?.arrows };
+    return {
+      hidden: current?.hidden,
+      arrows: current?.arrows,
+      fill: current?.fill,
+      grid: current?.grid,
+      colormap: current?.colormap,
+      autoBox: current?.autoBox,
+      inPlane: current?.inPlane,
+    };
   };
-  const hasShared = (shared: { hidden?: boolean; arrows?: boolean }) =>
-    shared.hidden !== undefined || shared.arrows !== undefined;
+  const hasShared = (shared: ReturnType<typeof sharedOverlay>) =>
+    Object.values(shared).some((value) => value !== undefined);
 
   const syncOverlayControl = (view: RowView, item: Item | null) => {
     const isSurface = item?.kind === "parametricSurface" || item?.kind === "graphSurface";
@@ -2700,6 +3047,7 @@ export function createExprList(options: ExprListOptions): ExprList {
   const refresh = (reports: readonly RowReport[], drawn?: ReadonlyMap<RowId, Vec3>) => {
     syncRows();
     const resolution = store.resolution();
+    const scoped = scope === null ? null : inScope(resolution);
     /**
      * Before the per-row loop, not after it.
      *
@@ -2733,9 +3081,14 @@ export function createExprList(options: ExprListOptions): ExprList {
         (item && NOT_YET_DRAWN.has(item.kind) ? " row__badge--pending" : "") +
         (label === "" ? " row__badge--empty" : "");
 
+      // Hidden, never removed: leaving an ambient space is a class toggle, and a row that was
+      // rebuilt would lose its caret, its focus and its registered controls on the way out.
+      view.root.classList.toggle("row--out-of-scope", scoped !== null && !scoped.has(id));
+
       syncColor(view, item, drawn?.get(id));
       syncValueSlider(view, item);
       syncChartToggle(view, item);
+      syncPlaneToggle(view, item);
       syncFlowControl(view, item);
       syncOverlayControl(view, item);
       syncDomain(view, item);
@@ -2743,14 +3096,33 @@ export function createExprList(options: ExprListOptions): ExprList {
       syncFrameControl(view, item);
       syncRowParams(view, item);
       // Read back from the overlay rather than remembered, so the chip and the menu cannot drift.
-      const isPatch = item?.kind === "parametricSurface" || item?.kind === "graphSurface";
-      view.addRelation.hidden = !isPatch;
-      view.addTangent.hidden = !isPatch;
-      // Only a parametric patch: the seed is ∂X/∂v, read off a formula a graph patch does not
-      // have in that form.
+      /**
+       * Three different questions, and they were one flag until level sets arrived.
+       *
+       * A level set has a **face and a grid** — its grid is where the ambient coordinates cut it —
+       * so the two switches apply. It has no **chart**, so nothing can be stated in its (u, v):
+       * no relation, no tangent plane at a chart point. And only a parametric patch can seed a
+       * field, since the seed is ∂X/∂v read off its own formula.
+       */
+      const hasFace =
+        item?.kind === "parametricSurface" ||
+        item?.kind === "graphSurface" ||
+        item?.kind === "implicitSurface";
+      const hasChart = item?.kind === "parametricSurface" || item?.kind === "graphSurface";
+      view.enterSpace.hidden = item?.kind !== "ambientSpace";
+      view.addRelation.hidden = !hasChart;
+      view.addTangent.hidden = !hasChart;
       view.addField.hidden = item?.kind !== "parametricSurface";
-      view.fillChip.hidden = !isPatch;
-      view.gridChip.hidden = !isPatch;
+      view.fillChip.hidden = !hasFace;
+      view.gridChip.hidden = !hasFace;
+      // Only a level set has a box to fit: a patch's domain is part of what the surface IS.
+      view.fitChip.hidden = item?.kind !== "implicitSurface";
+      view.fitChip.classList.toggle("chip--on", options.overlays.get(id)?.autoBox ?? false);
+      // While it is on, the sliders are inert, and saying so is cheaper than being asked why.
+      view.domainHost.classList.toggle(
+        "row__domain--ignored",
+        item?.kind === "implicitSurface" && (options.overlays.get(id)?.autoBox ?? false),
+      );
       view.fillChip.classList.toggle("chip--on", options.overlays.get(id)?.fill ?? true);
       view.gridChip.classList.toggle("chip--on", options.overlays.get(id)?.grid ?? true);
       view.curvatureChip.classList.toggle(
@@ -2799,7 +3171,28 @@ export function createExprList(options: ExprListOptions): ExprList {
     },
   });
 
-  const root = el("div", { class: "cells" }, [rowHost, createSlider]);
+  /**
+   * A new ambient space: `A_1 = AmbientSpace`, then `A_2`, and so on as they are made.
+   *
+   * A space is where things are built, so this is the row that comes before the others rather
+   * than a view of one of them. It is created at the **top level** even while a space is open —
+   * spaces do not nest, and a space inside a space would be a hierarchy this document does not
+   * have — and opening it is left to the same double-click every other object answers, so there
+   * is one way in.
+   */
+  const createSpace = el("button", {
+    class: "cells__action",
+    text: "+ space",
+    title: "add an ambient space to build in",
+    onClick: () => {
+      const row = store.addRow(`${nextName(SPACE_NAMES, usedNames(store))} = AmbientSpace`);
+      syncRows();
+      options.onEdit(false);
+      select(row.id);
+    },
+  });
+
+  const root = el("div", { class: "cells" }, [rowHost, createSpace, createSlider]);
 
   syncRows();
 
@@ -2822,6 +3215,17 @@ export function createExprList(options: ExprListOptions): ExprList {
       cursorY = y;
       positionAtCursor();
     },
+    setScope(next) {
+      scope = next;
+      // The trailing cell was made for the space it was in, so it is remade for this one.
+      const rows = store.rows();
+      const last = rows[rows.length - 1];
+      if (last && isBlank(last.source()) && last.source() !== blankRow()) {
+        last.source.set(blankRow());
+      }
+      syncRows();
+    },
+
     refresh,
     refreshReports,
     invalidateSliders: () => {
@@ -2984,10 +3388,12 @@ function echoFor(
   liveValue: number | null = null,
   values: ReadonlyMap<string, number> = new Map(),
 ): HTMLElement {
-  const { host, body } = splitHost(source);
-  if (host === null) return echoBody(source, liveValue, values);
+  const { path, body } = splitScope(source);
+  if (path.length === 0) return echoBody(source, liveValue, values);
+  // The whole address, not its last segment: `A:sigma: u + v = 1` is stated in a chart *and* in a
+  // space, and an echo that dropped either would show two rows in two places as the same formula.
   return el("span", { class: "echo-chart" }, [
-    tex(`${nameTex(host)}\\colon`),
+    tex(`${path.map(nameTex).join("\\colon")}\\colon`),
     // A prefix with nothing after it yet is the state the "+ relation" button opens in.
     body.trim() === ""
       ? el("span", { class: "echo-empty", text: "\u2026" })

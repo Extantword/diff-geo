@@ -2,7 +2,9 @@ import { CURVE_CATALOG, type CurveSpec } from "../core/catalog/curves.ts";
 import {
   CATALOG,
   CATALOG_FIELDS,
+  IMPLICIT_CATALOG,
   type FieldSpec,
+  type ImplicitSpec,
   type ParamDef,
   type SurfaceSpec,
 } from "../core/catalog/surfaces.ts";
@@ -16,7 +18,7 @@ import type { SliderSpec } from "./exprList.ts";
 /**
  * Templates: the do Carmo catalog, loaded into the row list.
  *
- * These are the same nine surfaces and six curves the ground-truth suite verifies, stored as
+ * These are the same surfaces, level sets and curves the ground-truth suite verifies, stored as
  * **source text** — so a template is not a special hard-coded object, it is exactly what the
  * user could have typed. Loading the sphere and then editing one component is a supported
  * path, not a hack.
@@ -43,6 +45,14 @@ export interface TemplateEntry {
 
 export interface TemplateOptions {
   readonly document: DocumentStore;
+  /**
+   * What to put in front of a row the gallery creates.
+   *
+   * Inside an ambient space every expression belongs to that space, and a template is an
+   * expression like any other — loading one there and having it appear somewhere else, or
+   * nowhere, is the same bug as typing one and watching it vanish. Empty outside a space.
+   */
+  readonly prefix?: () => string;
   readonly sliders: Map<string, SliderSpec>;
   readonly domains: Map<RowId, DomainRange[]>;
   readonly requestRender: (refit: boolean) => void;
@@ -85,6 +95,7 @@ export let TEMPLATE_ENTRIES: readonly TemplateEntry[] = [];
 
 export function createTemplatePicker(options: TemplateOptions): HTMLElement {
   const { document: store } = options;
+  const scope = () => options.prefix?.() ?? "";
 
   const blurb = el("p", { class: "blurb" });
 
@@ -99,7 +110,7 @@ export function createTemplatePicker(options: TemplateOptions): HTMLElement {
     // A name nobody is using: two rows declaring `X` is not two surfaces, it is one definition
     // overwritten by the other.
     const name = nextName(SURFACE_NAMES, usedNames(store));
-    const rowId = store.addRow(surfaceRow(spec, name)).id;
+    const rowId = store.addRow(`${scope()}${surfaceRow(spec, name)}`).id;
 
     // Parameters stay symbolic and become sliders, seeded with the catalog's ranges. Existing
     // ones are left alone: another surface may be using them, and a template must not reach into
@@ -136,13 +147,52 @@ export function createTemplatePicker(options: TemplateOptions): HTMLElement {
    */
   const loadField = (spec: SurfaceSpec, field: FieldSpec) => {
     const { name } = loadSurface(spec);
-    store.addRow(`${name}: VectorField(${field.components.join(", ")})`);
+    /**
+     * Addressed through the space, when there is one: `A: X: VectorField(…)`.
+     *
+     * The field is stated on the patch, so the patch's name is the prefix that matters — but the
+     * patch is *in* a space, and a row that named it without saying where would resolve only
+     * while the document has one X anywhere. The address is the whole chain.
+     */
+    store.addRow(`${scope()}${name}: VectorField(${field.components.join(", ")})`);
     blurb.textContent = field.blurb;
     options.requestRender(true);
   };
 
+  /**
+   * A surface given as an equation.
+   *
+   * Nothing is named: a level set is not a map, so there is no `X(u,v) =` to write and nothing
+   * for another row to refer to. What it does need is its **box**, which is not a domain the
+   * surface is defined on but a window to look for it in — so the catalog carries one, and a
+   * template that arrived without it would search the default ±2 and often find nothing.
+   */
+  const loadImplicit = (spec: ImplicitSpec) => {
+    const rowId = store.addRow(`${scope()}${spec.equation}`).id;
+
+    for (const definition of spec.params) {
+      if (!options.sliders.has(definition.key)) {
+        options.sliders.set(definition.key, sliderFor(definition));
+        store.setParameter(definition.key, definition.default);
+      }
+    }
+
+    options.domains.set(rowId, [
+      { min: spec.box[0], max: spec.box[1] },
+      { min: spec.box[0], max: spec.box[1] },
+      { min: spec.box[0], max: spec.box[1] },
+    ]);
+
+    blurb.textContent = spec.blurb;
+    options.invalidateSliders();
+    options.onCreated?.(rowId);
+    options.requestRender(true);
+  };
+
   const loadCurve = (spec: CurveSpec) => {
-    const rowId = store.addRow(curveRow(spec, nextName(CURVE_NAMES, usedNames(store)))).id;
+    const rowId = store.addRow(
+      `${scope()}${curveRow(spec, nextName(CURVE_NAMES, usedNames(store)))}`,
+    ).id;
 
     for (const definition of spec.params) {
       if (!options.sliders.has(definition.key)) {
@@ -197,6 +247,11 @@ export function createTemplatePicker(options: TemplateOptions): HTMLElement {
       blurb: spec.blurb,
       load: () => loadCurve(spec),
     })),
+    ...IMPLICIT_CATALOG.map((spec) => ({
+      name: spec.name,
+      blurb: spec.blurb,
+      load: () => loadImplicit(spec),
+    })),
     ...CATALOG_FIELDS.map(({ spec, field }) => ({
       name: `${spec.name} · ${field.label}`,
       blurb: field.blurb,
@@ -208,6 +263,16 @@ export function createTemplatePicker(options: TemplateOptions): HTMLElement {
     el("h2", { class: "section-title", text: "Coordinate patches" }),
     el("div", { class: "templates__grid" },
       CATALOG.map((spec) => entry(spec.name, spec.blurb, () => loadSurface(spec)))),
+    /**
+     * Level sets get their own section, not a place among the patches.
+     *
+     * They are a different kind of object — an equation rather than a map, with a box rather than
+     * a domain, and no chart at all — and half of them are here precisely because they *cannot*
+     * be written as a patch.
+     */
+    el("h2", { class: "section-title", text: "Level sets" }),
+    el("div", { class: "templates__grid" },
+      IMPLICIT_CATALOG.map((spec) => entry(spec.name, spec.blurb, () => loadImplicit(spec)))),
     el("h2", { class: "section-title", text: "Curves" }),
     el("div", { class: "templates__grid" },
       CURVE_CATALOG.map((spec) => entry(spec.name, spec.blurb, () => loadCurve(spec)))),

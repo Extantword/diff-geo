@@ -31,7 +31,9 @@ describe("classification", () => {
     expect(kindsOf("z = x^2 - y^2")).toEqual(["graphSurface"]);
     expect(kindsOf("f(x,y) = x^2 - y^2")).toEqual(["graphSurface"]);
     expect(kindsOf("x^2 + y^2 + z^2 = 1")).toEqual(["implicitSurface"]);
-    expect(kindsOf("x^2 + y^2 = 1")).toEqual(["implicitPlaneCurve"]);
+    // An equation in the ambient coordinates is a surface in R³ whichever of them it mentions:
+    // `x² + y² = 1` is the cylinder, not the circle. The regular value theorem, taken at its word.
+    expect(kindsOf("x^2 + y^2 = 1")).toEqual(["implicitSurface"]);
     expect(kindsOf("(1, 2, 3)")).toEqual(["point"]);
     expect(kindsOf("V(x,y,z) = (y, -x, 0)")).toEqual(["vectorField"]);
   });
@@ -491,5 +493,94 @@ describe("a vector field along a patch", () => {
     // cylinder everywhere, and to a sphere almost nowhere. Which is measured, not classified.
     const { document, resolution } = documentOf("X(u,v) = (u, v, 0)", "X: VectorField(0, 0, 1)");
     expect(resolution.items.get(document.rows()[1]!.id)?.kind).toBe("surfaceField");
+  });
+});
+
+describe("ambient spaces, and the scopes they open", () => {
+  /**
+   * `:` is this language's `.`. `A` is a space, `A:sigma` a chart in it, `A:sigma: u + v = 1` a
+   * relation stated in that chart — and a name declared inside a scope belongs to it, so two
+   * spaces may each have their own `k` while an undeclared `k` is shared by the whole document.
+   */
+
+  it("classifies a space, and gives it nothing to evaluate", () => {
+    const { document, resolution } = documentOf("A_1 = AmbientSpace");
+    const item = resolution.items.get(document.rows()[0]!.id);
+    expect(item?.kind).toBe("ambientSpace");
+    expect(item?.name).toBe("A_1");
+    expect(item?.comps).toEqual([]);
+    expect(item?.params).toEqual([]);
+  });
+
+  it("addresses a chart and a relation through the chain", () => {
+    const { document, resolution } = documentOf(
+      "A = AmbientSpace",
+      "A: sigma(u,v) = (u, v, u^2 - v^2)",
+      "A:sigma: u + v = 1",
+    );
+    const rows = document.rows();
+    // The chart's identity is its address: A's sigma, not the document's.
+    expect(resolution.items.get(rows[1]!.id)?.name).toBe("A:sigma");
+    expect(resolution.items.get(rows[1]!.id)?.host).toBe("A");
+    const relation = resolution.items.get(rows[2]!.id);
+    expect(relation?.kind).toBe("chartRelation");
+    expect(relation?.host, "the relation is stated in that chart").toBe("A:sigma");
+  });
+
+  it("gives each space its own k, and leaves an undeclared one shared", () => {
+    /**
+     * The whole point of scoping parameters. `A:k` and `B:k` are two numbers with two sliders;
+     * `R`, which nobody declares, is one free name that both spaces see — which is what makes
+     * sharing a parameter across spaces the default rather than a feature.
+     */
+    const { resolution } = documentOf(
+      "A = AmbientSpace",
+      "B = AmbientSpace",
+      "A: k = 2",
+      "B: k = 5",
+      "A: X(u,v) = (u, v, k + R)",
+      "B: Y(u,v) = (u, v, k + R)",
+    );
+    expect(resolution.declaredParameters.get("A:k")).toBe(2);
+    expect(resolution.declaredParameters.get("B:k")).toBe(5);
+    expect(resolution.declaredParameters.has("k")).toBe(false);
+
+    const params = [...resolution.items.values()]
+      .filter((item) => item.kind === "parametricSurface")
+      .map((item) => [...item.params].sort());
+    // Each surface compiles against its own space's k, and against the one shared R.
+    expect(params).toEqual([["A:k", "R"], ["B:k", "R"]]);
+    expect(resolution.freeParameters).toContain("R");
+  });
+
+  it("lets a row inside a space fall back to the document's number", () => {
+    // Nothing declares k inside A, so `k` there means the document's k. Lexical scoping, with
+    // the outer scope reached by not shadowing it.
+    const { resolution } = documentOf(
+      "A = AmbientSpace",
+      "k = 7",
+      "A: X(u,v) = (u, v, k)",
+    );
+    expect(resolution.declaredParameters.get("k")).toBe(7);
+    const surface = [...resolution.items.values()].find((i) => i.kind === "parametricSurface");
+    expect(surface?.params).toEqual(["k"]);
+  });
+
+  it("keeps two spaces' objects apart even when they are spelled the same", () => {
+    // Two charts called sigma is not a duplicate: they are `A:sigma` and `B:sigma`, and each
+    // relation is stated in the one it addresses.
+    const { document, resolution } = documentOf(
+      "A = AmbientSpace",
+      "B = AmbientSpace",
+      "A: sigma(u,v) = (u, v, 0)",
+      "B: sigma(u,v) = (u, v, 1)",
+      "B:sigma: u + v = 1",
+    );
+    const rows = document.rows();
+    for (const row of rows) {
+      const diags = resolution.diagnostics.get(row.id) ?? [];
+      expect(diags.filter((d) => d.severity === "error")).toEqual([]);
+    }
+    expect(resolution.items.get(rows[4]!.id)?.host).toBe("B:sigma");
   });
 });

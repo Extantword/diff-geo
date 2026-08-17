@@ -1,4 +1,8 @@
-import { CATALOG, CATALOG_FIELDS } from "../src/core/catalog/surfaces.ts";
+import {
+  CATALOG,
+  CATALOG_FIELDS,
+  IMPLICIT_CATALOG,
+} from "../src/core/catalog/surfaces.ts";
 import { CURVE_CATALOG } from "../src/core/catalog/curves.ts";
 import { PIECES } from "../src/core/catalog/pieces.ts";
 import { FN_DEFS } from "../src/core/expr/fns.ts";
@@ -66,13 +70,21 @@ const ROW_KINDS: Record<ItemKind, { readonly example: string; readonly draws: st
     draws: "a vector field along a patch, as arrows — and as a flow when played",
   },
   parameter: { example: "R = 2", draws: "nothing; it gets a slider, and other rows can use it" },
+  ambientSpace: {
+    example: "A_1 = AmbientSpace",
+    draws: "a copy of R\u00b3 with its axes, entered by opening it; rows written in it say `A_1:`",
+  },
   scalar: { example: "a = 2R + 1", draws: "nothing; a value other rows can use" },
   functionDefinition: {
     example: "h(a, b) = a^2 + b^2",
     draws: "nothing; a definition other rows can call",
   },
-  implicitSurface: { example: "x^2 + y^2 + z^2 = 1", draws: "nothing yet — M4" },
-  implicitPlaneCurve: { example: "x^2 + y^2 = 1", draws: "nothing yet — M4" },
+  implicitSurface: {
+    example: "x^2 + y^2 + z^2 = 1",
+    draws:
+      "the level set F = 0, meshed inside a box — `x^2 + y^2 = 1` is the cylinder, and a row " +
+      "can ask to be drawn flat in the z = 0 plane instead",
+  },
   vectorField: { example: "V(x,y,z) = (y, -x, 0)", draws: "nothing yet — a field on all of R³" },
   unknown: { example: "—", draws: "nothing; the row did not classify" },
 };
@@ -142,6 +154,7 @@ export const BLOCK_NAMES: readonly string[] = [
   "constants",
   "greek",
   "catalog.surfaces",
+  "catalog.implicit",
   "catalog.curves",
   "catalog.fields",
   "catalog.pieces",
@@ -201,6 +214,12 @@ const BLOCKS: Record<string, () => string> = {
         `\`(${spec.components.join(", ")})\``,
         spec.blurb,
       ]),
+    ),
+
+  "catalog.implicit": () =>
+    table(
+      ["surface", "equation", "what it is for"],
+      IMPLICIT_CATALOG.map((spec) => [spec.name, `\`${spec.equation}\``, spec.blurb]),
     ),
 
   "catalog.curves": () =>

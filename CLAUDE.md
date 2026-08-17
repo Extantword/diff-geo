@@ -147,14 +147,159 @@ close the panel you were reading — and it *clears* each per-row map before ref
 undo has to be able to remove what an action added. The hot-reload gate uses the same snapshot, so
 the two cannot drift.
 
+**An equation in the ambient coordinates is a surface, whichever of them it mentions.**
+`x² + y² = 1` is the **cylinder**: the regular value theorem reads it as a level set of F: R³ → R,
+and the circle is what that surface cuts on a plane rather than what the equation says. It used to
+classify as a plane curve when z was absent, which made the most canonical implicit surface in the
+book unreachable. The flat reading is still available, as `inPlane` on the row — both are honest
+readings of one equation and only the reader knows which was meant — so `implicitPlaneCurve` is
+gone from `ItemKind` and "draw it flat" is a way of drawing a level set, not a kind of row.
+
+**Entering and leaving ambient space are deliberately different gestures.** Double-click enters
+and nothing else: inside the mode, double-click still means "open this object's controls", and a
+gesture that also threw you out would make the two unusable together. Leaving is a **double
+right-click** anywhere, or the banner — getting out must never depend on hitting an object. The
+browser fires `dblclick` for the left button only, so the right one is counted by hand, on
+`contextmenu` rather than `pointerdown` so that a right-*drag* (which turns an object) cannot be
+read as half of it.
+
+**Ambient space is faithful, which costs arrangement and the camera's framing.** The mode says
+"this is how the surface sits in R³", so while it is on, the hand translations, rotations and
+joints are **dropped** — a sphere dragged to (4, 0, 0) and then measured against the axes would be
+reporting a position its formula does not claim — and the move and turn gestures are disabled, so
+nothing can put it back. The camera still orbits: looking at an object from another side is not
+moving it. The document keeps its arrangement the whole time and gets it back on leaving.
+
+The axes **do not stop**: an axis ending a little past the object puts a visible edge on space, and
+zooming out would show three short sticks rather than a coordinate system. Past the ticked stretch
+each one continues in *doubling* steps to a horizon nothing will look from — uniform steps out that
+far would be a million segments, doubling gets there in twenty and looks identical. Each axis is a
+**chain** rather than one long segment, because the lines pass builds a screen-space quad per pair
+and a segment spanning the camera has an endpoint behind the eye, where the projection turns inside
+out and the quad wraps across the screen.
+
+**The camera's up is z, because the mathematics is.** Every surface in do Carmo and every one in
+the catalog puts its axis of symmetry on z — the torus closes around it, the cylinder and the
+pseudosphere stand along it, `z = f(x, y)` is a height — so a y-up camera draws all of them lying
+on their side. That is invisible until an axis cross is on screen, and then it reads as the axes
+being wrong rather than the camera. `eyeOf` measures φ from +z, `right = forward × (0,0,1)` is
+`(f_y, −f_x, 0)`, `lookAt` is given `[0, 0, 1]`, and the shader's key light moved with it: a light
+left on +y rakes across every surface from the side instead of falling on it.
+
+The axes are added **after** `computeBounds`, and that ordering is the point: the camera frames the
+bounds, so scaffolding long enough to hold the scene would be what it framed — every object shrunk
+into the middle of its own cross. Frame the object, let the axes run off the edges.
+
+**An ambient space has no way into another one.** A second *surface* typed inside one shares the
+space rather than owning one, so there is nothing to step into, and double-click keeps meaning
+"open this object's controls" while you are inside. Offering the gesture would suggest a hierarchy
+of spaces that does not exist. The sharing is enforced by that gate alone — **not** by hiding the
+surface, which is the mistake the first version made.
+
+**Ambient space only ever narrows; nothing is hidden by kind.** Everything a space holds — the
+point, the curve, the graph, a second patch — is drawn outside it too, because each is a thing the
+user made with a place in the same R³ as the rest. Hiding them on the way out was the first design
+and it read as the document throwing the work away: you build something, step out, it is gone.
+`AMBIENT_KINDS` is therefore gone, `buildScene` filters only while a space is open, and the answer
+to "there is too much on screen" is the **eye** on each row: one flag (`hidden`), one writer, in
+the overlays record that undo snapshots and the file keeps. The eye and the dot are different
+switches on purpose — the dot takes a patch's *face* off and leaves the grid, the eye leaves
+nothing, not even a pickable mesh.
+
+**A space moves as one rigid thing, and both ends of that go through `spaceRoots`.** A point
+written inside X's space is at (1, 2, 3) *of that space*, so dragging the point away from the
+torus would make the row's own sentence false. `state/spaces.ts` walks the host chain to its root;
+`scene.ts` reads every member's translation, rotation **and rotation centre** from that root — the
+centre included, or the members would each spin about themselves and come apart — and `main.ts`'s
+`movedBy` redirects the gesture to the same row, composed with the joint root. A point's polyline
+therefore carries its **own `rowId`** rather than being pooled with every other point into one
+ownerless group: the arrangement pass skips exactly the groups with no owner, so pooled points
+stayed behind when their space moved.
+
+**`:` is this language's `.`, and a row's prefix is its address.** `A = AmbientSpace` declares a
+place; `A: sigma(u,v) = …` is a chart in it; `A:sigma: u + v = 1` is a relation stated in that
+chart, in that space. `splitScope` peels the whole chain before lexing (`splitHost` is now its
+innermost segment, which is what "which chart is this in" means everywhere else), and the chain is
+what `state/scope.ts` turns into names: a declaration's identity is its **qualified** name, so
+`A:k` and `B:k` are two numbers with two sliders. A reference resolves **innermost first** —
+`A:sigma:k`, then `A:k`, then `k` — which makes a parameter *shared across spaces* the default,
+since an undeclared name is declared nowhere and every scope sees the same free symbol. That is
+the answer to "parameters can be shared": sharing is not a feature, it is what not shadowing does.
+
+Three consequences worth keeping. A scoped parameter is published to the inliner as a **rename**,
+`k ↦ var("A:k")`, rather than as a value: the expression stays symbolic, so it is still a compiled
+slot a slider moves without re-differentiating anything, and two spaces cannot both ask the scene
+for a number called `k`. A bare name that nothing encloses falls back to the **one** declaration of
+that name anywhere, and to nothing at all when there are two — full addresses are for when they
+are needed, and picking one of two would make where you typed a row silently decide what it means.
+And every button that writes a row about another one (`+ relation`, `+ tangent`, `+ field`, the
+gallery) writes the **address**, which is why the tangent plane is now created in its prefix
+spelling: `A:sigma: T_(u₀, v₀)`, since a name after the parenthesis is one identifier and an
+address is several.
+
+**A space is somewhere you build, so membership is a closure and every way of making a row
+respects it.** Two halves, and each was a bug on its own. *Membership*: a surface written inside
+X's space is in it, and a field, a relation or a tangent plane stated on **that** surface is in it
+too, because it is stated on something that is — one level of host draws the new patch and
+silently drops everything drawn on it. `scene.ts` builds the set of names in the space to a fixed
+point and `exprList.ts`'s `inScope` does the same over the row *text*, plus parameters and
+definitions, which are in scope everywhere because a number belongs to the document rather than to
+any object. *Creation*: a row can be made in three places — the empty cell, the templates gallery,
+the formula box on the canvas — and all three go through `rowPrefix()` in `main.ts`. A row created
+inside a space without the prefix belongs to the document, which draws it somewhere you cannot see
+and hides it from the panel you are looking at, so it reads as the space refusing to hold anything
+new.
+
+**A row stated on a surface belongs to it in one of two ways, and the kind decides which.**
+`X: v = sin u` is a curve *on* X: it has nowhere else to be, so it is drawn wherever X is. But
+`X: (1, 2, 3)`, `X: alpha(t) = …` and `X: z = f(x,y)` are things in X's ambient **space** —
+written while looking at X, meaningful beside it, and out in the whole document a stray point with
+no visible relationship to anything. So `AMBIENT_KINDS` (point, space curve, graph surface) are
+drawn only while their host's ambient space is open, and hidden otherwise. That is what makes each
+ambient space have "its very own expressions" without a second document: one store, one undo
+history, one file — the prefix is the scope, exactly as it is for charts.
+
+The panel follows with `list.setScope`, which keeps the row itself, everything stated on it, **and
+what it is built from** — a torus whose R and r were hidden would be a torus with half its
+controls missing, so the parameter rows are pulled in to a fixed point. Out-of-scope rows are
+hidden with a class, never removed: leaving costs a toggle, and a rebuilt row would lose its caret,
+its focus and its registered controls on the way out. The trailing empty cell carries the prefix
+while a space is open, and `isBlank` tests `splitHost(text).body` so a bare prefix still counts as
+empty and trailing cells still collapse.
+
+**Ambient space is a way of looking, not a fact about the document.** Double-clicking an object
+isolates it: `buildScene` filters `items` down to that row and the rows stated in its chart, and
+draws the axes. Filtering rather than switching every other row off matters — nothing is edited, so
+leaving is one field going null instead of a list of things to restore, and undo has nothing to
+say about it. The axes carry no `rowId` (they belong to the space, not to an object), are sized
+from `sceneExtent` and ticked at 1, 2 or 5 times a power of ten, and are drawn **after** the
+bounds are computed so that scaffolding long enough to hold the scene is never what the camera
+frames.
+
 **Focusing an object and opening its controls are two acts.** A single click on a surface
 **selects** it: the inset turns into that patch's chart and its cell is highlighted — the answer to
-"which one am I looking at", which you want while still holding the camera. A **double click**
-opens the properties window, at the pointer. They are split because the panel appears over the very
+"which one am I looking at", which you want while still holding the camera. A **single right
+click** opens the properties window, at the pointer — one press, one menu, the way every other
+application answers that button. It was a double click first, which is also how you enter an
+ambient space, so two different questions were competing for one gesture; the right button was
+free because turning an object is the same button *travelling*, exactly as a left drag moves what
+a left click selects. Nothing had to be given up, and the way out of a space is untouched:
+`contextmenu` returns early while a rotate gesture is live, so a right press on an object never
+counts toward the double right-click. They are split because the panel appears over the very
 object just pointed at, so having it come up on every glance makes looking around expensive. Both
 go through `list.select(id, reveal)`, so the highlight, the inset and the card can never disagree;
 a click in the row list passes `reveal: false` for the same reason (the window would cover the cell
 being edited).
+
+**Hovering the inset highlights one square in both pictures.** `Scene.chartCellAt(u, v)` returns
+the grid square containing a chart point, outlined flat and pushed onto the surface — the
+parametrization made visible one cell at a time, which is what the two views are side by side to
+show. It snaps to `GRID_DIVISIONS`, the same lattice `chartGrid` draws in the inset and
+`surfaceGridLines` walks on the mesh, or the corner and the object would be highlighting different
+squares. `Renderer.chartAt` inverts the inset's own projection from the **same** layout function
+the drawing uses, so the two cannot drift by a margin. It is a frame decision, composed in
+`paintLines`/`paintChartLines` like the flow and the aiming preview: a hover must never rebuild a
+scene.
 
 **The inset shows the SELECTED patch's chart; the fallback host is the first one.** Two questions
 that look like one. `primary` — the first surface — is where a row that names no chart is drawn,
@@ -301,6 +446,17 @@ point beside the six already stored, shifted in the same pass, against evaluatin
 downstairs. Both are drawn only for the patch the inset is **showing**, the rule every chart curve
 already follows.
 
+**The overlay record is about any drawn object, and only part of it is about charts.** `fill`,
+`grid`, `colormap`, `hidden` and `arrows` describe what of an object is drawn and how it is
+painted; `geodesics`, `curvatureLines`, `gaussMap`, `aiming`, `start` and `shots` need a chart.
+`syncOverlayControl` rewrites the record from its own closure locals for a patch, and *replaces* it
+for anything else — so every flag in the first group has to be carried across by `sharedOverlay`,
+or it is erased on the next refresh. This has now bitten twice: a field's `arrows` turned itself
+back on, and a level set in grid view got its face back the moment anything rebuilt the scene,
+which is what rotating it does. The symptom is always the same shape — the change works once and
+undoes itself later — and the cause is always a flag the branch that owns the record has never
+heard of.
+
 **A field's arrows are a frame decision, not a document one.** `Scene.fieldArrows` hands back the
 very `LineGroup` that is also in `lines`, keyed by the field's row, so the app can leave it out of a
 frame by identity — the arrows are hidden while the flow plays (a current read through a hedge of
@@ -356,6 +512,52 @@ which knows nothing of arrangement, so its `LineGroup` is owned by the surface's
 row that defined the curve. Owned by the latter, the image of a moved surface's curve is drawn
 where the formula alone would put it: exactly the right shape, hanging in space beside the object
 it belongs to.
+
+**A level set is the same geometry, and it must produce the same numbers.** `geom/implicit.ts`
+takes N = ∇F/|∇F| and the shape operator `A = −P·Hess(F)·P/|∇F|`, read off in an orthonormal
+tangent basis and handed to the *same* `resolveShape` the parametric path uses — so k₁k₂ = K and
+k₁ + k₂ = 2H hold there for the same reason, and a sign error cannot hide in one representation
+only. ∇F points the way F increases, so `x² + y² + z² − R²` gives an **outward** normal and hence
+H = −1/R, agreeing with X_u × X_v on the parametric sphere. That agreement is the test to keep:
+K is convention-independent, H is not, and two representations that disagreed about it would report
+one surface as two objects. Two ways to be nowhere are both marked degenerate rather than answered:
+∇F = 0 (a critical point — the apex of a cone), and F itself non-finite, which has to be tested
+**separately** because the derivatives of a formula can be perfectly finite where the formula is
+not.
+
+**Level sets are meshed by marching tetrahedra, and the normals do not come from the triangles.**
+Each cube is cut into six tets (Kuhn's subdivision, all sharing the main diagonal). Three reasons,
+in order: a tetrahedron has **no ambiguous case**, so nothing has to be guessed the way a cube face
+does; sixteen cases fit on a screen where 256 do not, and a table nobody can read is a table nobody
+can check; and one global corner ordering makes the subdivision conform across faces, so the mesh
+is watertight by construction — which is what makes `meshArea` of a closed level set meaningful.
+The cost is about twice the triangles, and it does not show, because `N = ∇F/|∇F|` and K come from
+the field at each vertex rather than from the triangles around it. Each vertex also takes **one
+Newton step** onto the level set after its edge is interpolated: that turns an O(h²) error into
+O(h⁴), which is the difference between a round sphere and a faintly polygonal one. The mesh is a
+`TessellatedSurface` like any other, so the surface pass, the pick pass and the colour scale take
+it unbranched — the reason for meshing on the CPU rather than raymarching, which would have needed
+its own lighting, its own picking and its own legend and still not been measurable.
+
+**A level set's grid is where the ambient coordinates cut it, and it is cut out of the mesh.**
+A patch's grid is its curves of constant u and v; a level set has neither, so the analogous family
+is constant x, y and z — its contour lines, the way a map draws a hillside. `meshSliceLines` gets
+them by intersecting the **triangles** with those planes rather than by re-marching F on each
+slice: a slice is another level set and could be found that way, but it would cost a fresh grid of
+evaluations per plane and would produce curves lying *near* the drawn triangles instead of on them,
+z-fighting with the surface they decorate. Cutting the mesh needs no field evaluations at all. The
+consequence to keep in mind is that the contours carry the mesh's own chord error, O(h²) — and a
+tetrahedron's edges include the cube's face and body diagonals, so the longest chord spans h√3.
+Without this, turning a level set's face off left an empty screen, which made the switch look
+broken rather than useful.
+
+**A marching grid samples a volume, so its resolution is not the parametric one.** 150² is 23k
+points; 150³ is 3.4 million and a frozen tab. `marchResolution` caps it (56), and past that a
+level set is sharpened by tightening its **box** rather than by grinding the whole volume finer.
+The box is a window, not a boundary: a surface leaving through a wall is cut off there, and that is
+correct — nothing about the box is part of the surface. A level set has no chart, so it offers no
+ports, no geodesics, no inset and no (u, v) to a pick; `vars` is `["x", "y", "z"]` regardless of
+which coordinates the formula mentions, because the box always has three sides.
 
 **`src/core/geom/types.ts` is frozen as of the end of M1.** Changes to it now ripple through
 everything, so extend it only deliberately.
@@ -489,11 +691,27 @@ Three things follow, and each is load-bearing:
 restated, and the page links back to the app with `../`, so it stays path-independent like
 everything else `base: "./"` buys.
 
+**The surface shader carries a faint specular, because diffuse alone cannot show curvature.**
+Diffuse shading is a function of the normal, so two surfaces with the same normals at the eye look
+identical however differently they curve away — a sphere and a paraboloid shade almost the same
+from in front. A highlight depends on the normal's *derivative* as much as the normal: it
+compresses where curvature is high and stretches where it is low. It is kept at 0.09 with a broad
+exponent and the diffuse term is scaled back by exactly that much, because on a white background a
+face that saturates is a face that has disappeared.
+
 ## Two traps that have each cost time twice
 
 **Shader source lives in TypeScript template literals, so a backtick inside a GLSL comment
 terminates the string.** Write `gl_FragCoord` without backticks inside `src/gl/shaders/*`.
 `tsc` catches it immediately, but the error points at the GLSL line rather than the cause.
+
+**Reserved words compile fine in TypeScript and not at all in GLSL.** `vec3 half = …` is a legal
+string and an illegal shader — `half` is reserved in GLSL ES — and nothing in the suite can see it,
+because node has no GL context and the failure is at runtime with the surface simply missing.
+`tests/gl/shaders.test.ts` is the cheap guard: it scans the shader sources for reserved words used
+as names, checks `#version` is still the first line, that braces balance, and that no backtick has
+crept into GLSL. Both traps below fired within a minute of each other while the specular above was
+being written, which is why the test now exists.
 
 **`gl_FragCoord` is framebuffer-absolute, not viewport-relative.** Any pass whose fragment
 shader compares against screen-space positions computed in the vertex shader must be told the
@@ -551,7 +769,28 @@ JS↔GLSL agreement cannot run under Vitest's node environment; it is checked by
 
 M0 scaffold + lit torus ✅ · M1 CAS + jets + vertical slice ✅ · M2 signal store + expression list +
 curves ✅ · M3 curvature lines, geodesics, picking, Gauss map ✅ (parallel transport still open) ·
-M4 implicit surfaces · M5 book scaffolding. One commit per milestone.
+M4 implicit surfaces ✅ · M5 book scaffolding. One commit per milestone.
+
+## A catalog entry is only as good as the invariant that checks it
+
+The catalog is source text, so a mistyped coefficient produces a surface that still parses, still
+renders, and looks plausible. Transcribing eighteen surfaces out of the literature without a check
+per surface would be eighteen chances to ship something quietly wrong. So every entry that has an
+invariant is asserted against it in `tests/geom/groundTruth.test.ts`: **H = 0** for the minimal
+ones (Catalan, Scherk, catenoid, helicoid, Enneper), **K = −1** for the pseudospherical ones
+(pseudosphere, breather, Kuen), **K ≤ 0** for the ruled ones (hyperboloid, Plücker's conoid, cone,
+Whitney umbrella) and **K = 0** for the developable cone. Four of those found their formulas right
+on the first run and would have found them wrong just as fast. An entry with no such invariant —
+the Möbius strip, the seashell — is worth having but is only checked for being finite and complete.
+
+Two related rules. `singularPoints: true` marks the surfaces whose parametrization genuinely fails
+to be an immersion somewhere — a Whitney umbrella's pinch point, a cross-cap's two, a Roman
+surface's six, a superquadric's corners — because the domain cannot be moved off them without
+leaving out the thing the surface is an example *of*; the suite then asks for a mesh that is mostly
+whole rather than entirely whole. And a constraint between parameters must live **in the formula**,
+not in the defaults: the Dupin cyclide needs b² = a² − c², four independent sliders are four ways
+to break it, and a broken cyclide is not a cyclide but a fold with singular points. That entry was
+dropped rather than shipped unverified.
 
 ## The Gauss map is a swap, not a computation
 

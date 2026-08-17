@@ -227,6 +227,150 @@ export function surfaceGridLines(
 }
 
 /**
+ * A grid for a surface that has no chart: where the ambient coordinates cut it.
+ *
+ * A parametrized patch's grid is its curves of constant u and v. A level set has no u or v, so
+ * the analogous thing is the curves of constant **x, y and z** — the surface's own contour lines,
+ * the way a map draws a hillside. They are geometrically meaningful rather than decorative:
+ * `x = c` on the surface is exactly the intersection of two level sets, and the family of them is
+ * the picture a topographic map is.
+ *
+ * Cut out of the **mesh** rather than re-marched from the field. A slice of F is another level set
+ * and could be found with `marchingSquares` on the restriction, but that costs a fresh grid of
+ * evaluations per slice — as much again as meshing the volume — and produces curves that lie near
+ * the drawn triangles rather than on them. Intersecting the triangles is arithmetic with no field
+ * evaluations at all, and every segment lies exactly on the surface as drawn.
+ *
+ * The **border** is separate and heavier: the edges belonging to one triangle only, which is where
+ * the surface leaves the box it was searched in. With the face turned off that outline is what
+ * says the surface was cut rather than that it ends.
+ */
+export function meshSliceLines(
+  mesh: {
+    positions: Float32Array;
+    normals: Float32Array;
+    indices: Uint32Array;
+    vertexCount: number;
+  },
+  lift: number,
+  divisions = GRID_DIVISIONS,
+): SurfaceGridLines {
+  const interior: Polyline[] = [];
+  const border: Polyline[] = [];
+  if (mesh.vertexCount === 0 || mesh.indices.length === 0) return { interior, border };
+
+  // The planes are spaced over the object's own extent, so the grid is as fine on a small surface
+  // as on a large one.
+  const min = [Infinity, Infinity, Infinity];
+  const max = [-Infinity, -Infinity, -Infinity];
+  for (let v = 0; v < mesh.vertexCount; v++) {
+    for (let c = 0; c < 3; c++) {
+      const value = mesh.positions[v * 3 + c]!;
+      if (!Number.isFinite(value)) continue;
+      if (value < min[c]!) min[c] = value;
+      if (value > max[c]!) max[c] = value;
+    }
+  }
+
+  const a: Vec3 = [0, 0, 0];
+  const b: Vec3 = [0, 0, 0];
+  const na: Vec3 = [0, 0, 0];
+  const nb: Vec3 = [0, 0, 0];
+  const hits: number[] = [];
+
+  for (let t = 0; t < mesh.indices.length; t += 3) {
+    const tri = [mesh.indices[t]!, mesh.indices[t + 1]!, mesh.indices[t + 2]!];
+
+    for (let axis = 0; axis < 3; axis++) {
+      const lo = min[axis]!;
+      const hi = max[axis]!;
+      if (!Number.isFinite(lo) || !(hi > lo)) continue;
+      const step = (hi - lo) / divisions;
+      if (!(step > 0)) continue;
+
+      let triLo = Infinity;
+      let triHi = -Infinity;
+      for (const v of tri) {
+        const value = mesh.positions[v * 3 + axis]!;
+        if (value < triLo) triLo = value;
+        if (value > triHi) triHi = value;
+      }
+
+      // Only the planes this triangle actually straddles — one or none, for almost every triangle.
+      const first = Math.max(1, Math.ceil((triLo - lo) / step));
+      const last = Math.min(divisions - 1, Math.floor((triHi - lo) / step));
+      for (let k = first; k <= last; k++) {
+        const plane = lo + step * k;
+        hits.length = 0;
+        for (let e = 0; e < 3; e++) {
+          const p = tri[e]!;
+          const q = tri[(e + 1) % 3]!;
+          const fp = mesh.positions[p * 3 + axis]! - plane;
+          const fq = mesh.positions[q * 3 + axis]! - plane;
+          if (fp === fq) continue;
+          if (fp > 0 === fq > 0) continue;
+          hits.push(p, q, fp / (fp - fq));
+        }
+        if (hits.length !== 6) continue;
+
+        for (const [index, out, normal] of [
+          [0, a, na],
+          [3, b, nb],
+        ] as const) {
+          const p = hits[index]!;
+          const q = hits[index + 1]!;
+          const w = hits[index + 2]!;
+          for (let c = 0; c < 3; c++) {
+            out[c] = mesh.positions[p * 3 + c]! + w * (mesh.positions[q * 3 + c]! - mesh.positions[p * 3 + c]!);
+            normal[c] = mesh.normals[p * 3 + c]! + w * (mesh.normals[q * 3 + c]! - mesh.normals[p * 3 + c]!);
+          }
+        }
+        interior.push(
+          segment(
+            [a[0] + na[0] * lift, a[1] + na[1] * lift, a[2] + na[2] * lift],
+            [b[0] + nb[0] * lift, b[1] + nb[1] * lift, b[2] + nb[2] * lift],
+            SURFACE_GRID_COLOR,
+          ),
+        );
+      }
+    }
+  }
+
+  // The rim: every edge with one triangle on it, which is where the box cut the surface.
+  const counts = new Map<number, number>();
+  for (let t = 0; t < mesh.indices.length; t += 3) {
+    for (let e = 0; e < 3; e++) {
+      const p = mesh.indices[t + e]!;
+      const q = mesh.indices[t + ((e + 1) % 3)]!;
+      const key = Math.min(p, q) * mesh.vertexCount + Math.max(p, q);
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+  }
+  for (const [key, count] of counts) {
+    if (count !== 1) continue;
+    const p = Math.floor(key / mesh.vertexCount);
+    const q = key % mesh.vertexCount;
+    border.push(
+      segment(
+        [
+          mesh.positions[p * 3]! + mesh.normals[p * 3]! * lift,
+          mesh.positions[p * 3 + 1]! + mesh.normals[p * 3 + 1]! * lift,
+          mesh.positions[p * 3 + 2]! + mesh.normals[p * 3 + 2]! * lift,
+        ],
+        [
+          mesh.positions[q * 3]! + mesh.normals[q * 3]! * lift,
+          mesh.positions[q * 3 + 1]! + mesh.normals[q * 3 + 1]! * lift,
+          mesh.positions[q * 3 + 2]! + mesh.normals[q * 3 + 2]! * lift,
+        ],
+        SURFACE_BORDER_COLOR,
+      ),
+    );
+  }
+
+  return { interior, border };
+}
+
+/**
  * Sample a chart curve and push it forward through the surface.
  *
  * Samples landing outside the domain are marked invalid rather than clamped: the line pass

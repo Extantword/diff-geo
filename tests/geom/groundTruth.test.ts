@@ -246,6 +246,157 @@ describe("minimal surfaces have H = 0", () => {
   });
 });
 
+describe("the sphere, charted stereographically", () => {
+  /**
+   * do Carmo §2-2, exercise 16. The point of the example is that **one** chart covers the whole
+   * sphere but a single point — a compact surface cannot be covered by one chart, and this is how
+   * close it is possible to come. The invariant that says the transcription is right is that the
+   * image really is the sphere `x² + y² + (z − 1)² = 1`, and that K = 1 on all of it.
+   */
+  it("lands on the sphere of radius 1 centred at (0, 0, 1)", () => {
+    const { surface, params } = surfaceOf("stereographic");
+    const point = makeSurfacePoint();
+    for (const u of [-5.5, -1.2, 0, 0.8, 4.9]) {
+      for (const v of [-4.1, 0, 2.3]) {
+        surface.at(u, v, params, point);
+        const r = Math.hypot(point.p[0], point.p[1], point.p[2] - 1);
+        closeRel(r, 1, 1e-12);
+      }
+    }
+  });
+
+  it("has K = 1 everywhere, however far out the chart runs", () => {
+    // The chart distorts wildly — a bounded region of the plane maps to almost the whole sphere —
+    // and the curvature does not care: K is intrinsic, and the sphere's is 1 whatever chart is
+    // used to say so.
+    const { surface, params } = surfaceOf("stereographic");
+    const point = makeSurfacePoint();
+    for (const u of [-6, -2.4, 0.1, 3.3, 6]) {
+      for (const v of [-6, -0.7, 1.9, 5.2]) {
+        surface.at(u, v, params, point);
+        expect(point.degenerate, `(${u}, ${v})`).toBe(false);
+        closeRel(point.K, 1, 1e-9);
+        expect(point.umbilic, `umbilic at (${u}, ${v})`).toBe(true);
+      }
+    }
+  });
+
+  it("never reaches the pole it projects from", () => {
+    // z → 2 only as |(u, v)| → ∞. The missing point is the whole content of the exercise.
+    const { surface, params } = surfaceOf("stereographic");
+    const point = makeSurfacePoint();
+    surface.at(200, 200, params, point);
+    expect(point.p[2]).toBeLessThan(2);
+    expect(point.p[2]).toBeGreaterThan(1.99);
+  });
+});
+
+describe("the minimal surfaces added later, checked the same way", () => {
+  /**
+   * H = 0 is what makes a surface minimal, and it is a demanding test of a transcribed formula:
+   * a mistyped coefficient anywhere in three components leaves a surface that still renders and
+   * still looks plausible, and whose mean curvature is not zero. Both of these came out of the
+   * literature and neither is obvious by eye, so this is how they are known to be right.
+   */
+  it("holds for Catalan's surface", () => {
+    const { surface, params } = surfaceOf("catalan");
+    const point = makeSurfacePoint();
+    for (const u of [0.7, 3.1, 7.4, 11.2]) {
+      for (const v of [-1.1, -0.3, 0.5, 1.15]) {
+        surface.at(u, v, params, point);
+        expect(point.degenerate, `(${u}, ${v})`).toBe(false);
+        expect(Math.abs(point.H), `H at (${u}, ${v})`).toBeLessThan(1e-9);
+      }
+    }
+  });
+
+  it("holds for Scherk's first surface", () => {
+    // z = log(cos v / cos u), the only minimal graph over a square — and it runs to infinity at
+    // the edges, which is why the domain stops just inside them.
+    const { surface, params } = surfaceOf("scherk");
+    const point = makeSurfacePoint();
+    for (const u of [-1.4, -0.6, 0.2, 1.3]) {
+      for (const v of [-1.35, 0, 1.1]) {
+        surface.at(u, v, params, point);
+        expect(Math.abs(point.H), `H at (${u}, ${v})`).toBeLessThan(1e-9);
+      }
+    }
+  });
+});
+
+describe("the other surfaces of constant curvature K = −1", () => {
+  /**
+   * The pseudosphere is not the only one. Both of these are pseudospherical — the breather comes
+   * from a breather solution of the sine-Gordon equation, and Kuen's surface is a Bäcklund
+   * transform of the pseudosphere — so they share its intrinsic geometry while sitting in space
+   * completely differently. K = −1 everywhere is the check, and for formulas this long it is the
+   * only practical one.
+   */
+  it("holds for the breather surface", () => {
+    const { surface, params } = surfaceOf("breather");
+    const point = makeSurfacePoint();
+    for (const u of [-11, -3.2, 0.5, 9.4]) {
+      for (const v of [0.4, 3.1, 7.7, 11.5]) {
+        surface.at(u, v, params, point);
+        expect(point.degenerate, `(${u}, ${v})`).toBe(false);
+        closeRel(point.K, -1, 1e-7);
+      }
+    }
+  });
+
+  it("holds for Kuen's surface", () => {
+    const { surface, params } = surfaceOf("kuen");
+    const point = makeSurfacePoint();
+    for (const u of [0.2, 1.4, 3.0, 4.3]) {
+      for (const v of [0.2, 1.1, 2.0, 2.8]) {
+        surface.at(u, v, params, point);
+        expect(point.degenerate, `(${u}, ${v})`).toBe(false);
+        closeRel(point.K, -1, 1e-7);
+      }
+    }
+  });
+});
+
+describe("ruled surfaces are ruled", () => {
+  /**
+   * A ruled surface has a straight line through every point, and a straight line has no normal
+   * curvature — so one principal curvature is ≤ 0 and the other ≥ 0, which is to say **K ≤ 0**.
+   * That is a real check on a transcription: it fails for anything that is not ruled.
+   */
+  for (const [id, us, vs] of [
+    ["hyperboloid", [0.3, 2.2, 4.9], [-1.2, 0, 0.9]],
+    ["plucker-conoid", [0.4, 2.6, 5.1], [0.3, 0.9, 1.4]],
+    ["cone", [0.6, 3.3, 5.9], [0.3, 1.0, 1.5]],
+    ["whitney", [-1.2, 0.4, 1.4], [-1.2, 0.6, 1.3]],
+  ] as const) {
+    it(`holds for ${id}`, () => {
+      const { surface, params } = surfaceOf(id);
+      const point = makeSurfacePoint();
+      for (const u of us) {
+        for (const v of vs) {
+          surface.at(u, v, params, point);
+          if (point.degenerate) continue;
+          expect(point.K, `K at (${u}, ${v}) on ${id}`).toBeLessThanOrEqual(1e-9);
+        }
+      }
+    });
+  }
+
+  it("gives the cone K = 0, since it is developable", () => {
+    // Flat but not planar: a cone is a sheet of paper rolled up, so K vanishes identically while
+    // H does not.
+    const { surface, params } = surfaceOf("cone");
+    const point = makeSurfacePoint();
+    for (const u of [0.5, 2.5, 4.5]) {
+      for (const v of [0.4, 1.1, 1.55]) {
+        surface.at(u, v, params, point);
+        expect(Math.abs(point.K), `K at (${u}, ${v})`).toBeLessThan(1e-9);
+        expect(Math.abs(point.H)).toBeGreaterThan(1e-6);
+      }
+    }
+  });
+});
+
 describe("pseudosphere", () => {
   it("has constant negative curvature K = −1", () => {
     const { surface, params } = surfaceOf("pseudosphere");

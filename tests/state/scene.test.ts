@@ -6,6 +6,7 @@ import {
   buildScene,
   type DomainRange,
   type FrameRequest,
+  type Scene,
   type SurfaceOverlay,
 } from "../../src/state/scene.ts";
 import { divergingColor } from "../../src/core/geom/curvatureColor.ts";
@@ -1610,6 +1611,9 @@ describe("a field's arrows, as a group of their own", () => {
   });
 });
 
+const hiddenOverlay: SurfaceOverlay =
+  ({ geodesics: 0, geodesicLength: 1.5, curvatureLines: false, hidden: true }) as SurfaceOverlay;
+
 describe("a row switched off", () => {
   /**
    * The dot on a row's cell. A patch answers it through `fill` — its grid stays, which is the
@@ -1744,5 +1748,661 @@ describe("a field in the chart", () => {
     expect(flow.chartLines(state)).toEqual([]);
     // and it is still drawn in space, which is the point of the check.
     expect(flow.lines(state).length).toBeGreaterThan(0);
+  });
+});
+
+describe("level sets", () => {
+  /**
+   * The second representation, end to end: an equation in x, y and z becomes a mesh through
+   * marching tetrahedra, with N = ∇F/|∇F| and the curvature computed from the Hessian — and it
+   * lands in the same buffers a parametrization produces, which is what lets the surface pass,
+   * the picking pass and the colour scale take it without a branch.
+   */
+  function implicitScene(rows: readonly string[], domains = new Map<RowId, DomainRange[]>()) {
+    const document = createDocument(rows);
+    const resolved = document.resolution();
+    const scene = buildScene({
+      items: [...resolved.items.values()],
+      parameters: new Map(),
+      declaredParameters: resolved.declaredParameters,
+      domains,
+      resolution: 64,
+    });
+    return { document, scene };
+  }
+
+  it("draws a sphere written as an equation, with the curvature of a sphere", () => {
+    const { document, scene } = implicitScene(["x^2 + y^2 + z^2 = 1"]);
+    expect(scene.mesh).not.toBeNull();
+    expect(scene.mesh!.triangleCount).toBeGreaterThan(500);
+
+    // K = 1/R² = 1 everywhere, and the mesh carries it per vertex like any other surface.
+    for (let v = 0; v < scene.mesh!.vertexCount; v += 13) {
+      closeRel(scene.mesh!.curvature[v]!, 1, 1e-4);
+    }
+    // And the row says so, rather than the stage being the only readout.
+    const report = scene.reports.find((entry) => entry.rowId === document.rows()[0]!.id)!;
+    expect(report.info.join(" ")).toContain("triangles");
+    expect(report.errors).toEqual([]);
+  });
+
+  it("says when the box holds no surface instead of drawing nothing silently", () => {
+    // The commonest way an implicit surface looks broken, and it is not broken: the level set is
+    // somewhere else. A blank stage is not a diagnosis.
+    const { document, scene } = implicitScene(["x^2 + y^2 + z^2 = 100"]);
+    const report = scene.reports.find((entry) => entry.rowId === document.rows()[0]!.id)!;
+    expect(report.info.join(" ")).toContain("no surface inside this box");
+    expect(report.warnings.join(" ")).toContain("widen the domain");
+  });
+
+  it("searches the box the row was given", () => {
+    // Three sides always, whichever coordinates the formula mentions — the box is a window onto
+    // R³, not a domain the surface is a map from.
+    const document = createDocument(["x^2 + y^2 + z^2 = 1"]);
+    const rowId = document.rows()[0]!.id;
+    const item = document.resolution().items.get(rowId)!;
+    expect(item.vars).toEqual(["x", "y", "z"]);
+
+    const tight = buildScene({
+      items: [item],
+      parameters: new Map(),
+      domains: new Map([
+        [rowId, [{ min: 0, max: 2 }, { min: -2, max: 2 }, { min: -2, max: 2 }]],
+      ]),
+      resolution: 64,
+    });
+    // Half the sphere, so every vertex is on the half the box kept.
+    for (let v = 0; v < tight.mesh!.vertexCount; v++) {
+      expect(tight.mesh!.positions[v * 3]!).toBeGreaterThanOrEqual(-1e-6);
+    }
+  });
+
+  it("moves with the hand like any other object", () => {
+    const document = createDocument(["x^2 + y^2 + z^2 = 1"]);
+    const rowId = document.rows()[0]!.id;
+    const items = [...document.resolution().items.values()];
+    const scene = buildScene({
+      items,
+      parameters: new Map(),
+      domains: new Map(),
+      resolution: 48,
+      translations: new Map([[rowId, [4, 0, 0] as Vec3]]),
+    });
+    for (let v = 0; v < scene.mesh!.vertexCount; v += 17) {
+      const dx = scene.mesh!.positions[v * 3]! - 4;
+      const dy = scene.mesh!.positions[v * 3 + 1]!;
+      const dz = scene.mesh!.positions[v * 3 + 2]!;
+      closeRel(Math.hypot(dx, dy, dz), 1, 1e-3);
+    }
+  });
+
+  it("reads an equation in x and y as the cylinder it defines", () => {
+    /**
+     * The regular value theorem taken at its word: `x² + y² = 1` is a level set of F: R³ → R, and
+     * that is a cylinder. The circle is what the cylinder cuts on a plane — a different object,
+     * and the row can ask for it, but it is not what the equation says.
+     */
+    const { document, scene } = implicitScene(["x^2 + y^2 = 1"]);
+    expect(document.resolution().items.get(document.rows()[0]!.id)?.kind).toBe("implicitSurface");
+    expect(scene.mesh).not.toBeNull();
+    expect(scene.mesh!.triangleCount).toBeGreaterThan(100);
+    for (let v = 0; v < scene.mesh!.vertexCount; v += 11) {
+      // Every vertex on the unit cylinder, at whatever height the box reaches.
+      closeRel(
+        Math.hypot(scene.mesh!.positions[v * 3]!, scene.mesh!.positions[v * 3 + 1]!),
+        1,
+        1e-3,
+      );
+    }
+  });
+
+  it("draws it flat when the row asks", () => {
+    const document = createDocument(["x^2 + y^2 = 1"]);
+    const rowId = document.rows()[0]!.id;
+    const scene = buildScene({
+      items: [...document.resolution().items.values()],
+      parameters: new Map(),
+      domains: new Map(),
+      resolution: 64,
+      overlays: new Map([
+        [rowId, { geodesics: 0, geodesicLength: 1.5, curvatureLines: false, inPlane: true }],
+      ]),
+    });
+    const group = scene.lines.find((entry) => entry.rowId === rowId);
+    expect(group).toBeDefined();
+    expect(group!.polylines.length).toBeGreaterThan(50);
+    // The unit circle, flat in z = 0 — and no mesh, because nothing asked for the surface.
+    for (const segment of group!.polylines) {
+      for (let i = 0; i < segment.count; i++) {
+        closeRel(Math.hypot(segment.points[i * 3]!, segment.points[i * 3 + 1]!), 1, 2e-3);
+        expect(segment.points[i * 3 + 2]!).toBe(0);
+      }
+    }
+    expect(scene.mesh).toBeNull();
+  });
+
+  it("reports a colour for a level set, so its cell can show a dot", () => {
+    const { document, scene } = implicitScene(["x^2 + y^2 + z^2 = 1"]);
+    expect(scene.usedColors.get(document.rows()[0]!.id)).toBeDefined();
+    expect(scene.curvatureScales.get(document.rows()[0]!.id)).toBeGreaterThan(0);
+  });
+});
+
+describe("the square under the pointer", () => {
+  /**
+   * Hovering the inset picks out one grid square there and the patch of surface it maps to. That
+   * is the parametrization made visible one cell at a time — which is the reason the flat picture
+   * and the object are side by side at all.
+   */
+  function sphereScene() {
+    const document = createDocument(["X(u,v) = (sin u cos v, sin u sin v, cos u)"]);
+    const rowId = document.rows()[0]!.id;
+    const scene = buildScene({
+      items: [...document.resolution().items.values()],
+      parameters: new Map(),
+      domains: new Map([[rowId, [{ min: 0, max: Math.PI }, { min: 0, max: 2 * Math.PI }]]]),
+      resolution: 32,
+    });
+    return { rowId, scene };
+  }
+
+  it("snaps to the grid the inset actually draws", () => {
+    /**
+     * `chartGrid` divides the domain into GRID_DIVISIONS and `surfaceGridLines` walks the mesh at
+     * the same count, so a square in the corner and a square on the object are the same square.
+     * Any other lattice would highlight two different things.
+     */
+    const { scene } = sphereScene();
+    const cell = scene.chartCellAt(0.1, 0.1)!;
+    expect(cell).not.toBeNull();
+    const us: number[] = [];
+    const vs: number[] = [];
+    for (let i = 0; i < cell.chart.count; i++) {
+      us.push(cell.chart.points[i * 3]!);
+      vs.push(cell.chart.points[i * 3 + 1]!);
+    }
+    // The first cell of an 8 × 8 grid over [0, π] × [0, 2π].
+    closeRel(Math.min(...us), 0, 1e-9);
+    closeRel(Math.max(...us), Math.PI / 8, 1e-9);
+    closeRel(Math.min(...vs), 0, 1e-9);
+    closeRel(Math.max(...vs), (2 * Math.PI) / 8, 1e-9);
+  });
+
+  it("gives the same square wherever inside it the pointer is", () => {
+    const { scene } = sphereScene();
+    const first = scene.chartCellAt(0.05, 0.05)!;
+    const again = scene.chartCellAt(0.3, 0.7)!;
+    expect([...again.chart.points]).toEqual([...first.chart.points]);
+    // And a different square once the pointer crosses a grid line.
+    const next = scene.chartCellAt(0.5, 0.05)!;
+    expect([...next.chart.points]).not.toEqual([...first.chart.points]);
+  });
+
+  it("pushes the square onto the surface it belongs to", () => {
+    const { scene } = sphereScene();
+    const cell = scene.chartCellAt(1.5, 3)!;
+    expect(cell.surface).not.toBeNull();
+    for (let i = 0; i < cell.surface!.count; i++) {
+      if (!cell.surface!.valid?.[i]) continue;
+      const r = Math.hypot(
+        cell.surface!.points[i * 3]!,
+        cell.surface!.points[i * 3 + 1]!,
+        cell.surface!.points[i * 3 + 2]!,
+      );
+      // On the unit sphere, lifted just clear of the mesh it is drawn over.
+      expect(Math.abs(r - 1)).toBeLessThan(0.05);
+    }
+  });
+
+  it("moves with the surface, like everything else built from X", () => {
+    const document = createDocument(["X(u,v) = (sin u cos v, sin u sin v, cos u)"]);
+    const rowId = document.rows()[0]!.id;
+    const scene = buildScene({
+      items: [...document.resolution().items.values()],
+      parameters: new Map(),
+      domains: new Map([[rowId, [{ min: 0, max: Math.PI }, { min: 0, max: 2 * Math.PI }]]]),
+      resolution: 32,
+      translations: new Map([[rowId, [0, 6, 0] as Vec3]]),
+    });
+    const cell = scene.chartCellAt(1.5, 3)!;
+    for (let i = 0; i < cell.surface!.count; i++) {
+      if (!cell.surface!.valid?.[i]) continue;
+      expect(cell.surface!.points[i * 3 + 1]!).toBeGreaterThan(4.5);
+    }
+  });
+
+  it("says nothing outside the domain, where the chart is wider than the surface", () => {
+    // The inset shows a margin around the domain — chart the parametrization says nothing about —
+    // and there is no square out there to pick out.
+    const { scene } = sphereScene();
+    expect(scene.chartCellAt(-0.4, 1)).toBeNull();
+    expect(scene.chartCellAt(1, 7.5)).toBeNull();
+  });
+
+  it("says nothing when no patch is charted", () => {
+    const document = createDocument(["alpha(t) = (cos t, sin t, t)"]);
+    const scene = buildScene({
+      items: [...document.resolution().items.values()],
+      parameters: new Map(),
+      domains: new Map(),
+      resolution: 16,
+    });
+    expect(scene.chartCellAt(1, 1)).toBeNull();
+  });
+});
+
+describe("one object in its ambient space", () => {
+  /**
+   * Double-clicking an object asks "let me look at *this*", and the answer is a stage with nothing
+   * else on it and the coordinate axes drawn. Filtering rather than hiding: the document is not
+   * touched, so leaving the mode is one field going null rather than a list of things to switch
+   * back on.
+   */
+  const document3 = () =>
+    createDocument([
+      "X(u,v) = (sin u cos v, sin u sin v, cos u)",
+      "Y(u,v) = (u, v, 2)",
+      "alpha(t) = (cos t, sin t, t)",
+      "X: VectorField(-sin u sin v, sin u cos v, 0)",
+    ]);
+
+  function scene(isolate: RowId | null, axes = isolate !== null) {
+    const store = document3();
+    const rows = store.rows();
+    return {
+      rows,
+      built: buildScene({
+        items: [...store.resolution().items.values()],
+        parameters: new Map(),
+        domains: new Map(),
+        resolution: 24,
+        isolate,
+        axes,
+      }),
+    };
+  }
+
+  it("draws everything when nothing is isolated", () => {
+    const { built } = scene(null);
+    // Two patches concatenated into one mesh, and the curve and the field beside them.
+    expect(built.mesh!.triangleCount).toBeGreaterThan(24 * 24 * 2);
+    expect(built.usedColors.size).toBe(4);
+  });
+
+  it("keeps only the object and what is stated in its chart", () => {
+    const { rows, built } = scene(1);
+    // X and its field; not Y, and not the curve. One patch's worth of mesh, not two — the count
+    // is not 24 × 24 × 2 because the sphere's default domain covers it twice and its poles cost
+    // it a ring of triangles.
+    expect(built.mesh!.triangleCount).toBeGreaterThan(0);
+    expect(built.mesh!.triangleCount).toBeLessThan(scene(null).built.mesh!.triangleCount);
+    expect(built.usedColors.has(rows[0]!.id)).toBe(true);
+    expect(built.usedColors.has(rows[3]!.id)).toBe(true);
+    expect(built.usedColors.has(rows[1]!.id)).toBe(false);
+    expect(built.usedColors.has(rows[2]!.id)).toBe(false);
+  });
+
+  it("takes a curve on its own, with no surface at all", () => {
+    const { rows, built } = scene(3);
+    expect(built.mesh).toBeNull();
+    expect(built.usedColors.has(rows[2]!.id)).toBe(true);
+  });
+
+  it("draws the axes only when asked, and centres them on the origin", () => {
+    const without = scene(null, false).built;
+    const withAxes = scene(null, true).built;
+    expect(withAxes.lines.length).toBeGreaterThan(without.lines.length);
+
+    // Three lines through the origin, one per direction, owned by nobody: they belong to the
+    // space rather than to an object, so nothing moves them.
+    const axes = withAxes.lines[withAxes.lines.length - 2]!;
+    expect(axes.rowId).toBeUndefined();
+    expect(axes.polylines).toHaveLength(3);
+    for (const [index, line] of axes.polylines.entries()) {
+      for (let c = 0; c < 3; c++) {
+        // Along its own direction and zero across the others.
+        if (c === index) expect(Math.abs(line.points[c]!)).toBeGreaterThan(0);
+        else expect(line.points[c]!).toBe(0);
+      }
+    }
+  });
+
+  it("sizes the axes to what is on the stage", () => {
+    const small = buildScene({
+      items: [...createDocument(["X(u,v) = (0.1 sin u cos v, 0.1 sin u sin v, 0.1 cos u)"])
+        .resolution().items.values()],
+      parameters: new Map(),
+      domains: new Map(),
+      resolution: 16,
+      axes: true,
+    });
+    const large = buildScene({
+      items: [...createDocument(["X(u,v) = (9 sin u cos v, 9 sin u sin v, 9 cos u)"])
+        .resolution().items.values()],
+      parameters: new Map(),
+      domains: new Map(),
+      resolution: 16,
+      axes: true,
+    });
+    const reach = (built: ReturnType<typeof buildScene>) =>
+      Math.abs(built.lines[built.lines.length - 2]!.polylines[0]!.points[3]!);
+    expect(reach(large)).toBeGreaterThan(reach(small) * 10);
+  });
+});
+
+describe("ambient space is faithful about where the surface is", () => {
+  /**
+   * The mode's whole claim: this is how the surface sits in R³. A hand translation is a
+   * presentation device — it moves the drawn geometry away from where X puts it — so measuring a
+   * dragged object against the axes would report a position its formula does not claim. While one
+   * object is isolated it is drawn where its own parametrization places it, and the translations
+   * wait in the document for the rest of the scene to come back.
+   */
+  const sphere = () => createDocument(["X(u,v) = (sin u cos v, sin u sin v, cos u)"]);
+
+  it("draws the object where its formula puts it, not where it was dragged", () => {
+    const store = sphere();
+    const rowId = store.rows()[0]!.id;
+    const items = [...store.resolution().items.values()];
+    const common = { items, parameters: new Map<string, number>(), domains: new Map(), resolution: 24 };
+
+    const arranged = buildScene({ ...common, translations: new Map([[rowId, [7, 0, 0] as Vec3]]) });
+    closeRel(arranged.bounds!.center[0], 7, 1e-6);
+
+    // The same document, isolated: the translation is ignored and the sphere is back on its axes.
+    const ambient = buildScene({
+      ...common,
+      isolate: rowId,
+      axes: true,
+      translations: new Map(),
+    });
+    expect(Math.abs(ambient.bounds!.center[0])).toBeLessThan(1e-6);
+  });
+
+  it("runs the axes off to the horizon, cheaply", () => {
+    /**
+     * An axis that ended a little past the object would put a visible edge on space itself, and
+     * zooming out would show three short sticks rather than a coordinate system. Past the ticked
+     * stretch each axis continues in doubling steps, so it reaches a distance nothing will look
+     * from for a couple of dozen segments — and is a **chain** rather than one long segment,
+     * because a segment spanning the camera has an endpoint behind the eye, where the projection
+     * turns inside out.
+     */
+    const store = sphere();
+    const scene = buildScene({
+      items: [...store.resolution().items.values()],
+      parameters: new Map(),
+      domains: new Map(),
+      resolution: 24,
+      isolate: store.rows()[0]!.id,
+      axes: true,
+    });
+    const axes = scene.lines[scene.lines.length - 2]!;
+    const line = axes.polylines[0]!;
+    let far = 0;
+    for (let i = 0; i < line.count; i++) far = Math.max(far, Math.abs(line.points[i * 3]!));
+    // A thousand times the object, from a line of a few dozen points.
+    expect(far).toBeGreaterThan(scene.bounds!.radius * 1000);
+    expect(line.count).toBeLessThan(120);
+    expect(line.count).toBeGreaterThan(20);
+  });
+
+  it("frames the object rather than its scaffolding", () => {
+    /**
+     * The bounds are computed before the axes are added. Axes long enough to hold the scene would
+     * otherwise be what the camera framed — every object shown at the scale of its own cross,
+     * shrunk into the middle of the screen.
+     */
+    const store = sphere();
+    const scene = buildScene({
+      items: [...store.resolution().items.values()],
+      parameters: new Map(),
+      domains: new Map(),
+      resolution: 24,
+      isolate: store.rows()[0]!.id,
+      axes: true,
+    });
+    closeRel(scene.bounds!.radius, 1, 1e-3);
+
+    // And the axes really do reach past it, or they would stop short of the view.
+    const axes = scene.lines[scene.lines.length - 2]!;
+    expect(Math.abs(axes.polylines[0]!.points[3]!)).toBeGreaterThan(scene.bounds!.radius);
+  });
+});
+
+describe("expressions that belong to an ambient space", () => {
+  /**
+   * A row stated on a surface belongs to it in one of two ways. `X: v = sin u` is a curve *on* X
+   * and has nowhere else to be, so it is drawn with X always. `X: (1, 2, 3)` is a point in X's
+   * ambient **space** — written while looking at X, meaning what it means beside X — and out in
+   * the whole document it would be a stray point with no visible relationship to anything. So
+   * those live in their space and are drawn when it is open.
+   */
+  const document4 = () =>
+    createDocument([
+      "R = 2",
+      "X(u,v) = (R sin u cos v, R sin u sin v, R cos u)",
+      "Y(u,v) = (u, v, 3)",
+      "X: (1, 2, 3)",
+      "X: alpha(t) = (t, t, t)",
+      "X: z = x^2 - y^2",
+      "X: v = sin u",
+    ]);
+
+  const drawnIn = (isolate: number | null) => {
+    const store = document4();
+    const scene = buildScene({
+      items: [...store.resolution().items.values()],
+      parameters: new Map([["R", 2]]),
+      declaredParameters: store.resolution().declaredParameters,
+      domains: new Map(),
+      resolution: 16,
+      isolate,
+      axes: isolate !== null,
+    });
+    return { rows: store.rows(), scene };
+  };
+
+  it("classifies each of the three kinds an ambient space takes", () => {
+    const store = document4();
+    const kinds = store.rows().map((row) => store.resolution().items.get(row.id)?.kind);
+    expect(kinds).toEqual([
+      "parameter",
+      "parametricSurface",
+      "parametricSurface",
+      "point",
+      "spaceCurve",
+      "graphSurface",
+      "chartGraph",
+    ]);
+    // And every one of them says whose space it is in.
+    for (const row of store.rows().slice(3)) {
+      expect(store.resolution().items.get(row.id)?.host).toBe("X");
+    }
+  });
+
+  it("draws them outside the space as well: only the eye takes an object off the stage", () => {
+    /**
+     * Hiding a space's contents on the way out was the first design, and it read as the document
+     * throwing the work away: you build a point, a curve and a graph inside X, step out, and they
+     * are gone. Ambient space only ever **narrows** now — everything is drawn at the top level,
+     * and what stops an object being drawn is the eye on its own row, one decision per object.
+     */
+    const { rows, scene } = drawnIn(null);
+    for (const index of [1, 2, 3, 4, 5, 6]) {
+      expect(scene.usedColors.has(rows[index]!.id), `row ${index} missing`).toBe(true);
+    }
+
+    // And that is the switch: hide the point and it alone leaves.
+    const store = document4();
+    const hiddenPoint = store.rows()[3]!.id;
+    const withHidden = buildScene({
+      items: [...store.resolution().items.values()],
+      parameters: new Map([["R", 2]]),
+      declaredParameters: store.resolution().declaredParameters,
+      domains: new Map(),
+      resolution: 16,
+      overlays: new Map([[hiddenPoint, hiddenOverlay]]),
+    });
+    expect(withHidden.lines.length).toBeLessThan(scene.lines.length);
+  });
+
+  it("draws nothing of a patch whose eye is shut — face, grid and all", () => {
+    // The eye is the blunt switch, which is what separates it from the dot: the dot takes a
+    // patch's face off and leaves the grid, because that outline is the useful half of a surface
+    // you are looking past. A hidden patch has no mesh on the stage at all, so it cannot be
+    // picked either.
+    const store = createDocument(["X(u,v) = (u, v, u^2 - v^2)"]);
+    const rowId = store.rows()[0]!.id;
+    const common = {
+      items: [...store.resolution().items.values()],
+      parameters: new Map<string, number>(),
+      domains: new Map(),
+      resolution: 16,
+    };
+    const shown = buildScene(common);
+    const hidden = buildScene({
+      ...common,
+      overlays: new Map([[rowId, hiddenOverlay]]),
+    });
+    expect(shown.mesh).not.toBeNull();
+    expect(hidden.mesh).toBeNull();
+    expect(hidden.gridLines).toHaveLength(0);
+    // The colour is still reported: the dot has to keep showing what it would come back as.
+    expect(hidden.usedColors.has(rowId)).toBe(true);
+  });
+
+  it("draws a surface written inside a space everywhere, annotations only inside", () => {
+    /**
+     * A surface written inside a space **shares** it rather than owning one — that is what makes
+     * the mode flat, and it is enforced where it is felt: double-click cannot open a second space
+     * from the inside. But it is an object, with a shape and a place in R³ that it keeps whether
+     * or not anybody is inside looking at it, so the stage draws it. Only the annotations — a
+     * point, a curve, a graph — are held back, because those mean what they mean beside their
+     * surface and are strays out in the whole document.
+     */
+    const store = createDocument([
+      "X(u,v) = (sin u cos v, sin u sin v, cos u)",
+      "X: Y(u,v) = (u, v, 2)",
+    ]);
+    const rows = store.rows();
+    const items = [...store.resolution().items.values()];
+    expect(store.resolution().items.get(rows[1]!.id)?.host).toBe("X");
+
+    const common = { items, parameters: new Map<string, number>(), domains: new Map(), resolution: 16 };
+    const whole = buildScene(common);
+    expect(whole.usedColors.has(rows[1]!.id), "the object is on the stage").toBe(true);
+
+    const inside = buildScene({ ...common, isolate: rows[0]!.id, axes: true });
+    expect(inside.usedColors.has(rows[1]!.id), "it is drawn in the space it was written in").toBe(
+      true,
+    );
+  });
+
+  it("opens an ambient space and draws what was built in it", () => {
+    /**
+     * A space is a place rather than an object: it draws nothing of itself, and what you see on
+     * entering is everything written inside it, against the axes. The closure is what makes it
+     * usable — a chart in A, a relation in that chart, a field on it — and the objects of another
+     * space stay out.
+     */
+    const store = createDocument([
+      "A = AmbientSpace",
+      "B = AmbientSpace",
+      "A: sigma(u,v) = (u, v, u^2 - v^2)",
+      "A:sigma: VectorField(1, 0, 0)",
+      "B: tau(u,v) = (u, v, 3)",
+    ]);
+    const rows = store.rows();
+    const scene = buildScene({
+      items: [...store.resolution().items.values()],
+      parameters: new Map(),
+      domains: new Map(),
+      resolution: 12,
+      isolate: rows[0]!.id,
+      axes: true,
+    });
+    expect(scene.usedColors.has(rows[2]!.id), "the chart in A").toBe(true);
+    expect(scene.usedColors.has(rows[3]!.id), "the field on it").toBe(true);
+    expect(scene.usedColors.has(rows[4]!.id), "B's chart is in another space").toBe(false);
+    // The space itself draws nothing: it is where the axes are, not a thing on the stage.
+    expect(scene.usedColors.has(rows[0]!.id)).toBe(false);
+  });
+
+  it("moves a whole space as one object", () => {
+    /**
+     * A point written inside X's ambient space is at (1, 2, 3) **of that space**. Drag the torus
+     * and the point has to go with it, or the sentence the row states stops being true — so
+     * arrangement is a property of the space and every row in it reads its host's placement.
+     * The hand end of this is `movedBy` in `main.ts`, which redirects the drag itself.
+     */
+    const store = createDocument([
+      "X(u,v) = (sin u cos v, sin u sin v, cos u)",
+      "X: (1, 2, 3)",
+      "X: Y(u,v) = (u, v, 2)",
+    ]);
+    const rows = store.rows();
+    const common = {
+      items: [...store.resolution().items.values()],
+      parameters: new Map<string, number>(),
+      domains: new Map(),
+      resolution: 12,
+    };
+    const still = buildScene(common);
+    const moved = buildScene({
+      ...common,
+      translations: new Map([[rows[0]!.id, [10, 0, 0] as Vec3]]),
+    });
+
+    const dotOf = (scene: Scene) =>
+      scene.lines.find((group) => group.rowId === rows[1]!.id)!.polylines[0]!.points[0]!;
+    expect(dotOf(still)).toBeCloseTo(1, 9);
+    expect(dotOf(moved), "the point travelled with its space").toBeCloseTo(11, 9);
+
+    // And so did the surface written in it: the whole space is one rigid thing.
+    const spanOf = (scene: Scene) => {
+      let max = -Infinity;
+      const mesh = scene.mesh!;
+      for (let v = 0; v < mesh.vertexCount; v++) max = Math.max(max, mesh.positions[v * 3]!);
+      return max;
+    };
+    expect(spanOf(moved) - spanOf(still)).toBeCloseTo(10, 6);
+  });
+
+  it("keeps what is stated on a surface written inside a space", () => {
+    /**
+     * The closure, and why one level of host is not enough. Y is written inside X's space; a field
+     * and a curve stated on Y are stated on something in that space, so they are in it too. Drawn
+     * one level deep, the new surface would appear and everything drawn on it would vanish — which
+     * reads as the space refusing half of what you type into it.
+     */
+    const store = createDocument([
+      "X(u,v) = (sin u cos v, sin u sin v, cos u)",
+      "X: Y(u,v) = (u, v, 2)",
+      "Y: VectorField(1, 0, 0)",
+      "Y: v = sin u",
+    ]);
+    const rows = store.rows();
+    const scene = buildScene({
+      items: [...store.resolution().items.values()],
+      parameters: new Map(),
+      domains: new Map(),
+      resolution: 16,
+      isolate: rows[0]!.id,
+      axes: true,
+    });
+    for (const index of [1, 2, 3]) {
+      expect(scene.usedColors.has(rows[index]!.id), `row ${index} missing`).toBe(true);
+    }
+  });
+
+  it("draws them, and only them, inside the space they belong to", () => {
+    const surfaceRow = document4().rows()[1]!.id;
+    const { rows, scene } = drawnIn(surfaceRow);
+    for (const index of [1, 3, 4, 5, 6]) {
+      expect(scene.usedColors.has(rows[index]!.id), `row ${index} missing`).toBe(true);
+    }
+    // The other surface is not in this space.
+    expect(scene.usedColors.has(rows[2]!.id)).toBe(false);
   });
 });

@@ -52,6 +52,15 @@ export interface SurfaceSpec {
   readonly v: Interval;
   readonly periodicU?: boolean;
   readonly periodicV?: boolean;
+  /**
+   * This surface has points where it is not an immersion, and that is what it is for.
+   *
+   * A Whitney umbrella's pinch point, a Roman surface's six of them, the apex of a cone: X_u × X_v
+   * vanishes there, so the mesh drops the triangles around it and the readouts say "no tangent
+   * plane". Marked rather than avoided, because avoiding them would mean leaving out the standard
+   * examples of exactly that phenomenon — and so the suite knows not to demand a whole mesh.
+   */
+  readonly singularPoints?: boolean;
   /** tangent fields worth looking at on this surface */
   readonly fields?: readonly FieldSpec[];
 }
@@ -477,7 +486,447 @@ export const CATALOG: readonly SurfaceSpec[] = [
       },
     ],
   },
+
+  {
+    id: "stereographic",
+    name: "Sphere, stereographically",
+    blurb:
+      "do Carmo §2-2 ex. 16: the inverse of the projection from the north pole, so one chart " +
+      "covers the whole sphere x² + y² + (z − 1)² = 1 except that single point. K = 1 everywhere, " +
+      "and no compact surface can do better than all-but-a-point with one chart.",
+    components: [
+      "4u / (u^2 + v^2 + 4)",
+      "4v / (u^2 + v^2 + 4)",
+      "2(u^2 + v^2) / (u^2 + v^2 + 4)",
+    ],
+    params: [],
+    // The plane, as far out as is worth drawing: at |(u,v)| = 6 the image is already at z = 1.8,
+    // and the missing pole sits at z = 2 however far the domain is pushed.
+    u: interval(-6, 6),
+    v: interval(-6, 6),
+  },
+
+  // ---- minimal surfaces ----
+  {
+    id: "catalan",
+    name: "Catalan's minimal surface",
+    blurb:
+      "Minimal, and it contains a cycloid as a geodesic — the curve a point on a rolling wheel " +
+      "traces, sitting inside a soap film.",
+    components: [
+      "u - sin u cosh v",
+      "1 - cos u cosh v",
+      "4 sin(u/2) sinh(v/2)",
+    ],
+    params: [],
+    u: interval(0, 4 * Math.PI),
+    v: interval(-1.2, 1.2),
+    // Three branch points sit on v = 0, at u = 0, 2π and 4π: X_u and X_v are parallel there.
+    singularPoints: true,
+  },
+  {
+    id: "scherk",
+    name: "Scherk's first surface",
+    blurb:
+      "z = log(cos v / cos u): the only minimal surface that is a graph over a square, doubly " +
+      "periodic, and it runs to infinity at the edges of each square.",
+    components: ["u", "v", "log(cos v) - log(cos u)"],
+    params: [],
+    u: interval(-1.45, 1.45),
+    v: interval(-1.45, 1.45),
+  },
+
+  // ---- ruled surfaces ----
+  {
+    id: "hyperboloid",
+    name: "Hyperboloid of one sheet",
+    blurb:
+      "x² + y² − z² = a², and **doubly ruled**: two straight lines lie in it through every " +
+      "point, which is why a saddle-shaped tower can be built out of straight beams. K < 0.",
+    components: ["a cosh v cos u", "a cosh v sin u", "c sinh v"],
+    params: [
+      { key: "a", label: "waist a", min: 0.3, max: 2, step: 0.05, default: 1 },
+      { key: "c", label: "rise c", min: 0.3, max: 2, step: 0.05, default: 1 },
+    ],
+    u: interval(0, 2 * Math.PI),
+    v: interval(-1.3, 1.3),
+    periodicU: true,
+  },
+  {
+    id: "plucker-conoid",
+    name: "Plücker's conoid",
+    blurb:
+      "z = 2xy/(x² + y²), a right conoid: every ruling meets the axis at a right angle. The " +
+      "axis itself is a double line, so the domain starts away from it.",
+    components: ["v cos u", "v sin u", "sin(2u)"],
+    params: [],
+    u: interval(0, 2 * Math.PI),
+    v: interval(0.2, 1.5),
+    periodicU: true,
+  },
+  {
+    id: "cone",
+    name: "Cone",
+    blurb:
+      "The ruled surface through a point. K = 0 away from the apex — it is developable, a flat " +
+      "sheet rolled up — and the apex is not a regular point at all.",
+    components: ["v cos u", "v sin u", "c v"],
+    params: [{ key: "c", label: "slope c", min: 0.2, max: 3, step: 0.05, default: 1 }],
+    u: interval(0, 2 * Math.PI),
+    v: interval(0.2, 1.6),
+    periodicU: true,
+  },
+  {
+    id: "wallis",
+    name: "Wallis's conical edge",
+    blurb:
+      "A right conoid whose rulings rise as a square root, so the surface has a cuspidal edge " +
+      "where the radicand vanishes.",
+    components: ["v cos u", "v sin u", "c sqrt(a^2 - b^2 cos^2 u)"],
+    params: [
+      { key: "a", label: "a", min: 1.1, max: 3, step: 0.05, default: 2 },
+      { key: "b", label: "b", min: 0.2, max: 1, step: 0.05, default: 1 },
+      { key: "c", label: "c", min: 0.2, max: 2, step: 0.05, default: 1 },
+    ],
+    u: interval(0, 2 * Math.PI),
+    v: interval(0.2, 1.5),
+    periodicU: true,
+  },
+
+  // ---- non-orientable ----
+  {
+    id: "mobius",
+    name: "Möbius strip",
+    blurb:
+      "One side and one edge. Follow the normal once around and it comes back reversed, which " +
+      "is why the shading changes at the seam rather than joining.",
+    components: [
+      "(1 + v cos(u/2)) cos u",
+      "(1 + v cos(u/2)) sin u",
+      "v sin(u/2)",
+    ],
+    params: [],
+    u: interval(0, 2 * Math.PI),
+    v: interval(-0.4, 0.4),
+  },
+  {
+    id: "klein",
+    name: "Klein bottle",
+    blurb:
+      "The figure-8 immersion. Closed, non-orientable, and it cannot be embedded in R³ — the " +
+      "self-intersection is the price of drawing it here at all.",
+    components: [
+      "(R + cos(u/2) sin v - sin(u/2) sin(2v)) cos u",
+      "(R + cos(u/2) sin v - sin(u/2) sin(2v)) sin u",
+      "sin(u/2) sin v + cos(u/2) sin(2v)",
+    ],
+    params: [{ key: "R", label: "R", min: 1.2, max: 4, step: 0.05, default: 2 }],
+    u: interval(0, 2 * Math.PI),
+    v: interval(0, 2 * Math.PI),
+    periodicV: true,
+  },
+  {
+    id: "cross-cap",
+    name: "Cross-cap",
+    blurb:
+      "An immersion of the projective plane with two pinch points, where it fails to be an " +
+      "immersion at all.",
+    components: [
+      "(1 + cos v) cos u",
+      "(1 + cos v) sin u",
+      "-tanh(u - pi) sin v",
+    ],
+    params: [],
+    u: interval(0, 2 * Math.PI),
+    v: interval(0, 2 * Math.PI),
+    periodicV: true,
+    singularPoints: true,
+  },
+  {
+    id: "roman",
+    name: "Roman surface",
+    blurb:
+      "Steiner's surface: the sphere's (yz, zx, xy), which identifies antipodes and so maps the " +
+      "projective plane into R³. Three double lines meeting at six pinch points.",
+    components: [
+      "r^2 sin u sin v cos u",
+      "r^2 sin u cos u cos v",
+      "r^2 sin^2 u sin v cos v",
+    ],
+    params: [{ key: "r", label: "r", min: 0.5, max: 2, step: 0.05, default: 1.4 }],
+    u: interval(0, Math.PI, POLE_INSET),
+    v: interval(0, 2 * Math.PI),
+    periodicV: true,
+    singularPoints: true,
+  },
+  {
+    id: "boy",
+    name: "Boy's surface",
+    blurb:
+      "Apéry's parametrization: an immersion of the projective plane with **no** pinch points — " +
+      "the thing the cross-cap and the Roman surface cannot manage.",
+    components: [
+      "(sqrt(2) cos(2u) cos^2 v + cos u sin(2v)) / (2 - sqrt(2) sin(3u) sin(2v))",
+      "(sqrt(2) sin(2u) cos^2 v - sin u sin(2v)) / (2 - sqrt(2) sin(3u) sin(2v))",
+      "3 cos^2 v / (2 - sqrt(2) sin(3u) sin(2v))",
+    ],
+    params: [],
+    u: interval(0, Math.PI),
+    /**
+     * v runs over one period, offset to miss the collapse.
+     *
+     * Everything here has period π in v, and at v = π/2 all three numerators vanish at once —
+     * the whole line maps to the origin. Starting the period just past it covers the surface
+     * exactly once with nothing degenerate inside.
+     */
+    v: interval(Math.PI / 2, (3 * Math.PI) / 2, 0.004),
+  },
+
+  // ---- algebraic and miscellaneous ----
+  {
+    id: "whitney",
+    name: "Whitney umbrella",
+    blurb:
+      "(uv, u, v²): the canonical failure to be an immersion. The handle is a line of double " +
+      "points ending in one pinch point, and every stable map of a surface into R³ looks like " +
+      "this near a bad point.",
+    components: ["u v", "u", "v^2"],
+    params: [],
+    u: interval(-1.45, 1.55),
+    v: interval(-1.4, 1.4),
+    singularPoints: true,
+  },
+  {
+    id: "breather",
+    name: "Breather surface",
+    blurb:
+      "Constant curvature K = −1, from a breather solution of the sine-Gordon equation. The " +
+      "same equation whose solitons the pseudosphere comes from.",
+    components: [
+      "-u + 2(1 - a^2) cosh(a u) sinh(a u) / (a((sqrt(1 - a^2) cosh(a u))^2 + (a sin(sqrt(1 - a^2) v))^2))",
+      "2 sqrt(1 - a^2) cosh(a u) (-sqrt(1 - a^2) cos v cos(sqrt(1 - a^2) v) - sin v sin(sqrt(1 - a^2) v)) / (a((sqrt(1 - a^2) cosh(a u))^2 + (a sin(sqrt(1 - a^2) v))^2))",
+      "2 sqrt(1 - a^2) cosh(a u) (-sqrt(1 - a^2) sin v cos(sqrt(1 - a^2) v) + cos v sin(sqrt(1 - a^2) v)) / (a((sqrt(1 - a^2) cosh(a u))^2 + (a sin(sqrt(1 - a^2) v))^2))",
+    ],
+    params: [{ key: "a", label: "a", min: 0.1, max: 0.9, step: 0.02, default: 0.4 }],
+    u: interval(-13, 13),
+    // X_v vanishes along v = 0, so the domain starts just past it.
+    v: interval(0.05, 12),
+  },
+  {
+    id: "kuen",
+    name: "Kuen surface",
+    blurb:
+      "Another surface of constant K = −1, and a Bäcklund transform of the pseudosphere: the " +
+      "same intrinsic geometry, wrapped into R³ a different way.",
+    components: [
+      "2(cos u + u sin u) sin v / (1 + u^2 sin^2 v)",
+      "2(sin u - u cos u) sin v / (1 + u^2 sin^2 v)",
+      "log(tan(v/2)) + 2 cos v / (1 + u^2 sin^2 v)",
+    ],
+    params: [],
+    // X_u vanishes along u = 0 and log(tan(v/2)) runs away at both ends of v, so the domain sits
+    // inside all three.
+    u: interval(0.06, 4.5),
+    v: interval(0.1, 2.9),
+  },
+  {
+    id: "seashell",
+    name: "Seashell",
+    blurb:
+      "A tube swept along a logarithmic spiral, everything scaling by the same factor each turn. " +
+      "That self-similarity is the growth law a mollusc is stuck with: it can only add to its " +
+      "edge, never rebuild what it has.",
+    components: [
+      "exp(k v) (1 + m cos u) cos v",
+      "exp(k v) (1 + m cos u) sin v",
+      "exp(k v) (h + m sin u)",
+    ],
+    params: [
+      { key: "m", label: "tube m", min: 0.05, max: 0.8, step: 0.02, default: 0.35 },
+      { key: "k", label: "growth k", min: 0.02, max: 0.4, step: 0.01, default: 0.18 },
+      { key: "h", label: "rise h", min: -1, max: 1.5, step: 0.05, default: 0.6 },
+    ],
+    u: interval(0, 2 * Math.PI),
+    v: interval(0, 6 * Math.PI),
+    periodicU: true,
+  },
+  {
+    id: "supertoroid",
+    name: "Supertoroid",
+    blurb:
+      "A torus whose cross-section is a superellipse. n = 1 is the torus itself; raising it " +
+      "squares the tube off, and the curvature piles up where the corners form.",
+    components: [
+      "(R + r sign(cos u) abs(cos u)^n) cos v",
+      "(R + r sign(cos u) abs(cos u)^n) sin v",
+      "r sign(sin u) abs(sin u)^n",
+    ],
+    params: [
+      { key: "R", label: "R", min: 1, max: 4, step: 0.05, default: 2 },
+      { key: "r", label: "r", min: 0.2, max: 1.5, step: 0.05, default: 0.8 },
+      { key: "n", label: "squareness n", min: 1, max: 4, step: 0.1, default: 1 },
+    ],
+    u: interval(0, 2 * Math.PI),
+    v: interval(0, 2 * Math.PI),
+    periodicU: true,
+    periodicV: true,
+    // At n = 1 this is exactly the torus. Past it X_u vanishes at the four corners of the
+    // cross-section: the surface is still there, but the parametrization stops being regular.
+    singularPoints: true,
+  },
+  {
+    id: "superegg",
+    name: "Superegg",
+    blurb:
+      "A superellipsoid of revolution: n = 1 is an ellipsoid, and past it the profile flattens " +
+      "into the shape that stands on end without falling over.",
+    components: [
+      "a sign(sin u) abs(sin u)^n cos v",
+      "a sign(sin u) abs(sin u)^n sin v",
+      "c sign(cos u) abs(cos u)^n",
+    ],
+    params: [
+      { key: "a", label: "waist a", min: 0.3, max: 2, step: 0.05, default: 1 },
+      { key: "c", label: "height c", min: 0.3, max: 3, step: 0.05, default: 1.4 },
+      { key: "n", label: "squareness n", min: 1, max: 4, step: 0.1, default: 1 },
+    ],
+    u: interval(0, Math.PI, POLE_INSET),
+    v: interval(0, 2 * Math.PI),
+    periodicV: true,
+    // n = 1 is the ellipsoid; past it the poles and the equator stop being regular points of the
+    // parametrization, which is what a superquadric's corners are.
+    singularPoints: true,
+  },
 ];
+
+/**
+ * Surfaces given as an equation rather than a map, for the marching path.
+ *
+ * The ones that belong here are the ones that cannot be written the other way, or not usefully: a
+ * smooth quartic has no rational parametrization at all, and the triply periodic minimal surfaces
+ * have no elementary one. `box` is the window the level set is searched in — a level set has no
+ * domain of its own, so this is a choice about what to look at rather than part of the object.
+ */
+export interface ImplicitSpec {
+  readonly id: string;
+  readonly name: string;
+  readonly blurb: string;
+  /** the whole row, as source text: an equation in x, y and z */
+  readonly equation: string;
+  readonly params: readonly ParamDef[];
+  /** the box, applied to all three axes */
+  readonly box: readonly [number, number];
+}
+
+export const IMPLICIT_CATALOG: readonly ImplicitSpec[] = [
+  {
+    id: "quartic",
+    name: "Smooth quartic",
+    blurb:
+      "x⁴ + y⁴ + z⁴ = 1. A K3 surface, and **not rational** — no parametrization by rational " +
+      "functions exists, so this is a surface the other representation genuinely cannot write.",
+    equation: "x^4 + y^4 + z^4 = 1",
+    params: [],
+    box: [-1.4, 1.4],
+  },
+  {
+    id: "level-torus",
+    name: "Torus, as a level set",
+    blurb:
+      "(√(x² + y²) − R)² + z² = r². The same torus the catalog parametrizes, arrived at the " +
+      "other way — same K = cos u / (r(R + r cos u)), computed from ∇F and the Hessian instead.",
+    equation: "(sqrt(x^2 + y^2) - R)^2 + z^2 = r^2",
+    params: [
+      { key: "R", label: "R", min: 0.6, max: 2, step: 0.05, default: 1.2 },
+      { key: "r", label: "r", min: 0.1, max: 0.9, step: 0.05, default: 0.45 },
+    ],
+    box: [-2.2, 2.2],
+  },
+  {
+    id: "gyroid",
+    name: "Gyroid",
+    blurb:
+      "sin x cos y + sin y cos z + sin z cos x = 0, the standard trigonometric approximation to " +
+      "Schoen's triply periodic minimal surface. It contains no straight line and no plane of " +
+      "symmetry, which is what took it so long to be found.",
+    equation: "sin x cos y + sin y cos z + sin z cos x = 0",
+    params: [],
+    box: [-Math.PI, Math.PI],
+  },
+  {
+    id: "schwarz-p",
+    name: "Schwarz P surface",
+    blurb:
+      "cos x + cos y + cos z = 0, the approximation to Schwarz's primitive surface — the first " +
+      "triply periodic minimal surface found, and the one that divides space into two congruent " +
+      "labyrinths.",
+    equation: "cos x + cos y + cos z = 0",
+    params: [],
+    box: [-Math.PI, Math.PI],
+  },
+  {
+    id: "schwarz-d",
+    name: "Schwarz D surface",
+    blurb:
+      "The diamond surface, the conjugate of the P surface: the same intrinsic geometry, bent " +
+      "into space the other way.",
+    equation:
+      "sin x sin y sin z + sin x cos y cos z + cos x sin y cos z + cos x cos y sin z = 0",
+    params: [],
+    box: [-Math.PI, Math.PI],
+  },
+  {
+    id: "scherk-second",
+    name: "Scherk's second surface",
+    blurb:
+      "sin z = sinh x sinh y: the singly periodic minimal surface, a stack of saddles joining " +
+      "two pairs of half-planes.",
+    equation: "sin z = sinh x sinh y",
+    params: [],
+    box: [-2.6, 2.6],
+  },
+  {
+    id: "cayley",
+    name: "Cayley cubic",
+    blurb:
+      "4(x² + y² + z²) + 16xyz = 1. The cubic surface with the most nodes a cubic can have — " +
+      "four of them, where it is not a surface at all.",
+    equation: "4(x^2 + y^2 + z^2) + 16 x y z = 1",
+    params: [],
+    box: [-1.6, 1.6],
+  },
+  {
+    id: "clebsch",
+    name: "Clebsch cubic",
+    blurb:
+      "The diagonal cubic surface, smooth, and famous for carrying exactly **27 straight lines** " +
+      "— as every smooth cubic surface does, all of them real on this one.",
+    equation:
+      "81(x^3 + y^3 + z^3) - 189(x^2 y + x^2 z + y^2 x + y^2 z + z^2 x + z^2 y) " +
+      "+ 54 x y z + 126(x y + x z + y z) - 9(x^2 + y^2 + z^2) - 9(x + y + z) + 1 = 0",
+    params: [],
+    box: [-2.2, 2.2],
+  },
+  {
+    id: "barth",
+    name: "Barth sextic",
+    blurb:
+      "A degree-six surface with 65 nodes — the most a sextic can have. φ is the golden ratio, " +
+      "and the icosahedral symmetry is not a coincidence.",
+    equation:
+      "4(p^2 x^2 - y^2)(p^2 y^2 - z^2)(p^2 z^2 - x^2) - (1 + 2p)(x^2 + y^2 + z^2 - 1)^2 = 0",
+    params: [
+      // φ, as a parameter rather than a literal, so it can be moved off the golden ratio and the
+      // 65 nodes can be watched falling apart.
+      { key: "p", label: "φ", min: 1.2, max: 2, step: 0.005, default: (1 + Math.sqrt(5)) / 2 },
+    ],
+    box: [-2, 2],
+  },
+];
+
+export const IMPLICIT_BY_ID: Readonly<Record<string, ImplicitSpec>> = Object.fromEntries(
+  IMPLICIT_CATALOG.map((spec) => [spec.id, spec]),
+);
 
 /** Every example field in the catalog, with the surface it belongs to. */
 export const CATALOG_FIELDS: readonly { spec: SurfaceSpec; field: FieldSpec }[] = CATALOG.flatMap(

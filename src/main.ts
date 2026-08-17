@@ -21,6 +21,7 @@ import {
   type Joint,
   type Socket,
 } from "./state/assembly.ts";
+import { arrangedWith, spaceRoots } from "./state/spaces.ts";
 import { portOutline } from "./core/geom/ports.ts";
 import { createHistory } from "./state/history.ts";
 import { createSceneFile } from "./ui/sceneFile.ts";
@@ -159,6 +160,33 @@ function main() {
    * and at no other time.
    */
   let shownChart: RowId | null = null;
+  /**
+   * ---- ambient space ----
+   *
+   * Double-clicking an object asks "let me look at *this*", and the answer is a stage with
+   * nothing else on it and the coordinate axes drawn, so the question becomes where the thing
+   * sits as much as what shape it is. Held here rather than in the document: it is a way of
+   * looking, not a fact about the scene, so it is not saved, not undone, and leaving it is one
+   * field going null.
+   */
+  let isolated: RowId | null = null;
+
+  /**
+   * The way out, on screen.
+   *
+   * A mode you can only leave by rediscovering the gesture that got you in is a trap. This says
+   * what the state is and undoes it, and it is the only chrome the mode adds.
+   */
+  const ambientBar = el("div", { class: "ambient", hidden: true }, [
+    el("span", { class: "ambient__label", text: "ambient space" }),
+    el("button", {
+      class: "ambient__exit",
+      text: "leave",
+      title: "back to the whole document (or double-click the object again)",
+      onClick: () => enterAmbient(null),
+    }),
+  ]);
+  canvas.parentElement?.append(ambientBar);
 
   /** Is this row a patch — something with a chart of its own to show? */
   const isPatch = (id: RowId | null): boolean => {
@@ -190,12 +218,25 @@ function main() {
       inChart,
       overlays,
       colors,
-      translations,
-      rotations,
-      joints,
+      /**
+       * Arrangement is dropped in ambient space, not just disabled.
+       *
+       * A hand translation is a presentation device: it moves the drawn geometry away from where
+       * X puts it, which is exactly what this mode exists to show faithfully. A sphere dragged
+       * over to (4, 0, 0) and then measured against the axes would be reporting a position its
+       * formula does not claim. So while one object is isolated it is drawn where its own
+       * parametrization places it — and the translations are still in the document, waiting, for
+       * when the whole scene comes back.
+       */
+      translations: isolated === null ? translations : new Map<RowId, Vec3>(),
+      rotations: isolated === null ? rotations : new Map<RowId, Quat>(),
+      joints: isolated === null ? joints : new Map<RowId, Joint>(),
       // Click a patch and the corner shows ITS chart, with the rows stated in it drawn flat.
       // A deleted patch hands the chart back to the first surface rather than to nothing.
       chartRow: shownChart,
+      // In ambient space: this object alone, with the axes to place it against.
+      isolate: isolated,
+      axes: isolated !== null,
       activeSocket,
       showPorts: assembling(),
     });
@@ -226,6 +267,10 @@ function main() {
      * what lets a flow keep running while its own formula is being edited.
      */
     flowRunners = new Map();
+    // The hovered square belongs to the scene that answered for it; the next pointer move asks
+    // the new one.
+    hoverChart = null;
+    hoverSurface = null;
     for (const rowId of [...flowStates.keys()]) {
       if (scene.flowFor(rowId)) continue;
       // The row stopped being a field: its particles have nowhere to be.
@@ -390,6 +435,7 @@ function main() {
     onFlowTick,
     onFlowRewind,
     onFlowToggle,
+    onEnterSpace: (rowId: RowId) => enterAmbient(rowId),
     onSelect: (id) => {
       if (!isPatch(id) || id === shownChart) return;
       shownChart = id;
@@ -426,6 +472,8 @@ function main() {
     document: store,
     sliders,
     domains,
+    // Inside an ambient space, a template loads into that space like anything else written there.
+    prefix: rowPrefix,
     requestRender: (refit: boolean) => onEdit(refit),
     invalidateSliders: () => list.invalidateSliders(),
     onCreated: placeBeside,
@@ -690,7 +738,7 @@ function main() {
    */
   const visibleChartLines = (): readonly LineGroup[] => {
     const arrows = lastScene?.fieldChartArrows;
-    const flows = flowChartLines.size === 0 ? [] : [...flowChartLines.values()].flat();
+    const flows = visibleFlows(flowChartLines);
     if (!arrows || arrows.size === 0) {
       return flows.length === 0 ? chartLines : [...chartLines, ...flows];
     }
@@ -703,19 +751,68 @@ function main() {
     return flows.length === 0 ? base : [...base, ...flows];
   };
 
+  /**
+   * ---- the hovered square ----
+   *
+   * Moving over the inset picks out the grid square under the pointer and the patch of surface it
+   * maps to. That is the parametrization made visible one cell at a time, which is the reason the
+   * two pictures are side by side at all — and it is a *frame* decision, so it is composed here
+   * rather than rebuilt into the scene.
+   */
+  let hoverChart: LineGroup | null = null;
+  let hoverSurface: LineGroup | null = null;
+
+  const setHover = (at: readonly [number, number] | null): boolean => {
+    const cell = at === null ? null : lastScene?.chartCellAt(at[0], at[1]) ?? null;
+    const had = hoverChart !== null;
+    if (!cell) {
+      hoverChart = null;
+      hoverSurface = null;
+      return had;
+    }
+    hoverChart = { polylines: [cell.chart], style: { widthPx: 3 } };
+    hoverSurface = cell.surface
+      ? { polylines: [cell.surface], style: { widthPx: 3.5 } }
+      : null;
+    return true;
+  };
+
+  /**
+   * The streaks that reach this frame: only those of a field this build actually drew.
+   *
+   * The particles are app state, deliberately — they survive a rebuild so a flow keeps running
+   * while its own formula is edited. The cost of that is that they also survive a rebuild which
+   * stopped drawing the field: stepping into an ambient space leaves every other object off the
+   * stage, and the swarms went on being painted over the axes with nothing under them. So the
+   * scene is asked, per frame, whether the row was drawn — `usedColors` is exactly the record of
+   * "what this build put on screen" — and a row it did not draw contributes nothing, without
+   * losing its particles. Leaving the space brings them back mid-flight.
+   */
+  const visibleFlows = (streaks: Map<RowId, LineGroup[]>): LineGroup[] => {
+    if (streaks.size === 0) return [];
+    const out: LineGroup[] = [];
+    for (const [rowId, groups] of streaks) {
+      if (lastScene !== null && !lastScene.usedColors.has(rowId)) continue;
+      out.push(...groups);
+    }
+    return out;
+  };
+
   const paintChartLines = () => {
-    renderer.setChartLines(visibleChartLines());
+    const base = visibleChartLines();
+    renderer.setChartLines(hoverChart ? [...base, hoverChart] : base);
   };
 
   const paintLines = () => {
     // Flows over the scene and under the preview: the streaks belong to the objects, the aiming
     // arrow belongs to the hand.
-    const flows = flowLines.size === 0 ? [] : [...flowLines.values()].flat();
+    const flows = visibleFlows(flowLines);
     const base = visibleSceneLines();
+    const hovered = hoverSurface ? [hoverSurface] : [];
     renderer.setLines(
-      flows.length === 0 && previewLines.length === 0
+      flows.length === 0 && previewLines.length === 0 && hovered.length === 0
         ? base
-        : [...base, ...flows, ...previewLines],
+        : [...base, ...flows, ...hovered, ...previewLines],
     );
   };
 
@@ -784,7 +881,29 @@ function main() {
     renderer.invalidate();
   }
 
+  /**
+   * Who a drag on this object actually moves.
+   *
+   * Two redirections, composed. A **joint** hands the drag to the top of the chain it is part of,
+   * because a piece snapped onto a tube is not something you can pull off by dragging it. An
+   * **ambient space** hands it to the object whose space it is: a point at (1, 2, 3) beside a
+   * torus is at (1, 2, 3) *of that torus's space*, and a gesture that moved the two apart would
+   * make the sentence false. `scene.ts` reads placements through the same `spaceRoots`, so the
+   * hand and the picture cannot disagree about who moves.
+   */
+  const movedBy = (rowId: RowId): RowId => {
+    const spaces = spaceRoots(store.resolution().items.values());
+    return rootOf(arrangedWith(rowId, spaces), joints);
+  };
+
   const rect0 = (_event: MouseEvent) => canvas.getBoundingClientRect();
+
+  canvas.addEventListener("pointerleave", () => {
+    if (!setHover(null)) return;
+    paintLines();
+    paintChartLines();
+    renderer.invalidate();
+  });
 
   const pickAt = (event: MouseEvent) => {
     const rect = rect0(event);
@@ -835,12 +954,93 @@ function main() {
    * the first click's pointerup, so this only has to reveal the card — which is why it can be an
    * ordinary listener rather than part of the gesture machine.
    */
+  /**
+   * Enter and leave the ambient space of one object.
+   *
+   * Asymmetric on purpose. **Double-click** enters, and does nothing else — while you are inside,
+   * double-clicking is still how you open an object's controls, and a gesture that also threw you
+   * out of the mode would make the two impossible to use together. **Double right-click** leaves,
+   * from anywhere, and so does the banner: getting out must not depend on hitting anything.
+   */
+  /**
+   * What every new row starts with: nothing, or the prefix of the space being looked at.
+   *
+   * One rule, applied wherever a row can be created — the empty cell, the gallery, the formula box
+   * on the canvas. A row made inside a space and left unprefixed would belong to the document,
+   * which draws it somewhere you cannot see and hides it from the panel you are looking at.
+   */
+  function rowPrefix(): string {
+    if (isolated === null) return "";
+    const name = store.resolution().items.get(isolated)?.name;
+    return name == null ? "" : `${name}: `;
+  }
+
+  const enterAmbient = (rowId: RowId | null) => {
+    if (isolated === rowId) return;
+    isolated = rowId;
+    ambientBar.hidden = rowId === null;
+    /**
+     * The panel follows the stage.
+     *
+     * Inside an ambient space the list is about that object: its own row, everything stated on it,
+     * and the parameters it is built from. Anything else belongs to a scene that is not on screen,
+     * and showing it would make the panel a list of things the stage refuses to draw.
+     */
+    const name = rowId === null ? null : store.resolution().items.get(rowId)?.name ?? null;
+    list.setScope(rowId !== null && name !== null ? { name, rowId } : null);
+    // Refit: the stage now holds one object where it held a document, or the other way round, and
+    // the camera has no business staying framed on what is no longer there.
+    onEdit(true);
+  };
+
   canvas.addEventListener("dblclick", (event: MouseEvent) => {
     const hit = pickAt(event);
     if (!hit) return;
-    list.placeAt(event.clientX, event.clientY);
-    list.select(hit.rowId, true);
+    // Focus, not open: the controls are a right click away now, and a double click that also
+    // threw a card over the object it just stepped into would be answering two questions at once.
+    list.select(hit.rowId, false);
+    /**
+     * An ambient space has no way into another one, and that is the point of it.
+     *
+     * Everything written while inside one belongs to it — a second surface typed there **shares**
+     * this space rather than owning a space of its own — so there is nothing to step into, and
+     * offering the gesture would suggest a hierarchy of spaces that does not exist. Inside, a
+     * double click means what it means everywhere else: open this object's controls.
+     */
+    if (isolated !== null) return;
+    /**
+     * Double-clicking an object opens **the space it is in**, not the object.
+     *
+     * A space is where things are built, so a torus written in A belongs to A and what you want
+     * to see beside it is everything else in A — the other objects, the axes they share. An
+     * object with no space of its own to belong to still answers the gesture, as its own space:
+     * a document that has never made one is not a document that cannot look at anything.
+     */
+    const spaces = spaceRoots(store.resolution().items.values());
+    const root = arrangedWith(hit.rowId, spaces);
+    enterAmbient(root);
   });
+
+  /**
+   * The way out: two right-presses in quick succession.
+   *
+   * The browser fires `dblclick` for the left button only, so this is counted by hand — same
+   * window and same slop the rest of the file uses for "a press that did not travel". It is
+   * checked on `contextmenu` rather than on `pointerdown` so that a right-DRAG, which turns an
+   * object, cannot be mistaken for half of it.
+   */
+  let lastRightPress = { time: 0, x: 0, y: 0 };
+  const DOUBLE_RIGHT_MS = 500;
+
+  const isDoubleRight = (event: MouseEvent): boolean => {
+    const now = event.timeStamp;
+    const travelled = Math.hypot(event.clientX - lastRightPress.x, event.clientY - lastRightPress.y);
+    const quick = now - lastRightPress.time < DOUBLE_RIGHT_MS && travelled <= CLICK_SLOP;
+    lastRightPress = quick
+      ? { time: 0, x: 0, y: 0 }
+      : { time: now, x: event.clientX, y: event.clientY };
+    return quick;
+  };
 
   canvas.addEventListener(
     "pointerdown",
@@ -893,8 +1093,8 @@ function main() {
        * owns the drag — which is also what keeps this from stealing the context menu: right-click
        * on EMPTY space still opens it, because there is no object there to turn.
        */
-      if (hit && event.button === 2) {
-        const moveId = rootOf(hit.rowId, joints);
+      if (hit && event.button === 2 && isolated === null) {
+        const moveId = movedBy(hit.rowId);
         gesture = {
           kind: "rotate",
           rowId: hit.rowId,
@@ -919,14 +1119,22 @@ function main() {
        * trade a direct-manipulation scene makes, and the one that makes objects feel like things
        * rather than pictures.
        */
-      if (hit && lastScene) {
+      /**
+       * Nothing is arranged in ambient space.
+       *
+       * The mode's claim is that this is how the surface sits in R³ — where its own formula puts
+       * it, against the axes — and a gesture that moved it would make the picture a lie about the
+       * thing it is a picture of. The camera still orbits: looking at an object from another side
+       * is not moving it.
+       */
+      if (hit && lastScene && isolated === null) {
         const from = renderer.unproject(
           event.clientX - rect0(event).left,
           event.clientY - rect0(event).top,
           surfacePointAt(hit.rowId, hit.u, hit.v) ?? lastScene.bounds?.center ?? [0, 0, 0],
         );
         if (from) {
-          const moveId = rootOf(hit.rowId, joints);
+          const moveId = movedBy(hit.rowId);
           gesture = {
             kind: "move",
             rowId: hit.rowId,
@@ -952,6 +1160,24 @@ function main() {
   canvas.addEventListener(
     "pointermove",
     (event: PointerEvent) => {
+      /**
+       * The hovered square, before anything else looks at the event.
+       *
+       * Only while no gesture is running: during a drag the pointer is saying something about the
+       * object it grabbed, and a highlight following it into the corner would be answering a
+       * question nobody asked. Repainting is two array spreads and an upload, so this can run on
+       * every move — it does NOT rebuild the scene, which is what would make it feel heavy.
+       */
+      if (gesture.kind === "idle") {
+        const rect = rect0(event);
+        const at = renderer.chartAt(event.clientX - rect.left, event.clientY - rect.top);
+        if (setHover(at)) {
+          paintLines();
+          paintChartLines();
+          renderer.invalidate();
+        }
+      }
+
       if (gesture.kind === "rotate") {
         /**
          * Turn about the camera's own axes, so the object follows the hand.
@@ -1064,6 +1290,26 @@ function main() {
 
       if (finished.kind === "rotate") {
         renderer.camera.setAiming(false);
+        /**
+         * A right press that did not travel was a **click**, and a right click opens the object's
+         * controls.
+         *
+         * One press, one menu — the way every other application answers a right click, and the
+         * gesture that was missing here: the card used to need a double click, which is also how
+         * you enter an ambient space, so the two were competing for one action. Turning the object
+         * is the same button *travelling*, exactly as a left drag moves it and a left click
+         * selects it, so nothing had to be given up to free the gesture.
+         *
+         * It does not disturb the way out of a space either: `contextmenu` returns early while a
+         * rotate gesture is live, so a right press on an object never counts toward the double
+         * right-click, and two of them on an object open the card twice rather than leaving.
+         */
+        const travelled = Math.hypot(event.clientX - finished.x, event.clientY - finished.y);
+        if (travelled <= CLICK_SLOP) {
+          list.placeAt(event.clientX, event.clientY);
+          list.select(finished.rowId, true);
+          return;
+        }
         onEdit(false);
         return;
       }
@@ -1216,6 +1462,12 @@ function main() {
     // A right-press that landed on an object was a rotation, not a request for the menu.
     if (gesture.kind === "rotate") return;
 
+    // Two of them in quick succession leaves ambient space, and open no menu.
+    if (isDoubleRight(event)) {
+      if (isolated !== null) enterAmbient(null);
+      return;
+    }
+
     const field = el("input", {
       class: "field field--mono context-menu__field",
       placeholder: "X(u,v) = (…, …, …)",
@@ -1227,7 +1479,9 @@ function main() {
       if (keyEvent.key !== "Enter") return;
       const source = field.value.trim();
       if (source === "") return;
-      const row = store.addRow(source);
+      // Written inside an ambient space, it belongs to that space — the same rule the cells and
+      // the gallery follow.
+      const row = store.addRow(`${rowPrefix()}${source}`);
       translations.set(row.id, placementFor(event, row.id));
       closeMenu();
       onEdit(true);

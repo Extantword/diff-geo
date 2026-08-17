@@ -5,10 +5,12 @@ Concepts and conventions follow Manfredo do Carmo, _Differential Geometry of Cur
 
 **→ [extantword.github.io/diff-geo](https://extantword.github.io/diff-geo/)**
 
-> Status: **M3** — a Desmos-like expression list drives surfaces, curves and chart curves at once.
-> Type a parametrization, see Gaussian curvature painted on it with its exact fundamental forms in
-> LaTeX, shoot geodesics and lines of curvature by clicking the surface, and put the Gauss map
-> beside it. Next: implicit surfaces. See [the milestones](#milestones).
+> Status: **M4** — a Desmos-like expression list drives surfaces, curves, chart curves, vector
+> fields and level sets at once, with a catalog of 27 parametrized surfaces, 9 level sets and 6
+> curves. Type a parametrization *or an equation*, see Gaussian curvature painted on it with its
+> exact fundamental forms in LaTeX, shoot geodesics and lines of curvature by clicking the surface,
+> play a field's flow, and put the Gauss map beside it. Next: book scaffolding.
+> See [the milestones](#milestones).
 
 ## Documentation
 
@@ -42,7 +44,8 @@ npm run oracle     # cross-check the TS CAS against sympy (needs python + sympy)
 - **Raw WebGL2, hand-written.** No three.js. A purpose-built renderer — not an engine: no scene
   graph, no material system. Three passes so far (surface, instanced thick lines, id-buffer
   picking) plus one orbit camera, so geodesics and curvature lines are thick, antialiased and
-  depth-correct. The implicit raymarch pass arrives with M4.
+  depth-correct. Level sets are meshed on the CPU by marching tetrahedra rather than raymarched,
+  so they arrive in the same buffers a parametrization does and every pass takes them unchanged.
 - **A TypeScript CAS.** User formulas are parsed, differentiated symbolically, simplified, then
   compiled to both JS closures and GLSL. This is what lets the fundamental forms be displayed
   *exactly*, in LaTeX, for a surface you just invented.
@@ -80,5 +83,5 @@ and τ constant.
 | **M1** | CAS + jets + vertical slice: type a formula, see curvature painted on it | ✅ |
 | **M2** | expression list, signal store, curves with the Frenet trihedron | ✅ |
 | **M3** | Gauss map, lines of curvature, geodesics, id-buffer picking | ✅ |
-| **M4** | implicit surfaces `F(x,y,z) = 0`, raymarched | |
+| **M4** | implicit surfaces `F(x,y,z) = 0`, marched | ✅ |
 | **M5** | book scaffolding: shareable figures embedded in chapters | |

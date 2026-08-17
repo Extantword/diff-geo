@@ -71,12 +71,21 @@ export function createCamera(): Camera {
 
   let aiming = false;
 
+  /**
+   * The eye, in spherical coordinates about the target — with **z up**.
+   *
+   * Up is z because the mathematics says so. Every surface in do Carmo and every one in the
+   * catalog puts its axis of symmetry on z: the torus closes around z, the cylinder and the
+   * pseudosphere stand along it, `z = f(x, y)` is a height. Rendering with y up draws all of them
+   * lying on their side, which is invisible until an axis cross is on screen and then reads as
+   * the axes being wrong rather than the camera. φ is measured from +z, θ around it.
+   */
   const eyeOf = (): V3 => {
     const sp = Math.sin(cPhi);
     return [
-      ctx + cRadius * sp * Math.sin(cTheta),
-      cty + cRadius * Math.cos(cPhi),
-      ctz + cRadius * sp * Math.cos(cTheta),
+      ctx + cRadius * sp * Math.cos(cTheta),
+      cty + cRadius * sp * Math.sin(cTheta),
+      ctz + cRadius * Math.cos(cPhi),
     ];
   };
 
@@ -100,15 +109,15 @@ export function createCamera(): Camera {
      * fallback catches exactly that case.
      */
     /**
-     * right = forward × worldUp, which for worldUp = (0,1,0) is (−f.z, 0, f.x).
+     * right = forward × worldUp, which for worldUp = (0,0,1) is (f.y, −f.x, 0).
      *
-     * The sign is not a convention to pick: with the camera on +z looking at the origin, forward
-     * is (0,0,−1) and the viewer's right is world +x. Taking the cross product the other way
+     * The sign is not a convention to pick: with the camera on +y looking at the origin, forward
+     * is (0,−1,0) and the viewer's right is world −x. Taking the cross product the other way
      * round gives −right, which is why A and D moved the wrong way.
      */
-    const rlen = Math.hypot(-forward[2], 0, forward[0]);
+    const rlen = Math.hypot(forward[1], forward[0]);
     const right: V3 =
-      rlen > 1e-9 ? [-forward[2] / rlen, 0, forward[0] / rlen] : [1, 0, 0];
+      rlen > 1e-9 ? [forward[1] / rlen, -forward[0] / rlen, 0] : [1, 0, 0];
     const up: V3 = [
       right[1] * forward[2] - right[2] * forward[1],
       right[2] * forward[0] - right[0] * forward[2],
@@ -158,7 +167,7 @@ export function createCamera(): Camera {
     },
 
     view() {
-      return lookAt(eyeOf(), [ctx, cty, ctz], [0, 1, 0]);
+      return lookAt(eyeOf(), [ctx, cty, ctz], [0, 0, 1]);
     },
 
     projection(aspect) {

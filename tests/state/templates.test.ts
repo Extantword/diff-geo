@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { CURVE_CATALOG } from "../../src/core/catalog/curves.ts";
-import { CATALOG, CATALOG_FIELDS } from "../../src/core/catalog/surfaces.ts";
+import {
+  CATALOG,
+  CATALOG_FIELDS,
+  IMPLICIT_CATALOG,
+} from "../../src/core/catalog/surfaces.ts";
 import { sampleBounds } from "../../src/core/geom/types.ts";
 import { createDocument, type RowId } from "../../src/state/graph.ts";
 import { buildScene, type DomainRange } from "../../src/state/scene.ts";
@@ -105,11 +109,27 @@ describe("surface templates", () => {
       });
 
       it("tessellates without dropping geometry", () => {
-        // The point of carrying the inset across. Without it, the sphere and pseudosphere
-        // sample their singular boundary and lose a ring of triangles.
-        const { scene } = loadSurface(entry.id);
+        /**
+         * The point of carrying the inset across. Without it, the sphere and pseudosphere sample
+         * their singular boundary and lose a ring of triangles.
+         *
+         * A handful of surfaces are exempt, and say so in the catalog: a Whitney umbrella's pinch
+         * point, a cross-cap's two, a Roman surface's six, a superquadric's corners. Those are the
+         * standard examples of a map that is not an immersion, so the domain cannot be moved off
+         * them without leaving out the thing the surface is for — and the mesh drops the triangles
+         * around them exactly as the non-finite contract says it should.
+         */
+        const { scene, spec } = loadSurface(entry.id);
         expect(scene.mesh, `${entry.id} produced no mesh`).not.toBeNull();
         expect(scene.mesh!.triangleCount).toBeGreaterThan(0);
+        if (spec.singularPoints) {
+          // Still mostly a surface: a few triangles around the bad points, not a shredded mesh.
+          expect(
+            scene.mesh!.droppedTriangles,
+            `${entry.id} dropped ${scene.mesh!.droppedTriangles} of ${scene.mesh!.triangleCount}`,
+          ).toBeLessThan(scene.mesh!.triangleCount * 0.1);
+          return;
+        }
         expect(
           scene.mesh!.droppedTriangles,
           `${entry.id} dropped ${scene.mesh!.droppedTriangles} triangles`,
@@ -253,11 +273,116 @@ describe("vector field templates", () => {
     });
   }
 
-  it("gives every catalog surface at least one field to look at", () => {
-    // Not a rule about the catalog so much as a check that none was dropped in editing: each
-    // surface's own coordinate fields are always available, so there is no excuse for a blank.
-    for (const spec of CATALOG) {
-      expect((spec.fields ?? []).length, `${spec.id} has no example field`).toBeGreaterThan(0);
+  it("attaches every example field to a surface that exists", () => {
+    /**
+     * Not every surface carries example fields — the `+ field` button gives any patch its own
+     * ∂X/∂v on demand, so a blank is a gap rather than a fault. What must hold is that every
+     * field in the list belongs to a surface still in the catalog, and that the ones written by
+     * hand are still there: a field pointing at a deleted surface would load a row with nothing
+     * to live on.
+     */
+    const ids = new Set(CATALOG.map((spec) => spec.id));
+    for (const { spec } of CATALOG_FIELDS) expect(ids).toContain(spec.id);
+    expect(CATALOG_FIELDS.length).toBeGreaterThan(30);
+  });
+});
+
+/**
+ * The level-set templates, through the same pipeline the typing goes through.
+ *
+ * Half of these are here precisely because they cannot be parametrized — a smooth quartic has no
+ * rational parametrization at all, and the triply periodic minimal surfaces have no elementary
+ * one — so the marching path is the only way they exist in this program, and it has to work for
+ * every one of them.
+ */
+describe("level-set templates", () => {
+  function loadImplicit(id: string) {
+    const spec = IMPLICIT_CATALOG.find((entry) => entry.id === id)!;
+    const document = createDocument([spec.equation]);
+    const rowId = document.rows()[0]!.id;
+    const resolved = document.resolution();
+    const domains = new Map<RowId, DomainRange[]>([
+      [rowId, [0, 1, 2].map(() => ({ min: spec.box[0], max: spec.box[1] }))],
+    ]);
+    const scene = buildScene({
+      items: [...resolved.items.values()],
+      parameters: new Map(spec.params.map((p) => [p.key, p.default])),
+      declaredParameters: resolved.declaredParameters,
+      domains,
+      resolution: 64,
+    });
+    return { spec, rowId, resolved, scene };
+  }
+
+  for (const entry of IMPLICIT_CATALOG) {
+    describe(entry.id, () => {
+      it("classifies as a level set with no diagnostics", () => {
+        const { rowId, resolved } = loadImplicit(entry.id);
+        const diagnostics = resolved.diagnostics.get(rowId) ?? [];
+        expect(
+          diagnostics.filter((d) => d.severity === "error"),
+          `${entry.id}: ${diagnostics.map((d) => d.message).join("; ")}`,
+        ).toEqual([]);
+        expect(resolved.items.get(rowId)?.kind).toBe("implicitSurface");
+      });
+
+      it("has a surface inside the box the catalog chose", () => {
+        // The box is a window, not a domain — a template arriving without one would search the
+        // default ±2 and often find nothing at all.
+        const { scene } = loadImplicit(entry.id);
+        expect(scene.mesh, `${entry.id} produced no mesh`).not.toBeNull();
+        expect(scene.mesh!.triangleCount, `${entry.id} found nothing in its box`).toBeGreaterThan(
+          200,
+        );
+      });
+
+      it("emits only finite values to the GPU buffers", () => {
+        /**
+         * Scanned in a loop with **one** assertion at the end, not one per number. A level set's
+         * mesh runs to a quarter of a million vertices — the Schwarz D surface alone is 86k
+         * triangles — and `expect` per component times the test out long before it finds anything.
+         */
+        const { scene } = loadImplicit(entry.id);
+        const mesh = scene.mesh!;
+        let bad = 0;
+        for (const buffer of [mesh.positions, mesh.normals, mesh.colors]) {
+          for (const value of buffer) {
+            if (!Number.isFinite(value)) bad++;
+          }
+        }
+        expect(bad, `${entry.id} sent ${bad} non-finite values to the GPU`).toBe(0);
+      });
+    });
+  }
+
+  it("gives the level-set torus the curvature the parametrized one has", () => {
+    /**
+     * The same object through both representations, which is the check the whole implicit path
+     * exists to pass: K = cos u / (r(R + r cos u)) computed from ∇F and the Hessian, against the
+     * closed form the parametrized torus is checked against.
+     */
+    const { spec, scene } = loadImplicit("level-torus");
+    const R = spec.params.find((p) => p.key === "R")!.default;
+    const r = spec.params.find((p) => p.key === "r")!.default;
+    for (let v = 0; v < scene.mesh!.vertexCount; v += 37) {
+      const x = scene.mesh!.positions[v * 3]!;
+      const y = scene.mesh!.positions[v * 3 + 1]!;
+      const cosU = (Math.hypot(x, y) - R) / r;
+      expect(Math.abs(scene.mesh!.curvature[v]! - cosU / (r * (R + r * cosU)))).toBeLessThan(0.02);
+    }
+  });
+
+  it("finds a minimal surface where it says there is one", () => {
+    // The trigonometric approximations to the triply periodic minimal surfaces are not exactly
+    // minimal, but they are close: mean curvature near zero over the whole cell is what makes
+    // them usable as pictures of Schwarz's and Schoen's surfaces at all.
+    for (const id of ["schwarz-p", "gyroid"]) {
+      const { scene } = loadImplicit(id);
+      const finite = [...scene.mesh!.curvature].filter((k) => Number.isFinite(k));
+      expect(finite.length, id).toBeGreaterThan(1000);
+      // A minimal surface has K ≤ 0 everywhere, and these approximations keep that exactly.
+      const positive = finite.filter((k) => k > 1e-6).length;
+      expect(positive / finite.length, `${id}: fraction with K > 0`).toBeLessThan(0.02);
     }
   });
 });

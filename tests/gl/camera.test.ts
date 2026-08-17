@@ -11,17 +11,18 @@ import { createCamera } from "../../src/gl/camera.ts";
  */
 
 describe("the camera basis", () => {
-  it("puts the viewer's right at world +x when looking down −z", () => {
-    // The one case where the answer is obvious by inspection: standing on +z, facing the origin,
-    // with y up. Anything else is this rotated, so getting this right gets them all right.
+  it("puts the viewer's right at world +y when looking down −x, with z up", () => {
+    // The one case where the answer is obvious by inspection: standing on +x, facing the origin,
+    // with z up. Anything else is this rotated, so getting this right gets them all right.
+    // Up is z because the mathematics is: every surface here puts its axis of symmetry there.
     const camera = createCamera();
     camera.frame([0, 0, 0], 1);
     camera.restore({ theta: 0, phi: Math.PI / 2, radius: 5, target: [0, 0, 0] });
 
     const { forward, right, up } = camera.basis();
-    expect(forward[2]).toBeLessThan(-0.99);
-    expect(right[0]).toBeGreaterThan(0.99);
-    expect(up[1]).toBeGreaterThan(0.99);
+    expect(forward[0]).toBeLessThan(-0.99);
+    expect(right[1]).toBeGreaterThan(0.99);
+    expect(up[2]).toBeGreaterThan(0.99);
   });
 
   it("keeps the three axes orthonormal from any angle", () => {

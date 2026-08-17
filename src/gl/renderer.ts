@@ -36,6 +36,13 @@ export interface Renderer {
   setChartLines(groups: readonly LineGroup[]): void;
   /** The (u, v) rectangle the inset shows, or null to hide it. */
   setChartBounds(bounds: { u: [number, number]; v: [number, number] } | null): void;
+  /**
+   * Where a point on screen lands in the chart inset, or null if it is not over it.
+   *
+   * The inverse of the inset's own projection, and it reads the same layout the drawing does, so
+   * the two cannot disagree about where the corner square is.
+   */
+  chartAt(cssX: number, cssY: number): [number, number] | null;
   setSurfaceVisible(visible: boolean): void;
   /** Request one redraw on the next frame. */
   invalidate(): void;
@@ -127,12 +134,41 @@ export function createRenderer(device: Device): Renderer {
    * differ. A scissor confines the clear, so the inset gets its own background without
    * touching the 3D view behind it.
    */
-  const drawChartInset = () => {
-    if (!chartBounds) return;
-
+  /**
+   * Where the inset sits, and what rectangle of (u, v) it shows.
+   *
+   * One function, used to draw it and to hit-test it — a second copy of this arithmetic living in
+   * the pointer handler is a second copy that can drift by a margin and leave the highlight a few
+   * pixels off the square under the cursor.
+   */
+  const insetLayout = () => {
+    if (!chartBounds) return null;
     const margin = Math.round(Math.min(device.width, device.height) * 0.02);
     const size = Math.round(Math.min(device.width, device.height) * 0.3);
-    if (size < 32) return; // too small to read; better to omit than to draw noise
+    if (size < 32) return null; // too small to read; better to omit than to draw noise
+
+    const [u0, u1] = chartBounds.u;
+    const [v0, v1] = chartBounds.v;
+    // A little padding so the domain border is not flush against the edge.
+    const padU = (u1 - u0) * 0.08 || 0.1;
+    const padV = (v1 - v0) * 0.08 || 0.1;
+
+    return {
+      /** in device pixels, measured from the bottom left as GL does */
+      x: device.width - size - margin,
+      y: margin,
+      size,
+      view: {
+        u: [u0 - padU, u1 + padU] as [number, number],
+        v: [v0 - padV, v1 + padV] as [number, number],
+      },
+    };
+  };
+
+  const drawChartInset = () => {
+    const layout = insetLayout();
+    if (!layout) return;
+    const { x, y, size } = layout;
 
     /**
      * Bottom RIGHT, opposite the expression panel on the left.
@@ -143,21 +179,18 @@ export function createRenderer(device: Device): Renderer {
      * inset sits at the origin and fails totally the moment it moves — which is exactly what this
      * change would have triggered.
      */
-    const x = device.width - size - margin;
-    const y = margin;
-
     gl.enable(gl.SCISSOR_TEST);
     gl.scissor(x, y, size, size);
     gl.viewport(x, y, size, size);
     gl.clearColor(INSET_BACKGROUND[0], INSET_BACKGROUND[1], INSET_BACKGROUND[2], 1);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
-    // A little padding so the domain border is not flush against the edge.
-    const [u0, u1] = chartBounds.u;
-    const [v0, v1] = chartBounds.v;
-    const padU = (u1 - u0) * 0.08 || 0.1;
-    const padV = (v1 - v0) * 0.08 || 0.1;
-    const projection = orthographic(u0 - padU, u1 + padU, v0 - padV, v1 + padV);
+    const projection = orthographic(
+      layout.view.u[0],
+      layout.view.u[1],
+      layout.view.v[0],
+      layout.view.v[1],
+    );
 
     chartLinesPass.draw(projection, size, size, x, y);
 
@@ -175,6 +208,22 @@ export function createRenderer(device: Device): Renderer {
 
   return {
     camera,
+
+    chartAt(cssX, cssY) {
+      const layout = insetLayout();
+      if (!layout) return null;
+      // The same two conversions `pick` makes: CSS pixels to device pixels, and the y axis flips
+      // because pointer events measure down from the top while GL measures up from the bottom.
+      const px = cssX * device.dpr;
+      const py = device.height - cssY * device.dpr;
+      const inX = (px - layout.x) / layout.size;
+      const inY = (py - layout.y) / layout.size;
+      if (inX < 0 || inX > 1 || inY < 0 || inY > 1) return null;
+      return [
+        layout.view.u[0] + (layout.view.u[1] - layout.view.u[0]) * inX,
+        layout.view.v[0] + (layout.view.v[1] - layout.view.v[0]) * inY,
+      ] as [number, number];
+    },
 
     pick(cssX, cssY) {
       if (!pickPass.available) return null;

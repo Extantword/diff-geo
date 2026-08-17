@@ -39,6 +39,9 @@ import {
   tessellate,
   type TessellatedSurface,
 } from "../core/mesh/tessellate.ts";
+import { boundLevelSet, createImplicitSurface } from "../core/geom/implicit.ts";
+import { marchImplicit } from "../core/mesh/marchingCubes.ts";
+import { marchingSquares } from "../core/mesh/contour.ts";
 import { gaussImage, meshArea } from "../core/mesh/gaussMap.ts";
 import {
   IDENTITY_PLACEMENT,
@@ -52,6 +55,7 @@ import {
 } from "../core/geom/ports.ts";
 import { portOutline } from "../core/geom/ports.ts";
 import { groupSurfaces } from "./surfaces.ts";
+import { arrangedWith, spaceRoots } from "./spaces.ts";
 import {
   occupiedSockets,
   resolveAssembly,
@@ -65,9 +69,11 @@ import type { Item, RowId } from "./graph.ts";
 import {
   chartGrid,
   chartLift,
+  GRID_DIVISIONS,
   pushForward,
   sampleChartGraph,
   sampleChartRelation,
+  meshSliceLines,
   surfaceGridLines,
   type ChartBounds,
 } from "./chart.ts";
@@ -89,6 +95,9 @@ export const DEFAULT_DOMAIN: Readonly<Record<string, readonly [number, number]>>
   t: [0, 2 * Math.PI],
   x: [-2, 2],
   y: [-2, 2],
+  // The third side of the box a level set is searched in. Same width as the other two, because a
+  // box that is not a cube makes a sphere look like an ellipsoid until you read the sliders.
+  z: [-2, 2],
 };
 
 export interface DomainRange {
@@ -183,6 +192,24 @@ export interface SceneRequest {
    */
   readonly chartRow?: RowId | null;
   /**
+   * Show this row alone, in its own ambient space.
+   *
+   * Double-clicking an object asks "let me look at *this*", and the honest answer is a stage with
+   * nothing else on it. Filtering here rather than by hiding every other row keeps the document
+   * untouched — nothing is switched off, nothing has to be switched back on, and leaving the mode
+   * is one field going null. Rows stated in the isolated row's chart come with it: a curve on a
+   * surface is part of that surface's picture, not another object.
+   */
+  readonly isolate?: RowId | null;
+  /**
+   * Draw the coordinate axes.
+   *
+   * Off by default: a figure of a surface is about the surface, and three lines through it are
+   * scaffolding. On while looking at one object in its ambient space, where the question is where
+   * the thing sits rather than what shape it is.
+   */
+  readonly axes?: boolean;
+  /**
    * Draw the free boundaries as handles.
    *
    * Off by default, and it matters that it is: a saddle patch has four open edges, and ringing
@@ -242,6 +269,22 @@ export interface SurfaceOverlay {
    * and that outline is the more useful half of it.
    */
   readonly hidden?: boolean;
+  /**
+   * Find the box rather than being given it. On a **level set** row.
+   *
+   * The domain sliders of a level set are a window, not a domain — so "show me all of it" is a
+   * different question from "show me here", and it can only be answered by searching for where
+   * the surface is. While this is on, the sliders are ignored.
+   */
+  readonly autoBox?: boolean;
+  /**
+   * Draw this level set **flat**, as a curve in the z = 0 plane, rather than as a surface.
+   *
+   * `x² + y² = 1` is the cylinder; its section by that plane is the circle. Both are honest
+   * readings of the same row and only the reader knows which was meant, so the surface is the
+   * default and this is how the other one is asked for.
+   */
+  readonly inPlane?: boolean;
   /**
    * Draw a vector field's arrows. On a **field** row, not a patch's.
    *
@@ -524,6 +567,15 @@ export interface Scene {
    */
   positionOf(rowId: RowId, u: number, v: number): Vec3 | null;
   /**
+   * The grid square of the shown chart containing (u, v), outlined flat and on the surface.
+   *
+   * For the hover: moving over the inset picks out one square there and the patch of surface it
+   * maps to, which is the parametrization made visible one cell at a time — the thing the two
+   * pictures are side by side to show. Answered from the compiled surface without a rebuild, like
+   * the aimed geodesic, because it has to keep up with a pointer.
+   */
+  chartCellAt(u: number, v: number): { chart: Polyline; surface: Polyline | null } | null;
+  /**
    * The flow of a field row, ready to be played, or null if that row is not a field.
    *
    * Exposed on the Scene for the same reason `geodesicFrom` is: the surface and the field are
@@ -547,6 +599,16 @@ export interface Scene {
     length: number,
   ): Polyline | null;
 }
+
+/**
+ * Kinds that, when stated on a surface, belong to its **ambient space** rather than to its chart.
+ *
+ * A point, a curve in space, a graph, another surface: each is a thing in R³ written while looking
+ * at one object, and each is drawn when that object's ambient space is open. Everything else a row
+ * can say on a surface — a relation in u and v, a tangent plane, a field along it — is part of the
+ * surface's own picture and is drawn wherever the surface is.
+ */
+
 
 /** No translation, shared so the common case allocates nothing. */
 const ZERO_OFFSET: Vec3 = [0, 0, 0];
@@ -729,6 +791,16 @@ const TANGENT_U_COLOR: Vec3 = [0.10, 0.60, 0.32];
 const TANGENT_V_COLOR: Vec3 = [0.80, 0.15, 0.15];
 const TANGENT_NORMAL_COLOR: Vec3 = [0.85, 0.55, 0.0];
 
+/**
+ * The square under the pointer, in both pictures.
+ *
+ * A warm colour that no measurement uses: curvature is the diverging blue-red, curves take the
+ * palette, the grid is slate. A highlight has to be reportable as *not* data.
+ */
+const HOVER_COLOR: Vec3 = [0.95, 0.45, 0.05];
+/** Samples per side of the highlighted square, so its image is a curve rather than four chords. */
+const HOVER_SAMPLES = 14;
+
 /** A vector field's arrows, when the row has not been given a colour of its own. */
 const FIELD_COLOR: Vec3 = [0.15, 0.45, 0.75];
 
@@ -785,6 +857,28 @@ const FIELD_TANGENT_EPS = 1e-3;
 const TANGENT_DIVISIONS = 6;
 /** Its half-width, as a fraction of the patch's own extent. */
 const TANGENT_SIZE = 0.42;
+
+/**
+ * x, y, z — red, green, blue, as every 3D tool has drawn them since the first one.
+ *
+ * Muted rather than saturated: the axes are scaffolding, and scaffolding that competes with the
+ * object is scaffolding in the way.
+ */
+/**
+ * How far the ticks run, and how far the line goes on after them.
+ *
+ * The ticked stretch is about the object; the tail is about not putting an edge on space. A
+ * horizon of ten thousand steps is past anything a camera framed on the object will ever reach,
+ * and costs twenty segments to get to because they double.
+ */
+const AXIS_TICKS = 24;
+const AXIS_HORIZON = 10000;
+
+const AXIS_COLORS: readonly Vec3[] = [
+  [0.78, 0.28, 0.28],
+  [0.26, 0.62, 0.32],
+  [0.25, 0.42, 0.80],
+];
 
 /** A free boundary, waiting to be joined to. */
 const SOCKET_COLOR: Vec3 = [0.10, 0.62, 0.68];
@@ -941,16 +1035,82 @@ function tangentPlaneFigure(
 }
 
 export function buildScene(request: SceneRequest): Scene {
-  const { items, parameters, domains, resolution } = request;
+  const { parameters, domains, resolution } = request;
+  /**
+   * Everything the document draws, or one object and what belongs to it.
+   *
+   * "What belongs to it" is the rows stated in its chart — a relation, a tangent plane, a field —
+   * because those are parts of its picture rather than other objects. Parameters and definitions
+   * are kept whatever happens: they draw nothing and dropping them would break the rows that use
+   * them.
+   */
+  const owner =
+    request.isolate == null
+      ? null
+      : request.items.find((item) => item.rowId === request.isolate) ?? null;
+  /**
+   * The names an open space contains: the surface it belongs to, and everything written on
+   * something already in it.
+   *
+   * The closure is what makes a space usable rather than a single-object viewer. Writing a second
+   * surface inside X's space puts it there — and a field, a relation or a tangent plane stated on
+   * *that* surface is in the same space, because it is stated on something that is. One level of
+   * host would draw the new surface and silently drop everything drawn on it.
+   */
+  const inSpace = new Set<string>();
+  if (owner?.name != null) {
+    inSpace.add(owner.name);
+    for (let pass = 0; pass < 8; pass++) {
+      let grew = false;
+      for (const item of request.items) {
+        if (item.name === null || inSpace.has(item.name)) continue;
+        if (item.host != null && inSpace.has(item.host)) {
+          inSpace.add(item.name);
+          grew = true;
+        }
+      }
+      if (!grew) break;
+    }
+  }
+  const items = request.items.filter((item) => {
+    /**
+     * Everything a space holds is drawn outside it too; ambient space only ever **narrows**.
+     *
+     * A point, a curve or a graph written inside X's space is a thing the user made, with a place
+     * in the same R³ as everything else, and it goes on being there when nobody is inside looking
+     * at it. Hiding those on the way out was the first design, and it read as the document
+     * throwing the work away — you build something, step out, and it is gone. What is wanted
+     * instead is a switch: the eye on each row says whether that object is drawn, one decision
+     * per object, made by hand and remembered.
+     *
+     * So the filter is empty at the top level and selective only while a space is open, where it
+     * keeps the object whose space it is and everything written in it, to any depth.
+     */
+    if (request.isolate == null) return true;
+    if (item.rowId === request.isolate) return true;
+    return item.host != null && inSpace.has(item.host);
+  });
   const frameRequests = request.frames ?? new Map<RowId, FrameRequest>();
   const declared = request.declaredParameters ?? new Map<string, number>();
   const inChart = request.inChart ?? new Set<RowId>();
   const overlays = request.overlays ?? new Map<RowId, SurfaceOverlay>();
   const rowColors = request.colors ?? new Map<RowId, Vec3>();
   const translations = request.translations ?? new Map<RowId, Vec3>();
-  const offsetOf = (rowId: RowId): Vec3 => translations.get(rowId) ?? ZERO_OFFSET;
   const rotations = request.rotations ?? new Map<RowId, Quat>();
-  const rotationOf = (rowId: RowId): Quat => rotations.get(rowId) ?? QUAT_IDENTITY;
+  /**
+   * Arrangement belongs to a **space**, not to each object in it.
+   *
+   * A point written inside X's ambient space is at (1, 2, 3) *of that space*, and the sentence
+   * stops being true the moment the point and the torus can be dragged apart. So every row
+   * written in a space reads its host's placement — the same rotation, about the same centre, by
+   * the same offset — and the whole space moves as one rigid thing. The gesture end of this is in
+   * `main.ts`, where a drag on any member is redirected to the row that holds the placement; both
+   * ends go through `spaceRoots` so they cannot disagree about who moves.
+   */
+  const spaces = spaceRoots(items);
+  const holder = (rowId: RowId): RowId => arrangedWith(rowId, spaces);
+  const offsetOf = (rowId: RowId): Vec3 => translations.get(holder(rowId)) ?? ZERO_OFFSET;
+  const rotationOf = (rowId: RowId): Quat => rotations.get(holder(rowId)) ?? QUAT_IDENTITY;
   /**
    * Rows the user has switched off with the dot on their cell.
    *
@@ -1112,7 +1272,16 @@ export function buildScene(request: SceneRequest): Scene {
         fill: overlays.get(item.rowId)?.fill ?? true,
         grid: overlays.get(item.rowId)?.grid ?? true,
       });
-      meshes.push(mesh);
+      /**
+       * The eye on the row: hidden means *nothing* of this patch is drawn.
+       *
+       * Not the face and not the grid, which is what separates it from the dot — that takes the
+       * face off and leaves the outline, the more useful half of a surface you are looking past.
+       * The mesh is still built and kept on the entry, because the chart, the ports and every
+       * curve pushed onto this surface are read off it; it is simply never handed to the
+       * renderer, so a hidden object is not drawn and not pickable either.
+       */
+      if (!hiddenRow(item.rowId)) meshes.push(mesh);
       entry.mesh = mesh;
       /**
        * Where this surface ends, measured while it is still where its formula put it.
@@ -1143,6 +1312,109 @@ export function buildScene(request: SceneRequest): Scene {
   }
 
   /**
+   * ---- level sets ----
+   *
+   * `F(x, y, z) = 0` is the second representation, and it arrives here as an equation whose two
+   * sides the classifier kept apart: F is their difference. Everything downstream is shared with
+   * the parametric path — the mesh has the same shape, so the surface pass, the picking pass and
+   * the colour scale take it without a branch — because the geometry itself is shared:
+   * `implicit.ts` fills the same `SurfacePoint`, through the same eigensolver, with N = ∇F/|∇F|.
+   *
+   * Meshed **before** the arrangement below, so a level set can be dragged and turned about its
+   * own centre like anything else: `resolveAssembly` needs its bounding centre, and that needs
+   * its mesh.
+   */
+  const implicitMeshes = new Map<RowId, TessellatedSurface>();
+  for (const item of items) {
+    if (item.kind !== "implicitSurface") continue;
+    try {
+      const field = ctx.sub(item.comps[0]!, item.comps[1] ?? ctx.zero);
+      const paramNames = [...item.params];
+      const map = cachedDiffMap({
+        id: `row-${item.rowId}`,
+        comps: [field],
+        vars: ["x", "y", "z"],
+        params: paramNames,
+        order: 2,
+      });
+      const [xRange, yRange, zRange] = implicitRanges(item, domains);
+      const params = packParameters(paramNames, parameters, declared);
+      const asked = createImplicitSurface({
+        id: `row-${item.rowId}`,
+        map,
+        x: xRange,
+        y: yRange,
+        z: zRange,
+      });
+
+      /**
+       * "Show me all of it": look for the surface instead of being told where to look.
+       *
+       * A level set has no domain, so the box is a choice — and the one choice the sliders cannot
+       * express is "wherever it happens to be". The search is coarse and cheap, and its answer is
+       * a **second surface** over the found box; the sliders keep whatever they said, so turning
+       * this off puts the old window back rather than having overwritten it.
+       */
+      let fitted: string | null = null;
+      let surface = asked;
+      if (overlays.get(item.rowId)?.autoBox) {
+        const box = boundLevelSet(asked, params);
+        if (box) {
+          surface = createImplicitSurface({ id: `row-${item.rowId}`, map, ...box });
+          fitted =
+            `fitted to [${box.x.min.toFixed(2)}, ${box.x.max.toFixed(2)}] × ` +
+            `[${box.y.min.toFixed(2)}, ${box.y.max.toFixed(2)}] × ` +
+            `[${box.z.min.toFixed(2)}, ${box.z.max.toFixed(2)}]`;
+        } else {
+          fitted = "nothing found within ±12, so the sliders still decide the box";
+        }
+      }
+
+      // Before the marching, not after it: a level set switched off with its own dot would
+      // otherwise cost a whole volume of evaluations to produce a mesh nothing draws. The colour
+      // is still reported, because the dot has to keep showing what it would come back as.
+      usedColors.set(item.rowId, rowColors.get(item.rowId) ?? DEFAULT_BASE_COLOR);
+      if (hiddenRow(item.rowId) || overlays.get(item.rowId)?.inPlane) continue;
+
+      const mesh = marchImplicit(surface, params, {
+        res: marchResolution(resolution),
+        objectId: item.rowId,
+        baseColor: rowColors.get(item.rowId),
+        colormap: overlays.get(item.rowId)?.colormap,
+        fill: overlays.get(item.rowId)?.fill ?? true,
+      });
+
+      meshes.push(mesh);
+      implicitMeshes.set(item.rowId, mesh);
+      if (Number.isFinite(mesh.range.minK)) {
+        curvatureSamples.push(mesh.range.minK, mesh.range.maxK);
+      }
+
+      /**
+       * An empty box is the commonest way an implicit surface looks broken, and it is not broken
+       * — the level set is simply somewhere else, or nowhere. Saying which is the difference
+       * between a blank stage and a diagnosis.
+       */
+      reports.push({
+        rowId: item.rowId,
+        info:
+          mesh.triangleCount === 0
+            ? "no surface inside this box"
+            : `${mesh.triangleCount} triangles · K ∈ [${mesh.range.minK.toFixed(3)}, ` +
+              `${mesh.range.maxK.toFixed(3)}]${fitted === null ? "" : ` · ${fitted}`}`,
+        warning:
+          mesh.triangleCount === 0
+            ? "widen the domain, or check that the equation has solutions"
+            : mesh.droppedVertices > mesh.vertexCount
+              ? `${mesh.droppedVertices} samples were not finite — check the equation`
+              : undefined,
+      });
+    } catch (thrown) {
+      reports.push({ rowId: item.rowId, error: messageOf(thrown) });
+    }
+  }
+
+  /**
    * ---- arrangement and assembly ----
    *
    * Applied to the DRAWN geometry only, never to the map it came from: every curvature is a
@@ -1161,15 +1433,25 @@ export function buildScene(request: SceneRequest): Scene {
     if (entry.ports) localPorts.set(entry.item.rowId, entry.ports);
     if (entry.mesh) handCentres.set(entry.item.rowId, meshCentre(entry.mesh));
   }
+  /**
+   * A level set is arranged by hand like anything else, and offers no ports.
+   *
+   * Ports are measured from a chart's boundary, and a level set has neither — what bounds it here
+   * is the box it was searched in, which is a window rather than an edge of the surface. So it
+   * takes a hand placement and nothing can be joined to it.
+   */
+  for (const [rowId, mesh] of implicitMeshes) handCentres.set(rowId, meshCentre(mesh));
   const assembly = resolveAssembly(
-    compiledSurfaces.map((entry) => entry.item.rowId),
+    [...compiledSurfaces.map((entry) => entry.item.rowId), ...implicitMeshes.keys()],
     {
       joints,
       localPorts,
       free: (rowId) =>
         placementAbout(
           rotationOf(rowId),
-          handCentres.get(rowId) ?? ZERO_OFFSET,
+          // The centre turned about is the *space's*, so every member takes the identical rigid
+          // motion. Each about its own centre would spin the parts of one space apart.
+          handCentres.get(holder(rowId)) ?? handCentres.get(rowId) ?? ZERO_OFFSET,
           offsetOf(rowId),
         ),
     },
@@ -1183,13 +1465,26 @@ export function buildScene(request: SceneRequest): Scene {
    * about, so it takes its hand offset and nothing else. That is the behaviour curves have always
    * had; stating it here keeps every drawn thing going through one function.
    */
-  const placementOf = (rowId: RowId): Placement =>
-    assembly.placements.get(rowId) ?? { rotation: QUAT_IDENTITY, translation: offsetOf(rowId) };
+  const placementOf = (rowId: RowId): Placement => {
+    const own = assembly.placements.get(rowId);
+    if (own) return own;
+    // A point or a curve has no mesh and so no resolved placement of its own; written inside a
+    // space, what it takes is the space's, rotation included.
+    const root = holder(rowId);
+    if (root !== rowId) {
+      const shared = assembly.placements.get(root);
+      if (shared) return shared;
+    }
+    return { rotation: QUAT_IDENTITY, translation: offsetOf(rowId) };
+  };
 
   for (const entry of compiledSurfaces) {
     const placement = assembly.placements.get(entry.item.rowId) ?? IDENTITY_PLACEMENT;
     entry.placement = placement;
     if (entry.mesh) placeMesh(entry.mesh, placement);
+  }
+  for (const [rowId, mesh] of implicitMeshes) {
+    placeMesh(mesh, assembly.placements.get(rowId) ?? IDENTITY_PLACEMENT);
   }
 
   const occupied = occupiedSockets(joints);
@@ -1261,6 +1556,7 @@ export function buildScene(request: SceneRequest): Scene {
   for (const entry of compiledSurfaces) {
     const mesh = entry.mesh;
     if (!mesh) continue;
+    if (hiddenRow(entry.item.rowId)) continue;
     const overlay = overlays.get(entry.item.rowId);
     if (!(overlay?.grid ?? true)) continue;
     const filled = overlay?.fill ?? true;
@@ -1269,6 +1565,32 @@ export function buildScene(request: SceneRequest): Scene {
       gridLines.push({
         polylines: interior,
         style: { widthPx: filled ? 1.0 : 1.3, opacity: filled ? 0.5 : 0.85 },
+      });
+    }
+    if (border.length > 0) {
+      gridLines.push({
+        polylines: border,
+        style: { widthPx: filled ? 1.8 : 2.2, opacity: filled ? 0.75 : 1 },
+      });
+    }
+  }
+
+  /**
+   * The same for a level set, where the "grid" is where the ambient coordinates cut it.
+   *
+   * Built here for the same reason the parametric grid is: the vertices these lines are read from
+   * have already been placed, so the group carries no `rowId` and takes no further motion. With
+   * the face off, this is what is left — which is the point of being able to turn the face off.
+   */
+  for (const [rowId, mesh] of implicitMeshes) {
+    const overlay = overlays.get(rowId);
+    if (!(overlay?.grid ?? true)) continue;
+    const filled = overlay?.fill ?? true;
+    const { interior, border } = meshSliceLines(mesh, overlayLift);
+    if (interior.length > 0) {
+      gridLines.push({
+        polylines: interior,
+        style: { widthPx: filled ? 1.0 : 1.3, opacity: filled ? 0.42 : 0.8 },
       });
     }
     if (border.length > 0) {
@@ -1565,6 +1887,74 @@ export function buildScene(request: SceneRequest): Scene {
             : frame.status === "inflection"
               ? `t = ${t.toFixed(3)}   κ = 0 — N and B undefined here`
               : `t = ${t.toFixed(3)}   singular parametrization here`,
+      });
+    } catch (thrown) {
+      reports.push({ rowId: item.rowId, error: messageOf(thrown) });
+    }
+  }
+
+  /**
+   * A level set drawn **flat**: `{ (x, y) : F(x, y, 0) = 0 }`, in the z = 0 plane.
+   *
+   * `x² + y² = 1` is the cylinder, and its section is the circle — two different objects, and only
+   * the reader knows which was meant. So the surface is the default and this is the row's own
+   * choice, through the same marching squares the chart relations use: the level set of a relation
+   * is the level set of a relation, and the only difference is where the segments are put.
+   */
+  for (const item of items) {
+    if (item.kind !== "implicitSurface") continue;
+    if (!overlays.get(item.rowId)?.inPlane) continue;
+    if (hiddenRow(item.rowId)) continue;
+    try {
+      const paramNames = [...item.params];
+      // z is bound to 0: the flat reading is the surface's section by the plane it is drawn in.
+      const compiled = compileMany([...item.comps], { vars: ["x", "y", "z"], params: paramNames });
+      const values = packParameters(paramNames, parameters, declared);
+      const out = new Float64Array(item.comps.length);
+      const argument = new Float64Array(3);
+
+      const [xRange, yRange] = implicitRanges(item, domains);
+      const contour = marchingSquares(
+        (x, y) => {
+          argument[0] = x;
+          argument[1] = y;
+          compiled.evaluate(argument, values, out);
+          return (out[0] ?? Number.NaN) - (out[1] ?? 0);
+        },
+        { u: [xRange.min, xRange.max], v: [yRange.min, yRange.max] },
+        { resU: Math.max(resolution, 120), resV: Math.max(resolution, 120) },
+      );
+
+      const color = colorOf(item.rowId, CURVE_PALETTE[curveIndex % CURVE_PALETTE.length]!);
+      curveIndex++;
+      const polylines: Polyline[] = [];
+      for (let i = 0; i < contour.segmentCount; i++) {
+        polylines.push({
+          points: new Float64Array([
+            contour.segments[i * 4]!,
+            contour.segments[i * 4 + 1]!,
+            0,
+            contour.segments[i * 4 + 2]!,
+            contour.segments[i * 4 + 3]!,
+            0,
+          ]),
+          count: 2,
+          color,
+        });
+      }
+      if (polylines.length > 0) {
+        lines.push({ rowId: item.rowId, polylines, style: { widthPx: 3 } });
+      }
+      reports.push({
+        rowId: item.rowId,
+        info:
+          contour.segmentCount === 0
+            ? "no solutions in this window"
+            : `${contour.segmentCount} contour segments`,
+        warning:
+          contour.invalidSamples > 0
+            ? `${contour.invalidSamples} samples were not finite`
+            : undefined,
       });
     } catch (thrown) {
       reports.push({ rowId: item.rowId, error: messageOf(thrown) });
@@ -2214,7 +2604,6 @@ export function buildScene(request: SceneRequest): Scene {
 
   // Points come free from the lines pass: a zero-length segment with round caps renders
   // as a disc, so no separate billboard pass is needed for them.
-  const dots: Polyline[] = [];
   for (const item of items) {
     if (item.kind !== "point") continue;
     if (hiddenRow(item.rowId)) continue;
@@ -2228,10 +2617,22 @@ export function buildScene(request: SceneRequest): Scene {
         reports.push({ rowId: item.rowId, error: "this point is not finite" });
         continue;
       }
-      dots.push({
-        points: new Float64Array([...position, ...position]),
-        count: 2,
-        color: colorOf(item.rowId, POINT_COLOR),
+      /**
+       * One group per point, carrying its row — not one pooled group for all of them.
+       *
+       * Pooled, the group has no owner, and the pass that applies arrangement skips exactly the
+       * groups with no owner. A point written in a torus's ambient space would then stay behind
+       * when the torus was dragged, which is the one thing a point beside an object must never
+       * do: it is at (1, 2, 3) *of that space*, and the sentence has to survive the space moving.
+       */
+      lines.push({
+        polylines: [{
+          points: new Float64Array([...position, ...position]),
+          count: 2,
+          color: colorOf(item.rowId, POINT_COLOR),
+        }],
+        style: { widthPx: 11 },
+        rowId: item.rowId,
       });
       reports.push({
         rowId: item.rowId,
@@ -2241,9 +2642,6 @@ export function buildScene(request: SceneRequest): Scene {
       reports.push({ rowId: item.rowId, error: messageOf(thrown) });
     }
   }
-  // Points from several rows share one group, so this one carries no owner and is not moved by
-  // any object's arrangement.
-  if (dots.length > 0) lines.push({ polylines: dots, style: { widthPx: 11 } });
 
   /**
    * Curves are shifted at the end, in one pass over the finished groups.
@@ -2295,9 +2693,88 @@ export function buildScene(request: SceneRequest): Scene {
   for (const entry of compiledSurfaces) {
     if (entry.curvature) curvatureScales.set(entry.item.rowId, entry.curvature.scale);
   }
+  // A level set's scale comes from its own mesh: there is no domain to sample independently of
+  // it, since the surface is wherever F vanishes.
+  for (const [rowId, mesh] of implicitMeshes) curvatureScales.set(rowId, mesh.range.scale);
 
   const mesh = meshes.length === 0 ? null : concatenate(meshes);
+  /**
+   * The bounds are taken **before** the axes are added, and that ordering is the whole point.
+   *
+   * The camera frames these bounds, so axes long enough to hold the scene would be what it framed
+   * — every object shown at the scale of its own scaffolding, shrinking into the middle of a
+   * cross. Framing the object and letting the axes run off the edges is what every 3D graphing
+   * tool does, and it is why this line sits here rather than at the end.
+   */
   const bounds = computeBounds(mesh, lines);
+
+  /**
+   * The coordinate axes: ticked near the object, and running off to the horizon past it.
+   *
+   * Three lines through the origin, each in its own colour, with a tick every round unit — the
+   * convention every 3D graphing tool uses, and the one thing that turns "a shape floating in
+   * space" into "a shape at these coordinates".
+   *
+   * They do not stop. An axis that ended a little past the object would put a visible edge on
+   * space itself, and zooming out would show three short sticks rather than a coordinate system,
+   * so past the ticked stretch each axis continues in **geometrically growing** steps out to a
+   * distance nothing will be looking from. Growing rather than uniform because the cost of
+   * uniform is unbounded: a tick every unit out to a million units is a million segments, while
+   * doubling gets there in twenty and looks identical, every one of them off screen.
+   *
+   * The line is built as a **chain** rather than as one enormous segment. The lines pass turns
+   * each pair of points into a screen-space quad, and a single segment spanning the camera would
+   * have one endpoint behind the eye — where the projection turns inside out and the quad wraps
+   * across the screen.
+   */
+  if (request.axes) {
+    const near = Math.max(sceneExtent * 1.6, 1e-6);
+    const step = tickStep(near);
+    const reach = step * AXIS_TICKS;
+
+    /** The points along one axis, from the origin out: ticked, then doubling to the horizon. */
+    const stations: number[] = [];
+    for (let t = step; t <= reach + step / 2; t += step) stations.push(t);
+    for (let t = reach * 2; t < step * AXIS_HORIZON; t *= 2) stations.push(t);
+    stations.push(step * AXIS_HORIZON);
+
+    const axisLines: Polyline[] = [];
+    const tickLines: Polyline[] = [];
+    for (let axis = 0; axis < 3; axis++) {
+      const along = (t: number): Vec3 => [
+        axis === 0 ? t : 0,
+        axis === 1 ? t : 0,
+        axis === 2 ? t : 0,
+      ];
+      const color = AXIS_COLORS[axis]!;
+
+      const chain: Vec3[] = [];
+      for (let i = stations.length - 1; i >= 0; i--) chain.push(along(-stations[i]!));
+      chain.push(along(0));
+      for (const t of stations) chain.push(along(t));
+      axisLines.push(polylineOf(chain, color));
+
+      // Ticks across the two other directions, so a tick reads from any angle. Only over the
+      // ticked stretch: out in the tail they would be a picket fence at one pixel a post.
+      const size = near * 0.012;
+      for (let t = step; t <= reach + step / 2; t += step) {
+        for (const sign of [1, -1] as const) {
+          for (let other = 0; other < 3; other++) {
+            if (other === axis) continue;
+            const a = along(sign * t);
+            const b = along(sign * t);
+            a[other as 0 | 1 | 2] -= size;
+            b[other as 0 | 1 | 2] += size;
+            tickLines.push(polylineOf([a, b], color));
+          }
+        }
+      }
+    }
+    lines.push({ polylines: axisLines, style: { widthPx: 1.6, opacity: 0.75 } });
+    if (tickLines.length > 0) {
+      lines.push({ polylines: tickLines, style: { widthPx: 1.4, opacity: 0.55 } });
+    }
+  }
 
   return {
     mesh,
@@ -2321,6 +2798,76 @@ export function buildScene(request: SceneRequest): Scene {
       const centre = handCentres.get(rowId);
       if (!centre) return null;
       return handArrangement(placementOf(rowId), centre);
+    },
+
+    chartCellAt(u, v) {
+      if (!shown || !chartBounds) return null;
+      const [u0, u1] = chartBounds.u;
+      const [v0, v1] = chartBounds.v;
+      const spanU = u1 - u0;
+      const spanV = v1 - v0;
+      if (!(spanU > 0) || !(spanV > 0)) return null;
+      // Outside the domain there is no square: the inset shows a wider view than the surface has,
+      // and the margin is chart the parametrization says nothing about.
+      if (u < u0 || u > u1 || v < v0 || v > v1) return null;
+
+      /**
+       * The same lattice the grid is drawn on, in both pictures.
+       *
+       * `chartGrid` divides the domain into `GRID_DIVISIONS` and `surfaceGridLines` walks the
+       * mesh at the same count, so a square in the corner and a square on the object are the same
+       * square. Snapping the hover to anything else would highlight two different things.
+       */
+      const i = Math.min(GRID_DIVISIONS - 1, Math.floor(((u - u0) / spanU) * GRID_DIVISIONS));
+      const j = Math.min(GRID_DIVISIONS - 1, Math.floor(((v - v0) / spanV) * GRID_DIVISIONS));
+      const a = u0 + (spanU * i) / GRID_DIVISIONS;
+      const b = u0 + (spanU * (i + 1)) / GRID_DIVISIONS;
+      const c = v0 + (spanV * j) / GRID_DIVISIONS;
+      const d = v0 + (spanV * (j + 1)) / GRID_DIVISIONS;
+
+      // The square's boundary, sampled so its image is a curve rather than four chords.
+      const path: Array<[number, number]> = [];
+      const edge = (fromU: number, fromV: number, toU: number, toV: number) => {
+        for (let k = 0; k < HOVER_SAMPLES; k++) {
+          const t = k / HOVER_SAMPLES;
+          path.push([fromU + (toU - fromU) * t, fromV + (toV - fromV) * t]);
+        }
+      };
+      edge(a, c, b, c);
+      edge(b, c, b, d);
+      edge(b, d, a, d);
+      edge(a, d, a, c);
+      path.push([a, c]);
+
+      const flat = new Float64Array(path.length * 3);
+      for (let k = 0; k < path.length; k++) {
+        flat[k * 3] = path[k]![0];
+        flat[k * 3 + 1] = path[k]![1];
+      }
+
+      const onSurface = liftedPolyline(
+        shown.surface,
+        shown.params,
+        path,
+        chartLift(sceneExtent, resolution, liftScale) * 2.2,
+        HOVER_COLOR,
+      );
+      // Twice the usual lift: this line sits on top of the grid it is picking out, and a highlight
+      // that z-fights with the line it is highlighting reads as flicker rather than as emphasis.
+      placePolyline(onSurface, placementOf(shown.item.rowId));
+
+      let anyValid = false;
+      for (let k = 0; k < onSurface.count; k++) {
+        if (onSurface.valid?.[k]) {
+          anyValid = true;
+          break;
+        }
+      }
+
+      return {
+        chart: { points: flat, count: path.length, color: HOVER_COLOR },
+        surface: anyValid ? onSurface : null,
+      };
     },
 
     flowFor(rowId) {
@@ -2504,6 +3051,20 @@ function widenToFit(bounds: ChartBounds, curves: readonly Polyline[]): ChartBoun
   };
 }
 
+/**
+ * A tick spacing that is a round number and gives a readable count.
+ *
+ * 1, 2 or 5 times a power of ten — the choice every axis in every plotting library makes, because
+ * the alternative is ticks at 0.37 and a reader doing arithmetic to place the object.
+ */
+function tickStep(reach: number): number {
+  const raw = reach / 6;
+  const magnitude = 10 ** Math.floor(Math.log10(Math.max(raw, 1e-9)));
+  const normalized = raw / magnitude;
+  const step = normalized >= 5 ? 5 : normalized >= 2 ? 2 : 1;
+  return step * magnitude;
+}
+
 /** Half the largest span across a set of meshes — a stand-in for scene size. */
 function extentOfMeshes(meshes: readonly TessellatedSurface[]): number {
   let min = [Infinity, Infinity, Infinity];
@@ -2637,6 +3198,35 @@ function surfaceRanges(
     return interval(fallback[0], fallback[1]);
   };
   return [rangeFor(0), rangeFor(1)] as const;
+}
+
+/**
+ * The box a level set is looked for in, per row.
+ *
+ * Three sides always, whichever coordinates the formula happens to mention: a level set is a
+ * subset of R³ and the box is a window onto it, not a domain the surface is a map from.
+ */
+function implicitRanges(item: Item, domains: ReadonlyMap<RowId, readonly DomainRange[]>) {
+  const stored = domains.get(item.rowId);
+  const rangeFor = (index: number, name: string) => {
+    const explicit = stored?.[index];
+    if (explicit) return interval(explicit.min, explicit.max);
+    const fallback = DEFAULT_DOMAIN[name] ?? [-2, 2];
+    return interval(fallback[0], fallback[1]);
+  };
+  return [rangeFor(0, "x"), rangeFor(1, "y"), rangeFor(2, "z")] as const;
+}
+
+/**
+ * Cells per axis for the marching grid, from the parametric resolution.
+ *
+ * They cannot be the same number. A parametric surface samples a rectangle — 150² is 23k points —
+ * while a level set samples a **volume**, so the same figure would be 3.4 million evaluations and
+ * a frozen tab. The cap is what keeps a draft render honest about being cheap; past it, a surface
+ * gets smoother by having its box tightened rather than by grinding the whole volume finer.
+ */
+function marchResolution(resolution: number): number {
+  return Math.max(16, Math.min(60, Math.round(resolution * 0.55)));
 }
 
 function packParameters(

@@ -28,6 +28,7 @@ function makeList(
     onFlowTick?: (rowId: RowId, seconds: number) => void;
     onFlowRewind?: (rowId: RowId) => void;
     onFlowToggle?: (rowId: RowId) => void;
+    onEnterSpace?: (rowId: RowId) => void;
   } = {},
 ) {
   const store = createDocument(sources);
@@ -38,6 +39,7 @@ function makeList(
     onFlowTick: shared.onFlowTick,
     onFlowRewind: shared.onFlowRewind,
     onFlowToggle: shared.onFlowToggle,
+    onEnterSpace: shared.onEnterSpace,
     domains: shared.domains ?? new Map(),
     sliders: shared.sliders ?? new Map(),
     frames: new Map(),
@@ -730,9 +732,10 @@ describe("the window in cursor placement", () => {
     // whether curvature is painted on it.
     expect(panel.querySelector(".row__domain")).not.toBeNull();
     expect(panel.querySelector(".props__color")).not.toBeNull();
-    // K, what of this patch is drawn — its face and its grid — and the three things a patch can
-    // be given: a curve in its chart, a tangent plane at a point of it, and a field along it.
-    expect(panel.querySelectorAll(".chip")).toHaveLength(6);
+    // K, what of this patch is drawn — its face and its grid — the three things a patch can be
+    // given (a curve in its chart, a tangent plane, a field along it), and the level set's own
+    // "show all of it", which is hidden on a patch.
+    expect(panel.querySelectorAll(".chip")).toHaveLength(7);
     // The occasional tools stay in the tray, which the floating form hides.
     expect(tray.querySelectorAll(".chip").length).toBeGreaterThan(1);
   });
@@ -931,6 +934,8 @@ describe("what of a patch is drawn", () => {
       "+ relation",
       "+ tangent",
       "+ field",
+      // The fit switch is an icon, so it contributes no text — and it is hidden on a patch.
+      "",
     ]);
     expect(tools.querySelector<HTMLButtonElement>(".chip")!.title).toContain("the face");
   });
@@ -1245,8 +1250,13 @@ describe("a tangent plane in the row list", () => {
       .find((chip) => chip.textContent?.includes("tangent"))!
       .click();
 
-    const added = store.rows().find((row) => row.source().startsWith("T_"))!;
-    expect(added.source()).toBe("T_(1, 0) X");
+    /**
+     * Written with the prefix spelling, because that is the one that can carry an address: a
+     * patch named after the parenthesis is a single identifier, and a patch inside a space is
+     * `A:sigma`. Both spellings mean the same row.
+     */
+    const added = store.rows().find((row) => row.source().includes("T_"))!;
+    expect(added.source()).toBe("X: T_(1, 0)");
 
     // In edit mode, focused, with the caret after it, like the relation button.
     const cell = [...list.root.querySelectorAll<HTMLElement>(".row")].find(
@@ -1534,6 +1544,32 @@ describe("the colour of an object, on its own cell", () => {
     expect(list.root.querySelector<HTMLElement>(".gutter__dot")!.style.background).toBe("#0000ff");
   });
 
+  it("hides an object from the eye on its cell, and says which state it is in", () => {
+    /**
+     * The eye is the blunt switch: closed, the row draws nothing at all, whatever kind of thing
+     * it is. That is what separates it from the dot, which for a patch takes the face off and
+     * leaves the grid. It writes `hidden` into the overlays record, which undo snapshots and the
+     * file keeps, so being switched off is part of the figure.
+     */
+    const overlays = new Map<RowId, SurfaceOverlay>();
+    const { store, list } = makeList(["X(u,v) = (u, v, 0)"], { overlays });
+    document.body.append(list.root, list.card);
+    list.refresh([]);
+    const rowId = store.rows()[0]!.id;
+
+    const eye = () => list.root.querySelector<HTMLButtonElement>(".gutter__eye")!;
+    expect(eye().title).toBe("hide this object");
+    eye().click();
+    expect(overlays.get(rowId)?.hidden).toBe(true);
+
+    list.refresh([]);
+    expect(eye().title).toBe("draw this object");
+    expect(eye().classList.contains("gutter__eye--off")).toBe(true);
+
+    eye().click();
+    expect(overlays.get(rowId)?.hidden).toBe(false);
+  });
+
   it("opens the colour input from the pencil", () => {
     // The input is off screen and exists for no other reason than to be opened by this click.
     const { list } = makeList(["X(u,v) = (u, v, 0)"]);
@@ -1754,6 +1790,88 @@ describe("the dot switches the object off", () => {
     expect(chip.classList.contains("chip--on")).toBe(true);
   });
 
+  it("keeps a level set in grid view across a rebuild", () => {
+    /**
+     * The bug this exists to catch. `syncOverlayControl` rewrites the overlay record for any row
+     * that is not a *parametric* patch, and it only carried across the flags it knew about — so a
+     * level set switched to grid view lost its `fill: false` on the very next refresh, and the
+     * face came back the next time anything rebuilt the scene. Turning an object off is not
+     * chart business; `fill`, `grid` and the colour map belong to anything that is drawn.
+     */
+    const overlays = new Map<RowId, SurfaceOverlay>();
+    const { store, list } = livingList(["x^2 + y^2 + z^2 = 1"], overlays);
+    const rowId = store.rows()[0]!.id;
+    expect(store.resolution().items.get(rowId)?.kind).toBe("implicitSurface");
+
+    dots(list)[0]!.click();
+    expect(overlays.get(rowId)?.fill).toBe(false);
+
+    // What rotating the object does: rebuild, refresh, rebuild again.
+    list.refresh([]);
+    list.refresh([]);
+    expect(overlays.get(rowId)?.fill).toBe(false);
+    expect(dots(list)[0]!.classList.contains("gutter__dot--off")).toBe(true);
+  });
+
+  it("gives a level set a switch for showing all of it", () => {
+    /**
+     * Its sliders are a window, not a domain — so the one request they cannot express is "as far
+     * as it goes, in every direction". The switch says that, and while it is on the sliders are
+     * visibly inert rather than silently ignored.
+     */
+    const overlays = new Map<RowId, SurfaceOverlay>();
+    const { store, list } = livingList(["x^2 + y^2 + z^2 = 1"], overlays);
+    const rowId = store.rows()[0]!.id;
+    list.select(rowId);
+
+    const body = list.card.querySelector(".props__body:not(.props__body--hidden)")!;
+    const fit = [...body.querySelectorAll<HTMLButtonElement>(".chip")].find((chip) =>
+      chip.title.includes("every direction"),
+    )!;
+    expect(fit.hidden).toBe(false);
+    fit.click();
+    expect(overlays.get(rowId)?.autoBox).toBe(true);
+    expect(body.querySelector(".row__domain")!.classList.contains("row__domain--ignored")).toBe(
+      true,
+    );
+
+    // And it survives the rebuild, like every other flag about what is drawn.
+    list.refresh([]);
+    list.refresh([]);
+    expect(overlays.get(rowId)?.autoBox).toBe(true);
+
+    fit.click();
+    expect(overlays.get(rowId)?.autoBox).toBe(false);
+  });
+
+  it("hides that switch on a patch, whose domain IS part of the surface", () => {
+    const { store, list } = livingList(["X(u,v) = (u, v, 0)"], new Map());
+    list.select(store.rows()[0]!.id);
+    const body = list.card.querySelector(".props__body:not(.props__body--hidden)")!;
+    const fit = [...body.querySelectorAll<HTMLButtonElement>(".chip")].find((chip) =>
+      chip.title.includes("every direction"),
+    )!;
+    expect(fit.hidden).toBe(true);
+  });
+
+  it("gives a level set the face and grid chips, and no chart tools", () => {
+    // A level set has a face and a grid — its grid is where the ambient coordinates cut it — and
+    // no chart, so nothing can be stated in a (u, v) it does not have.
+    const overlays = new Map<RowId, SurfaceOverlay>();
+    const { store, list } = livingList(["x^2 + y^2 + z^2 = 1"], overlays);
+    list.select(store.rows()[0]!.id);
+
+    const body = list.card.querySelector(".props__body:not(.props__body--hidden)")!;
+    const chips = [...body.querySelectorAll<HTMLButtonElement>(".chip")].filter(
+      (chip) => !chip.hidden,
+    );
+    const labels = chips.map((chip) => chip.textContent);
+    expect(labels).toContain("\u25fc");
+    expect(labels).toContain("\u25a6");
+    expect(labels).not.toContain("+ relation");
+    expect(labels).not.toContain("+ tangent");
+  });
+
   it("keeps a patch's own settings when the dot is used on it", () => {
     // The surface controls rewrite the record from their closure locals on every commit, so the
     // dot's answer has to be carried across the same way `start` is.
@@ -1875,5 +1993,188 @@ describe("every transport sets its own rate", () => {
     expect(animator.speed("param:m")).toBe(1);
     // And the other control still shows its own rate rather than following along.
     expect(speeds[1]!.value).toBe("1");
+  });
+});
+
+describe("the panel inside an ambient space", () => {
+  beforeEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  const visible = (list: { root: HTMLElement }) =>
+    [...list.root.querySelectorAll<HTMLElement>(".row")].filter(
+      (row) => !row.classList.contains("row--out-of-scope"),
+    ).length;
+
+  it("shows the object, what is stated on it, and what it is built from", () => {
+    /**
+     * Everything else belongs to a scene that is not on screen, and showing it would make the
+     * panel a list of things the stage refuses to draw. But a torus whose R and r were hidden
+     * would be a torus with half its controls missing, so the rows it is *built from* stay.
+     */
+    const { store, list } = makeList([
+      "R = 2",
+      "X(u,v) = (R sin u cos v, R sin u sin v, R cos u)",
+      "Y(u,v) = (u, v, 3)",
+      "X: (1, 2, 3)",
+    ]);
+    document.body.append(list.root, list.card);
+    list.refresh([]);
+    const before = visible(list);
+
+    list.setScope({ name: "X", rowId: store.rows()[1]!.id });
+    list.refresh([]);
+
+    const rows = [...list.root.querySelectorAll<HTMLElement>(".row")];
+    const out = (index: number) => rows[index]!.classList.contains("row--out-of-scope");
+    expect(out(0), "R is what X is built from").toBe(false);
+    expect(out(1), "X itself").toBe(false);
+    expect(out(2), "Y belongs to another space").toBe(true);
+    expect(out(3), "the point is stated on X").toBe(false);
+
+    // And leaving puts everything back, without rebuilding a thing.
+    list.setScope(null);
+    list.refresh([]);
+    expect(visible(list)).toBe(before);
+  });
+
+  it("keeps the cell you are writing in visible", () => {
+    /**
+     * The bug this exists to catch: membership was read off the resolution, and a row being typed
+     * has no item — `X: ` alone resolves to nothing, and neither does half a formula. So the cell
+     * vanished at the exact moment somebody wrote in it, which made ambient space impossible to
+     * type into. The prefix is text, so the text is what decides.
+     */
+    const { store, list } = makeList(["X(u,v) = (u, v, 0)"]);
+    document.body.append(list.root, list.card);
+    list.refresh([]);
+    list.setScope({ name: "X", rowId: store.rows()[0]!.id });
+    list.refresh([]);
+
+    const cell = () =>
+      [...list.root.querySelectorAll<HTMLElement>(".row")].find(
+        (row) => row.querySelector("textarea")?.value.startsWith("X: "),
+      )!;
+    expect(cell().classList.contains("row--out-of-scope")).toBe(false);
+
+    // Half-written, and still on screen.
+    const input = cell().querySelector("textarea")!;
+    input.value = "X: alpha(t) = (cos t,";
+    store.rows().at(-1)!.source.set(input.value);
+    list.refresh([]);
+    expect(cell().classList.contains("row--out-of-scope")).toBe(false);
+
+    // Finished, and still on screen — now as a row of the space.
+    store.rows().at(-1)!.source.set("X: alpha(t) = (cos t, sin t, t)");
+    list.refresh([]);
+    const finished = [...list.root.querySelectorAll<HTMLElement>(".row")].find(
+      (row) => row.querySelector("textarea")?.value.includes("alpha"),
+    )!;
+    expect(finished.classList.contains("row--out-of-scope")).toBe(false);
+  });
+
+  it("makes a space from the panel, and offers the way into it there", () => {
+    /**
+     * A space draws nothing of itself, so it is the one object that cannot be entered by
+     * double-clicking it on the stage: the arrow lives on its cell. Spaces are numbered A_1,
+     * A_2, … as they are made, which is how anyone refers to them.
+     */
+    const opened: RowId[] = [];
+    const { store, list } = makeList([], { onEnterSpace: (id: RowId) => opened.push(id) });
+    document.body.append(list.root, list.card);
+    list.refresh([]);
+
+    const add = [...list.root.querySelectorAll<HTMLButtonElement>(".cells__action")].find(
+      (button) => button.textContent === "+ space",
+    )!;
+    const spaces = () => store.rows().filter((row) => row.source().includes("AmbientSpace"));
+    add.click();
+    expect(spaces().map((row) => row.source())).toEqual(["A_1 = AmbientSpace"]);
+    add.click();
+    expect(spaces().map((row) => row.source())).toEqual([
+      "A_1 = AmbientSpace",
+      "A_2 = AmbientSpace",
+    ]);
+
+    list.refresh([]);
+    const arrows = [...list.root.querySelectorAll<HTMLButtonElement>(".row__enter")];
+    const shown = arrows.filter((arrow) => !arrow.hidden);
+    expect(shown, "one per space, and none on anything else").toHaveLength(2);
+    shown[0]!.click();
+    expect(opened).toEqual([spaces()[0]!.id]);
+  });
+
+  it("scopes the panel to a space, and to the rows addressed inside it", () => {
+    const { store, list } = makeList([
+      "A = AmbientSpace",
+      "B = AmbientSpace",
+      "A: sigma(u,v) = (u, v, 0)",
+      "A:sigma: u + v = 1",
+      "B: tau(u,v) = (u, v, 1)",
+    ]);
+    document.body.append(list.root, list.card);
+    list.refresh([]);
+    list.setScope({ name: "A", rowId: store.rows()[0]!.id });
+    list.refresh([]);
+
+    const rows = [...list.root.querySelectorAll<HTMLElement>(".row")];
+    const out = (index: number) => rows[index]!.classList.contains("row--out-of-scope");
+    expect(out(0), "A itself").toBe(false);
+    expect(out(2), "the chart written in A").toBe(false);
+    expect(out(3), "the relation addressed A:sigma:").toBe(false);
+    expect(out(1), "the other space").toBe(true);
+    expect(out(4), "and what is in it").toBe(true);
+
+    // A new cell in A already says so, which is what makes anything typed there land in A.
+    expect(store.rows().at(-1)!.source()).toBe("A: ");
+  });
+
+  it("keeps a surface written in the space, and what is stated on that surface", () => {
+    /**
+     * A space you cannot build in is a viewer. Writing a second surface inside X's space puts it
+     * there, and a field stated on *that* surface is stated on something in the space, so it is in
+     * the space too — one level of host would show the new patch and hide everything drawn on it.
+     * A slider stays whatever happens: a number belongs to the document, not to any one object.
+     */
+    const { store, list } = makeList([
+      "X(u,v) = (u, v, 0)",
+      "X: Y(u,v) = (u, v, 2)",
+      "Y: VectorField(1, 0, 0)",
+      "k = 3",
+      "Z(u,v) = (u, v, 5)",
+    ]);
+    document.body.append(list.root, list.card);
+    list.refresh([]);
+    list.setScope({ name: "X", rowId: store.rows()[0]!.id });
+    list.refresh([]);
+
+    const rows = [...list.root.querySelectorAll<HTMLElement>(".row")];
+    const out = (index: number) => rows[index]!.classList.contains("row--out-of-scope");
+    expect(out(0), "X itself").toBe(false);
+    expect(out(1), "Y is written in X's space").toBe(false);
+    expect(out(2), "the field is stated on Y").toBe(false);
+    expect(out(3), "a number belongs to the document").toBe(false);
+    expect(out(4), "Z is another object entirely").toBe(true);
+  });
+
+  it("starts a new cell in the space it is written in", () => {
+    // Everything typed inside an ambient space belongs to it, so the empty cell says so before
+    // you type — the same thing the "+ relation" button does, applied to the cell that is always
+    // there.
+    const { store, list } = makeList(["X(u,v) = (u, v, 0)"]);
+    document.body.append(list.root, list.card);
+    list.refresh([]);
+
+    list.setScope({ name: "X", rowId: store.rows()[0]!.id });
+    list.refresh([]);
+    expect(store.rows().at(-1)!.source()).toBe("X: ");
+
+    // And a bare prefix still counts as empty, so trailing cells collapse as they always did.
+    list.refresh([]);
+    list.refresh([]);
+    expect(store.rows().filter((row) => row.source() === "X: ")).toHaveLength(1);
+
+    list.setScope(null);
+    expect(store.rows().at(-1)!.source()).toBe("");
   });
 });

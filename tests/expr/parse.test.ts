@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { Ctx, nodeCount, freeVars, type Expr } from "../../src/core/expr/ast.ts";
-import { parse, parseRow, splitHost } from "../../src/core/expr/parse.ts";
+import { parse, parseRow, splitHost, splitScope } from "../../src/core/expr/parse.ts";
 import { toSource, toPython } from "../../src/core/expr/print.ts";
 
 /** Parse, asserting success, and return the printed source. */
@@ -562,5 +562,45 @@ describe("a vector field along a patch", () => {
     const source = "X: VectorField(1, 2 @ 3, 0)";
     const span = parseRow(source).diags.find((d) => d.severity === "error")?.span;
     expect(source.slice(span![0], span![1])).toBe("@");
+  });
+});
+
+describe("scope prefixes", () => {
+  it("reads a chain of them, outermost first", () => {
+    // `:` is this language's `.`: A is a space, sigma a chart in it, and the row is stated in
+    // both. The innermost segment is the chart, which is what most of the app asks for.
+    const { path, host, body } = splitScope("A:sigma: u + v = 1");
+    expect(path).toEqual(["A", "sigma"]);
+    expect(host).toBe("sigma");
+    expect(body.trimStart()).toBe("u + v = 1");
+    // Blanked, not cut: every diagnostic's offsets still land on the column the user typed in.
+    expect(body).toHaveLength("A:sigma: u + v = 1".length);
+  });
+
+  it("treats a repeated colon as one step", () => {
+    // `A:sigma::k` is a natural thing to type for "one level further in", and it addresses
+    // exactly what `A:sigma:k` addresses.
+    expect(splitScope("A:sigma::k").path).toEqual(["A", "sigma"]);
+    expect(splitScope("A:sigma:k").path).toEqual(["A", "sigma"]);
+  });
+
+  it("leaves an unprefixed row alone", () => {
+    const { path, host, body } = splitScope("u + v = 1");
+    expect(path).toEqual([]);
+    expect(host).toBeNull();
+    expect(body).toBe("u + v = 1");
+  });
+
+  it("recognizes an ambient space before the lexer sees it", () => {
+    /**
+     * `AmbientSpace` on the right of an `=` would lex as a product of twelve single-letter
+     * variables, so the form is peeled off first — the same reason `VectorField(…)` and `T_(…)`
+     * are. The name may carry a subscript, since spaces are handed out as A_1, A_2, …
+     */
+    expect(parseRow("A_1 = AmbientSpace").row).toEqual({ kind: "ambientSpace", name: "A_1" });
+    expect(parseRow("A = ambient space").row).toEqual({ kind: "ambientSpace", name: "A" });
+    expect(parseRow("A = AmbientSpace()").row).toEqual({ kind: "ambientSpace", name: "A" });
+    // And it is a form, not a spelling of a product: `A = R^3` is still arithmetic.
+    expect(parseRow("A = R^3").row?.kind).toBe("value");
   });
 });

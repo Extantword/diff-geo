@@ -56,8 +56,11 @@ uniform vec3 uEye;
 uniform float uCurvatureMix;
 out vec4 fragColor;
 
-const vec3 LIGHT_KEY_DIR   = normalize(vec3( 5.0, 8.0,  3.0));
-const vec3 LIGHT_FILL_DIR  = normalize(vec3(-4.0,-2.0, -5.0));
+/* Above means +z, like everything else here: the camera's up is z because the mathematics puts
+   every axis of symmetry there, and a key light left on +y would rake across each surface from
+   the side instead of falling on it. */
+const vec3 LIGHT_KEY_DIR   = normalize(vec3( 5.0, 3.0,  8.0));
+const vec3 LIGHT_FILL_DIR  = normalize(vec3(-4.0,-5.0, -2.0));
 /**
  * Lighting gains, chosen so the total multiplier never exceeds 1.
  *
@@ -69,6 +72,23 @@ const vec3 LIGHT_FILL_DIR  = normalize(vec3(-4.0,-2.0, -5.0));
 const float AMBIENT = 0.52;
 const float KEY     = 0.36;
 const float FILL    = 0.12;
+
+/**
+ * A small specular highlight, and why a matte surface wanted one.
+ *
+ * Diffuse shading is a function of the normal alone, so two surfaces with the same normals at the
+ * eye look identical however differently they curve away — a sphere and a paraboloid shade almost
+ * the same from in front. A highlight is a function of the normal's **derivative** as much as the
+ * normal: it compresses where curvature is high and stretches where it is low, so it draws the
+ * shape of the bend rather than the tilt of the surface. That is worth a lot on a page about
+ * curvature.
+ *
+ * Kept deliberately faint. On a white background a face that saturates is a face that has
+ * disappeared, so this is a sheen at a broad exponent rather than a plastic dot, and the diffuse
+ * term is scaled back by exactly what the highlight can add so the maximum stays where it was.
+ */
+const float SPECULAR = 0.09;
+const float SHININESS = 24.0;
 
 void main() {
   /**
@@ -104,7 +124,15 @@ void main() {
      draw. Same shape of falloff, opposite sign. */
   float rim = pow(1.0 - max(dot(n, viewDir), 0.0), 3.0) * 0.30;
 
-  vec3 color = albedo * (AMBIENT + KEY * key + FILL * fill) * (1.0 - rim);
+  /* Blinn–Phong, on the key light only: a second highlight would say something about the lighting
+     rig rather than about the surface. */
+  vec3 halfway = normalize(LIGHT_KEY_DIR + viewDir);
+  /* The name here is NOT half: that is a reserved word in GLSL ES and will not compile — a
+     failure nothing in the suite can see, since node has no GL context. See tests/gl/shaders. */
+  float sheen = SPECULAR * pow(max(dot(n, halfway), 0.0), SHININESS) * step(1e-6, key);
+
+  vec3 color = albedo * (AMBIENT + KEY * key + FILL * fill) * (1.0 - SPECULAR) * (1.0 - rim)
+             + sheen;
 
   fragColor = vec4(color, 1.0);
 }
